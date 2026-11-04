@@ -8,7 +8,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::header::{HeaderError, NoteHeader, format_header, read_header, set_title};
+use crate::header::{HeaderError, NoteHeader, format_header, header_in, set_title};
+use crate::links::{LinkDisplay, LinkTarget, WikiLink, link_library, links_in};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -17,6 +18,8 @@ use crate::Address;
 const NOTES_DIR: &str = "notes";
 const META_DIR: &str = ".sliver";
 const TMP_DIR: &str = ".sliver/tmp";
+const PKG_DIR: &str = ".sliver/pkg";
+const WORKSPACE_FILE: &str = ".sliver/workspace.json";
 const EXTENSION: &str = "typ";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -73,6 +76,7 @@ pub enum VaultError {
     NoAddress(Uuid),
     Header(HeaderError),
     Trash(String),
+    InvalidPackage(String),
 }
 
 impl fmt::Display for VaultError {
@@ -89,6 +93,7 @@ impl fmt::Display for VaultError {
             Self::NoAddress(id) => write!(f, "note {id} has no Zettelkasten address"),
             Self::Header(err) => write!(f, "{err}"),
             Self::Trash(err) => write!(f, "could not move note to trash: {err}"),
+            Self::InvalidPackage(spec) => write!(f, "invalid package spec: {spec}"),
         }
     }
 }
@@ -112,6 +117,8 @@ pub type Result<T> = std::result::Result<T, VaultError>;
 pub struct Vault {
     root: PathBuf,
     notes: HashMap<Uuid, NoteSummary>,
+    /// Outgoing wikilinks per note, for backlinks.
+    links: HashMap<Uuid, Vec<WikiLink>>,
 }
 
 impl Vault {
@@ -126,6 +133,7 @@ impl Vault {
         Ok(Self {
             root,
             notes: HashMap::new(),
+            links: HashMap::new(),
         })
     }
 
@@ -135,8 +143,12 @@ impl Vault {
         if !root.join(META_DIR).is_dir() || !root.join(NOTES_DIR).is_dir() {
             return Err(VaultError::NotAVault(root));
         }
-        let mut notes = HashMap::new();
-        for entry in fs::read_dir(root.join(NOTES_DIR))? {
+        let mut vault = Self {
+            root,
+            notes: HashMap::new(),
+            links: HashMap::new(),
+        };
+        for entry in fs::read_dir(vault.root.join(NOTES_DIR))? {
             let path = entry?.path();
             if path.extension().and_then(|e| e.to_str()) != Some(EXTENSION) {
                 continue;
@@ -148,9 +160,9 @@ impl Vault {
             else {
                 continue;
             };
-            notes.insert(id, summarize(id, &fs::read_to_string(&path)?));
+            vault.index(id, &fs::read_to_string(&path)?);
         }
-        Ok(Self { root, notes })
+        Ok(vault)
     }
 
     pub fn root(&self) -> &Path {
@@ -265,6 +277,7 @@ impl Vault {
             DeleteMode::Permanent => fs::remove_file(&path)?,
         }
         self.notes.remove(&id);
+        self.links.remove(&id);
         Ok(())
     }
 
@@ -296,40 +309,147 @@ impl Vault {
         Ok(Some(candidate))
     }
 
+    /// Resolves a wikilink target: an address first, then a uuid.
+    pub fn resolve(&self, target: &str) -> Option<Uuid> {
+        if let Ok(address) = target.parse::<Address>() {
+            let mut matches: Vec<Uuid> = self
+                .notes
+                .values()
+                .filter(|n| {
+                    n.address.as_deref().and_then(|a| a.parse().ok()) == Some(address.clone())
+                })
+                .map(|n| n.id)
+                .collect();
+            matches.sort();
+            return matches.first().copied();
+        }
+        let id = Uuid::parse_str(target).ok()?;
+        self.notes.contains_key(&id).then_some(id)
+    }
+
+    pub fn links_from(&self, id: Uuid) -> Result<&[WikiLink]> {
+        self.note(id)?;
+        Ok(self.links.get(&id).map_or(&[], Vec::as_slice))
+    }
+
+    /// Notes with at least one wikilink resolving to `id`, in tree order.
+    pub fn backlinks(&self, id: Uuid) -> Result<Vec<NoteSummary>> {
+        self.note(id)?;
+        let mut sources: Vec<NoteSummary> = self
+            .links
+            .iter()
+            .filter(|(source, links)| {
+                **source != id && links.iter().any(|l| self.resolve(&l.target) == Some(id))
+            })
+            .map(|(source, _)| self.notes[source].clone())
+            .collect();
+        sources.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        Ok(sources)
+    }
+
+    /// Source of `/.sliver/links.typ` for the preview; see [`link_library`].
+    pub fn link_library(&self, display: LinkDisplay) -> String {
+        let mut notes: Vec<&NoteSummary> = self.notes.values().collect();
+        notes.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        link_library(
+            notes.into_iter().map(|n| LinkTarget {
+                id: n.id.to_string(),
+                title: n.title.as_deref(),
+                address: n.address.as_deref(),
+            }),
+            display,
+        )
+    }
+
+    fn index(&mut self, id: Uuid, text: &str) -> &NoteSummary {
+        let root = typst_syntax::parse(text);
+        let (header, header_error) = match header_in(&root) {
+            Ok(header) => (header.unwrap_or_default(), None),
+            Err(err) => (NoteHeader::default(), Some(err.to_string())),
+        };
+        self.links.insert(id, links_in(&root));
+        self.notes.insert(
+            id,
+            NoteSummary {
+                id,
+                title: header.title,
+                address: header.address,
+                tags: header.tags,
+                header_error,
+            },
+        );
+        &self.notes[&id]
+    }
+
     fn note_path(&self, id: Uuid) -> PathBuf {
         self.root.join(NOTES_DIR).join(format!("{id}.{EXTENSION}"))
     }
 
-    /// Writes via a temp file in the vault and a rename, so a crash never
-    /// leaves a half-written note.
     fn write_file(&mut self, id: Uuid, text: &str) -> Result<NoteSummary> {
+        self.atomic_write(&self.note_path(id), text.as_bytes())?;
+        Ok(self.index(id, text).clone())
+    }
+
+    /// Writes via a temp file in `.sliver/tmp/` and a rename (same volume), so
+    /// a crash never leaves a half-written file.
+    fn atomic_write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         let tmp_dir = self.root.join(TMP_DIR);
         fs::create_dir_all(&tmp_dir)?;
-        let tmp = tmp_dir.join(format!("{id}.{EXTENSION}"));
+        let tmp = tmp_dir.join(Uuid::new_v4().to_string());
         let mut file = fs::File::create(&tmp)?;
-        file.write_all(text.as_bytes())?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, self.note_path(id))?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
 
-        let summary = summarize(id, text);
-        self.notes.insert(id, summary.clone());
-        Ok(summary)
+    /// `.sliver/pkg/<namespace>/<name>-<version>.tar.gz`, as downloaded.
+    fn package_path(&self, spec: &str) -> Result<PathBuf> {
+        let spec: typst_syntax::package::PackageSpec = spec
+            .parse()
+            .map_err(|_| VaultError::InvalidPackage(spec.to_owned()))?;
+        Ok(self
+            .root
+            .join(PKG_DIR)
+            .join(spec.namespace.as_str())
+            .join(format!("{}-{}.tar.gz", spec.name, spec.version)))
+    }
+
+    /// Per-vault UI state (open tabs and so on) as JSON owned by the frontend.
+    pub fn load_workspace(&self) -> Result<Option<String>> {
+        match fs::read_to_string(self.root.join(WORKSPACE_FILE)) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn save_workspace(&self, json: &str) -> Result<()> {
+        self.atomic_write(&self.root.join(WORKSPACE_FILE), json.as_bytes())
+    }
+
+    /// The cached `.tar.gz` for `spec`, if this vault has downloaded it before.
+    pub fn load_package(&self, spec: &str) -> Result<Option<Vec<u8>>> {
+        match fs::read(self.package_path(spec)?) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn save_package(&self, spec: &str, tar_gz: &[u8]) -> Result<()> {
+        self.atomic_write(&self.package_path(spec)?, tar_gz)
     }
 }
 
-fn summarize(id: Uuid, text: &str) -> NoteSummary {
-    let (header, header_error) = match read_header(text) {
-        Ok(header) => (header.unwrap_or_default(), None),
-        Err(err) => (NoteHeader::default(), Some(err.to_string())),
-    };
-    NoteSummary {
-        id,
-        title: header.title,
-        address: header.address,
-        tags: header.tags,
-        header_error,
-    }
+/// Addressed notes in address order, then the rest by title; ties by id.
+fn sort_key(note: &NoteSummary) -> (bool, Option<Address>, Option<&str>, Uuid) {
+    let address = note.address.as_deref().and_then(|a| a.parse().ok());
+    (address.is_none(), address, note.title.as_deref(), note.id)
 }
 
 #[cfg(test)]
@@ -465,5 +585,122 @@ mod tests {
             Err(VaultError::NoteNotFound(_))
         ));
         assert!(!vault.note_path(note.id).exists());
+    }
+    fn render(vault: &Vault, id: Uuid) -> (String, Vec<String>) {
+        let mut engine = sliver_typst::Engine::new();
+        engine
+            .set_source(crate::LINKS_PATH, &vault.link_library(LinkDisplay::Title))
+            .unwrap();
+        for note in vault.notes() {
+            let path = format!("/notes/{}.typ", note.id);
+            engine
+                .set_source(&path, &vault.read_note(note.id).unwrap())
+                .unwrap();
+        }
+        engine
+            .set_source("/.sliver/main.typ", &crate::preview_main(&id.to_string()))
+            .unwrap();
+        let out = engine.compile("/.sliver/main.typ").unwrap();
+        let messages = out.diagnostics.iter().map(|d| d.message.clone()).collect();
+        (out.pages.concat(), messages)
+    }
+
+    #[test]
+    fn resolves_links_and_computes_backlinks() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let a = vault.create_note(Some("A".into()), Placement::Top).unwrap();
+        let b = vault
+            .create_note(Some("B".into()), Placement::Branch { of: a.id })
+            .unwrap();
+        let loose = vault
+            .create_note(Some("Loose".into()), Placement::Unaddressed)
+            .unwrap();
+        vault
+            .write_note(
+                a.id,
+                &format!(
+                    "#metadata((address: \"1\")) <note>\n[[1.1]] and [[{}|loose one]] and [[9.9]]",
+                    loose.id
+                ),
+            )
+            .unwrap();
+        vault
+            .write_note(
+                b.id,
+                "#metadata((address: \"1.1\")) <note>\n[[1]] and `[[1.1]]`",
+            )
+            .unwrap();
+
+        assert_eq!(vault.resolve("1.1"), Some(b.id));
+        assert_eq!(vault.resolve(&loose.id.to_string()), Some(loose.id));
+        assert_eq!(vault.resolve("9.9"), None);
+        assert_eq!(vault.links_from(a.id).unwrap().len(), 3);
+        let ids = |notes: Vec<NoteSummary>| notes.into_iter().map(|n| n.id).collect::<Vec<_>>();
+        assert_eq!(ids(vault.backlinks(b.id).unwrap()), vec![a.id]);
+        assert_eq!(ids(vault.backlinks(loose.id).unwrap()), vec![a.id]);
+        assert_eq!(ids(vault.backlinks(a.id).unwrap()), vec![b.id]);
+
+        let reopened = Vault::open(&dir.0).unwrap();
+        assert_eq!(ids(reopened.backlinks(b.id).unwrap()), vec![a.id]);
+    }
+
+    #[test]
+    fn preview_renders_wikilinks_as_note_links() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let a = vault.create_note(Some("A".into()), Placement::Top).unwrap();
+        let b = vault
+            .create_note(
+                Some("Quote \" title".into()),
+                Placement::Branch { of: a.id },
+            )
+            .unwrap();
+        vault
+            .write_note(
+                a.id,
+                "#metadata((title: \"A\", address: \"1\")) <note>\n[[1.1]] [[1.1|custom]] [[9.9]] `[[1.1]]`",
+            )
+            .unwrap();
+
+        let (svg, diagnostics) = render(&vault, a.id);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let href = format!("href=\"sliver://{}\"", b.id);
+        // Typst SVG writes each link as two anchors (href and xlink:href).
+        assert_eq!(svg.matches(&href).count(), 2 * 2, "only the two real links");
+        assert!(!svg.contains("sliver://9.9"));
+
+        let before = svg.clone();
+        vault.rename_note(b.id, "Renamed").unwrap();
+        assert_ne!(
+            render(&vault, a.id).0,
+            before,
+            "title change re-renders the link"
+        );
+    }
+    #[test]
+    fn stores_packages_by_spec() {
+        let dir = TempDir::new();
+        let vault = Vault::create(&dir.0).unwrap();
+        assert_eq!(vault.load_package("@preview/demo:0.1.0").unwrap(), None);
+        vault.save_package("@preview/demo:0.1.0", b"gz").unwrap();
+        assert_eq!(
+            vault.load_package("@preview/demo:0.1.0").unwrap(),
+            Some(b"gz".to_vec())
+        );
+        assert!(
+            dir.0
+                .join(".sliver/pkg/preview/demo-0.1.0.tar.gz")
+                .is_file()
+        );
+        for bad in ["demo", "@preview/../x:0.1.0", "@preview/demo:latest"] {
+            assert!(
+                matches!(
+                    vault.save_package(bad, b""),
+                    Err(VaultError::InvalidPackage(_))
+                ),
+                "{bad}"
+            );
+        }
     }
 }

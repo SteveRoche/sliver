@@ -44,8 +44,12 @@ impl std::error::Error for HeaderError {}
 
 /// Returns the first `#metadata((..)) <note>` in the note, if any.
 pub fn read_header(text: &str) -> Result<Option<NoteHeader>, HeaderError> {
-    let root = typst_syntax::parse(text);
-    match find_header(&root) {
+    header_in(&typst_syntax::parse(text))
+}
+
+/// Like [`read_header`], for a tree that is already parsed.
+pub fn header_in(root: &SyntaxNode) -> Result<Option<NoteHeader>, HeaderError> {
+    match find_header(root) {
         Some(call) => header_from_dict(header_dict(call)?).map(Some),
         None => Ok(None),
     }
@@ -137,7 +141,7 @@ fn header_dict(call: ast::FuncCall<'_>) -> Result<ast::Dict<'_>, HeaderError> {
     }
 }
 
-fn string_literal(value: &str) -> String {
+pub(crate) fn string_literal(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for c in value.chars() {

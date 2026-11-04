@@ -1,45 +1,55 @@
-import { createSignal } from "solid-js";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { createSignal, Match, onCleanup, onMount, Switch } from "solid-js";
 import "./App.css";
-import { Editor } from "./components/Editor";
-import { Preview } from "./components/Preview";
-import { livePreview, TypstClient } from "./typst/client";
-import type { Diagnostic } from "./typst/protocol";
-
-const MAIN = "/main.typ";
-
-const SAMPLE = `= Sliver
-
-Type on the left; the preview updates as you go.
-
-$ sum_(i=1)^n i = (n(n+1)) / 2 $
-
-- Typst *markup*
-- _Live_ preview
-`;
+import { registerAppCommands } from "./commands/app";
+import { installKeybindings } from "./commands/registry";
+import { Palette } from "./components/Palette";
+import { PromptHost } from "./components/Prompt";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { Welcome } from "./components/Welcome";
+import { Workspace } from "./components/Workspace";
+import { loadSettings } from "./state/settings";
+import { flushAll, openVault, vaultRoot } from "./state/workspace";
+import { vault } from "./vault/api";
 
 function App() {
-  const [pages, setPages] = createSignal<string[]>([]);
-  const [diagnostics, setDiagnostics] = createSignal<Diagnostic[]>([]);
+  const [starting, setStarting] = createSignal(true);
 
-  const update = livePreview(
-    new TypstClient(),
-    MAIN,
-    (result) => {
-      if (result.pages.length > 0) setPages(result.pages);
-      setDiagnostics(result.diagnostics);
-    },
-    (error) =>
-      setDiagnostics([
-        { severity: "error", message: error.message, hints: [] },
-      ]),
-  );
-  update(SAMPLE);
+  onMount(async () => {
+    onCleanup(registerAppCommands());
+    onCleanup(installKeybindings());
+    // Unsaved edits are written before the window goes away.
+    const unlisten = getCurrentWindow().onCloseRequested(() => flushAll());
+    onCleanup(() => void unlisten.then((f) => f()));
+
+    try {
+      await loadSettings();
+      const last = await vault.last();
+      if (last) await openVault(last);
+    } catch (error) {
+      console.warn("could not reopen the last vault:", error);
+    } finally {
+      setStarting(false);
+    }
+  });
 
   return (
-    <main class="split">
-      <Editor initialDoc={SAMPLE} onChange={update} />
-      <Preview pages={pages()} diagnostics={diagnostics()} />
-    </main>
+    <>
+      <Switch>
+        <Match when={starting()}>
+          <main class="welcome" />
+        </Match>
+        <Match when={vaultRoot()}>
+          <Workspace />
+        </Match>
+        <Match when={!vaultRoot()}>
+          <Welcome />
+        </Match>
+      </Switch>
+      <Palette />
+      <PromptHost />
+      <SettingsDialog />
+    </>
   );
 }
 

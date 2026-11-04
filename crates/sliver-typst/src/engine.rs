@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Mutex;
 
-use typst::diag::{FileError, FileResult, SourceDiagnostic};
+use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::package::PackageSpec;
 use typst::syntax::{DiagSpan, FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -21,6 +22,9 @@ pub struct Engine {
     book: LazyHash<FontBook>,
     fonts: Vec<Font>,
     sources: HashMap<FileId, Source>,
+    /// Non-UTF-8 files (images, fonts, data) from packages.
+    binaries: HashMap<FileId, Bytes>,
+    packages: HashSet<PackageSpec>,
     /// Files each main file read during its last compile.
     deps: HashMap<FileId, HashSet<FileId>>,
 }
@@ -36,12 +40,27 @@ impl fmt::Display for InvalidPath {
 
 impl std::error::Error for InvalidPath {}
 
+#[derive(Debug)]
+pub struct InvalidPackage(pub String);
+
+impl fmt::Display for InvalidPackage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid package: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidPackage {}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone)]
 pub struct CompileOutput {
     /// One SVG per page. Empty when compilation failed.
     pub pages: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Packages the document imports that aren't loaded yet, as
+    /// `@namespace/name:version`. Load them with `add_package` and recompile.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = missingPackages))]
+    pub missing_packages: Vec<String>,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
@@ -92,6 +111,8 @@ impl Engine {
             book: LazyHash::new(FontBook::from_fonts(&fonts)),
             fonts,
             sources: HashMap::new(),
+            binaries: HashMap::new(),
+            packages: HashSet::new(),
             deps: HashMap::new(),
         }
     }
@@ -117,6 +138,35 @@ impl Engine {
         Ok(())
     }
 
+    /// Loads a package from its uncompressed tar archive.
+    pub fn add_package(&mut self, spec: &str, tar: &[u8]) -> Result<(), InvalidPackage> {
+        let spec: PackageSpec = spec
+            .parse()
+            .map_err(|e| InvalidPackage(format!("{spec}: {e}")))?;
+        let entries =
+            crate::tar::entries(tar).map_err(|e| InvalidPackage(format!("{spec}: {e}")))?;
+        for (path, data) in entries {
+            let vpath =
+                VirtualPath::new(&path).map_err(|_| InvalidPackage(format!("{spec}: {path}")))?;
+            let id = RootedPath::new(VirtualRoot::Package(spec.clone()), vpath).intern();
+            match std::str::from_utf8(data) {
+                Ok(text) => {
+                    self.sources.insert(id, Source::new(id, text.to_owned()));
+                }
+                Err(_) => {
+                    self.binaries.insert(id, Bytes::new(data.to_vec()));
+                }
+            }
+        }
+        self.packages.insert(spec);
+        Ok(())
+    }
+
+    pub fn has_package(&self, spec: &str) -> bool {
+        spec.parse::<PackageSpec>()
+            .is_ok_and(|spec| self.packages.contains(&spec))
+    }
+
     /// Main files whose last compile read `path`, i.e. the tabs to recompile
     /// after it changes.
     pub fn affected_mains(&self, path: &str) -> Result<Vec<String>, InvalidPath> {
@@ -135,6 +185,7 @@ impl Engine {
             engine: self,
             main,
             accessed: Mutex::default(),
+            missing: Mutex::default(),
         };
 
         let warned = typst::compile::<PagedDocument>(&world);
@@ -158,11 +209,23 @@ impl Engine {
             }
         };
 
+        let mut missing_packages: Vec<String> = world
+            .missing
+            .into_inner()
+            .unwrap_or_default()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        missing_packages.sort();
         let accessed = world.accessed.into_inner().unwrap_or_default();
         self.deps.insert(main, accessed);
         typst::comemo::evict(10);
 
-        Ok(CompileOutput { pages, diagnostics })
+        Ok(CompileOutput {
+            pages,
+            diagnostics,
+            missing_packages,
+        })
     }
 }
 
@@ -211,6 +274,7 @@ struct CompileWorld<'a> {
     engine: &'a Engine,
     main: FileId,
     accessed: Mutex<HashSet<FileId>>,
+    missing: Mutex<HashSet<PackageSpec>>,
 }
 
 impl CompileWorld<'_> {
@@ -220,12 +284,24 @@ impl CompileWorld<'_> {
         }
     }
 
+    fn not_found(&self, id: FileId) -> FileError {
+        if let VirtualRoot::Package(spec) = id.root()
+            && !self.engine.packages.contains(spec)
+        {
+            if let Ok(mut missing) = self.missing.lock() {
+                missing.insert(spec.clone());
+            }
+            return FileError::Package(PackageError::NotFound(spec.clone()));
+        }
+        FileError::NotFound(id.vpath().get_without_slash().into())
+    }
+
     fn lookup(&self, id: FileId) -> FileResult<&Source> {
         self.record(id);
         self.engine
             .sources
             .get(&id)
-            .ok_or_else(|| FileError::NotFound(id.vpath().get_without_slash().into()))
+            .ok_or_else(|| self.not_found(id))
     }
 }
 
@@ -247,6 +323,10 @@ impl World for CompileWorld<'_> {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
+        if let Some(bytes) = self.engine.binaries.get(&id) {
+            self.record(id);
+            return Ok(bytes.clone());
+        }
         self.lookup(id)
             .map(|source| Bytes::from_string(source.clone()))
     }
@@ -327,5 +407,32 @@ mod tests {
         let out = engine.compile("/main.typ").unwrap();
         assert_eq!(out.pages.len(), 1);
         assert!(out.diagnostics.is_empty());
+    }
+    #[test]
+    fn reports_and_loads_missing_packages() {
+        let mut engine = Engine::new();
+        engine
+            .set_source(
+                "/main.typ",
+                "#import \"@preview/demo:0.1.0\": hello\n#hello",
+            )
+            .unwrap();
+        let out = engine.compile("/main.typ").unwrap();
+        assert!(out.pages.is_empty());
+        assert_eq!(out.missing_packages, vec!["@preview/demo:0.1.0"]);
+
+        let tar = crate::tar::tests::archive(&[
+            (
+                "typst.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
+            ),
+            ("lib.typ", "#let hello = [Hello]"),
+        ]);
+        engine.add_package("@preview/demo:0.1.0", &tar).unwrap();
+        assert!(engine.has_package("@preview/demo:0.1.0"));
+        let out = engine.compile("/main.typ").unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.missing_packages.is_empty());
+        assert_eq!(out.pages.len(), 1);
     }
 }

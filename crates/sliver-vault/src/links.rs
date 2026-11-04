@@ -1,0 +1,252 @@
+//! Wikilinks: `[[target]]` and `[[target|text]]`, where the target is a
+//! Zettelkasten address or a note uuid.
+//!
+//! In the source they are plain Typst text, so notes compile anywhere. In the
+//! app, each note is compiled through [`preview_main`], whose `wikilinks` show
+//! rule (from the generated [`link_library`]) turns them into `sliver://<uuid>`
+//! links labelled with the target's current title. The syntax-tree scan here
+//! is what backlinks use; it only accepts plain text between the brackets,
+//! which is also all the show rule's regex can match.
+
+use std::ops::Range;
+
+use serde::Serialize;
+use typst_syntax::{SyntaxKind, SyntaxNode};
+
+use crate::header::string_literal;
+
+pub const LINKS_PATH: &str = "/.sliver/links.typ";
+pub const LINK_SCHEME: &str = "sliver://";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WikiLink {
+    pub target: String,
+    pub text: Option<String>,
+    /// Byte range in the source, brackets included.
+    pub range: Range<usize>,
+}
+
+/// How resolved links are labelled when they have no custom text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinkDisplay {
+    #[default]
+    Title,
+    Address,
+}
+
+/// One entry of the generated link table.
+pub struct LinkTarget<'a> {
+    pub id: String,
+    pub title: Option<&'a str>,
+    pub address: Option<&'a str>,
+}
+
+pub fn links_in(root: &SyntaxNode) -> Vec<WikiLink> {
+    let mut out = Vec::new();
+    walk(root, 0, &mut out);
+    out
+}
+
+fn walk(node: &SyntaxNode, offset: usize, out: &mut Vec<WikiLink>) {
+    if node.kind() == SyntaxKind::Markup {
+        scan_markup(node, offset, out);
+    }
+    let mut child_offset = offset;
+    for child in node.children() {
+        walk(child, child_offset, out);
+        child_offset += child.len();
+    }
+}
+
+fn is_text(node: &SyntaxNode, text: &str) -> bool {
+    node.kind() == SyntaxKind::Text && node.leaf_text() == text
+}
+
+fn scan_markup(markup: &SyntaxNode, offset: usize, out: &mut Vec<WikiLink>) {
+    let children: Vec<&SyntaxNode> = markup.children().collect();
+    let mut offsets = Vec::with_capacity(children.len() + 1);
+    let mut at = offset;
+    for child in &children {
+        offsets.push(at);
+        at += child.len();
+    }
+    offsets.push(at);
+
+    let mut i = 0;
+    while i + 1 < children.len() {
+        if !(is_text(children[i], "[") && is_text(children[i + 1], "[")) {
+            i += 1;
+            continue;
+        }
+        let mut inner = String::new();
+        let mut j = i + 2;
+        let close = loop {
+            match children.get(j) {
+                Some(n)
+                    if is_text(n, "]") && children.get(j + 1).is_some_and(|m| is_text(m, "]")) =>
+                {
+                    break Some(j + 1);
+                }
+                Some(n)
+                    if n.kind() == SyntaxKind::Text
+                        && n.leaf_text() != "["
+                        && n.leaf_text() != "]" =>
+                {
+                    inner.push_str(n.leaf_text());
+                }
+                Some(n) if n.kind() == SyntaxKind::Space && !n.leaf_text().contains('\n') => {
+                    inner.push_str(n.leaf_text());
+                }
+                _ => break None,
+            }
+            j += 1;
+        };
+        match close.and_then(|end| parse_inner(&inner).map(|link| (end, link))) {
+            Some((end, (target, text))) => {
+                out.push(WikiLink {
+                    target,
+                    text,
+                    range: offsets[i]..offsets[end + 1],
+                });
+                i = end + 1;
+            }
+            None => i += 1,
+        }
+    }
+}
+
+fn parse_inner(inner: &str) -> Option<(String, Option<String>)> {
+    let (target, text) = match inner.split_once('|') {
+        Some((target, text)) => (target, Some(text.trim()).filter(|t| !t.is_empty())),
+        None => (inner, None),
+    };
+    let target = target.trim();
+    (!target.is_empty()).then(|| (target.to_owned(), text.map(str::to_owned)))
+}
+
+/// Source of the generated `/.sliver/links.typ`: a table from every note's
+/// address and uuid to its id, title and address, plus the `wikilinks` show
+/// rule. Earlier entries win when two notes share an address.
+pub fn link_library<'a>(
+    targets: impl IntoIterator<Item = LinkTarget<'a>>,
+    display: LinkDisplay,
+) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = String::new();
+    for target in targets {
+        let title = target.title.or(target.address).unwrap_or("Untitled");
+        let address = target.address.map_or("none".to_owned(), string_literal);
+        let value = format!(
+            "(id: {}, title: {}, address: {address})",
+            string_literal(&target.id),
+            string_literal(title)
+        );
+        for key in [Some(target.id.as_str()), target.address]
+            .into_iter()
+            .flatten()
+        {
+            if seen.insert(key.to_owned()) {
+                entries.push_str(&format!("  {}: {value},\n", string_literal(key)));
+            }
+        }
+    }
+    let entries = if entries.is_empty() {
+        "(:)".to_owned()
+    } else {
+        format!("(\n{entries})")
+    };
+    let display = match display {
+        LinkDisplay::Title => "title",
+        LinkDisplay::Address => "address",
+    };
+    format!(
+        r##"// Generated by Sliver from the note headers. Do not edit.
+#let display = "{display}"
+#let notes = {entries}
+#let wikilinks(body) = {{
+  show regex("\[\[[^\[\]\n]+\]\]"): it => {{
+    let inner = it.text.slice(2, -2)
+    let bar = inner.position("|")
+    let target = (if bar == none {{ inner }} else {{ inner.slice(0, bar) }}).trim()
+    let custom = if bar == none {{ "" }} else {{ inner.slice(bar + 1).trim() }}
+    let note = notes.at(target, default: none)
+    if note == none {{
+      text(fill: rgb("#c62828"), it)
+    }} else {{
+      let shown = if custom != "" {{ custom }} else if display == "address" and note.address != none {{ note.address }} else {{ note.title }}
+      link("{LINK_SCHEME}" + note.id, shown)
+    }}
+  }}
+  // Raw text is never a link. Inside raw, the closer rule runs first and splits
+  // the brackets with a zero-width `h(0pt)` so the outer rule no longer matches.
+  show raw: it => {{
+    show regex("\[\[[^\[\]\n]+\]\]"): t => [#t.text.slice(0, 1)#h(0pt)#t.text.slice(1)]
+    it
+  }}
+  body
+}}
+"##
+    )
+}
+
+/// The file the preview compiles for note `id`: applies the wikilink rule to
+/// the note without changing its source, so diagnostics keep their positions.
+pub fn preview_main_path(id: &str) -> String {
+    format!("/.sliver/view/{id}.typ")
+}
+
+/// Source of the file at [`preview_main_path`].
+pub fn preview_main(id: &str) -> String {
+    format!("#import \"{LINKS_PATH}\": wikilinks\n#show: wikilinks\n#include \"/notes/{id}.typ\"\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn links(text: &str) -> Vec<(String, Option<String>, &str)> {
+        links_in(&typst_syntax::parse(text))
+            .into_iter()
+            .map(|l| (l.target, l.text, &text[l.range]))
+            .collect()
+    }
+
+    #[test]
+    fn finds_targets_and_custom_text() {
+        assert_eq!(
+            links("See [[1.1a]] and [[ 2 | the second ]] and *[[1.1a1]]*."),
+            vec![
+                ("1.1a".into(), None, "[[1.1a]]"),
+                (
+                    "2".into(),
+                    Some("the second".into()),
+                    "[[ 2 | the second ]]"
+                ),
+                ("1.1a1".into(), None, "[[1.1a1]]"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finds_links_in_content_blocks() {
+        assert_eq!(links("#strong[[[3]]]"), vec![("3".into(), None, "[[3]]")]);
+    }
+
+    #[test]
+    fn ignores_raw_escapes_styled_and_empty() {
+        for text in [
+            "`[[1]]`",
+            "```\n[[1]]\n```",
+            "\\[\\[1\\]\\]",
+            "[[a *b* c]]",
+            "[[]]",
+            "[[ | x]]",
+            "[[1]",
+            "[[1\n]]",
+            "// [[1]]",
+            "#\"[[1]]\"",
+        ] {
+            assert_eq!(links(text), vec![], "{text:?}");
+        }
+    }
+}

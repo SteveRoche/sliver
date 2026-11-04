@@ -11,6 +11,9 @@ use tauri::{AppHandle, Manager};
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub last_vault: Option<PathBuf>,
+    /// App-level settings; the schema (and defaults) belong to the frontend.
+    #[serde(default)]
+    pub settings: serde_json::Value,
 }
 
 fn path(app: &AppHandle) -> Result<PathBuf, String> {

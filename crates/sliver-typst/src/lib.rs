@@ -5,7 +5,10 @@
 //! directly as wasm-bindgen classes, with no serialization step.
 
 mod engine;
+mod tar;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-pub use engine::{CompileOutput, Diagnostic, Engine, InvalidPath, Position, Severity, TextRange};
+pub use engine::{
+    CompileOutput, Diagnostic, Engine, InvalidPackage, InvalidPath, Position, Severity, TextRange,
+};

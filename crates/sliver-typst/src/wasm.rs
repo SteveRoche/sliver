@@ -28,6 +28,17 @@ impl Compiler {
         Ok(self.0.affected_mains(path)?)
     }
 
+    /// Loads a package from its uncompressed tar archive.
+    #[wasm_bindgen(js_name = addPackage)]
+    pub fn add_package(&mut self, spec: &str, tar: &[u8]) -> Result<(), JsError> {
+        Ok(self.0.add_package(spec, tar)?)
+    }
+
+    #[wasm_bindgen(js_name = hasPackage)]
+    pub fn has_package(&self, spec: &str) -> bool {
+        self.0.has_package(spec)
+    }
+
     pub fn compile(&mut self, main: &str) -> Result<CompileOutput, JsError> {
         Ok(self.0.compile(main)?)
     }

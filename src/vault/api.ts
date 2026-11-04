@@ -23,6 +23,12 @@ export type Placement =
 
 export type DeleteMode = "trash" | "permanent";
 
+/** A generated Typst file the preview compiles alongside the notes. */
+export interface SourceFile {
+  path: string;
+  text: string;
+}
+
 export const vault = {
   create: (path: string) => invoke<TreeNode[]>("create_vault", { path }),
   open: (path: string) => invoke<TreeNode[]>("open_vault", { path }),
@@ -37,6 +43,20 @@ export const vault = {
     invoke<NoteSummary>("rename_note", { id, title }),
   deleteNote: (id: NoteId, mode?: DeleteMode) =>
     invoke<void>("delete_note", { id, mode }),
+  backlinks: (id: NoteId) => invoke<NoteSummary[]>("backlinks", { id }),
+  /** Resolves a wikilink target (address or uuid) to a note id. */
+  resolveLink: (target: string) =>
+    invoke<NoteId | null>("resolve_link", { target }),
+  /** `/.sliver/links.typ`: the link table and `wikilinks` show rule. */
+  linkLibrary: (showAddresses: boolean) =>
+    invoke<SourceFile>("link_library", { showAddresses }),
+  /** The wrapper main that includes note `id` with wikilinks applied. */
+  previewMain: (id: NoteId) => invoke<SourceFile>("preview_main", { id }),
+  loadWorkspace: () => invoke<string | null>("load_workspace"),
+  saveWorkspace: (json: string) => invoke<void>("save_workspace", { json }),
+  getSettings: () => invoke<unknown>("get_settings"),
+  setSettings: (settings: unknown) =>
+    invoke<void>("set_settings", { settings }),
 };
 
 /**
@@ -72,5 +92,11 @@ export function autosave(
       timer = setTimeout(flush, delayMs);
     },
     flush,
+    /** Drops unsaved edits, e.g. after the note was deleted. */
+    cancel() {
+      clearTimeout(timer);
+      pending = undefined;
+    },
+    hasPending: () => pending !== undefined,
   };
 }
