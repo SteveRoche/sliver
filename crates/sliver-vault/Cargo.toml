@@ -1,0 +1,16 @@
+[package]
+name = "sliver-vault"
+description = "Vault model for Sliver: notes on disk, Zettelkasten addresses, in-memory index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+typst-syntax = "0.15.1"
+trash = { version = "5.2.9", default-features = false, features = ["coinit_apartmentthreaded"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# Only to check that generated headers compile as plain Typst.
+sliver-typst = { path = "../sliver-typst" }

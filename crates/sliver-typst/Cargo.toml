@@ -1,0 +1,19 @@
+[package]
+name = "sliver-typst"
+description = "Typst compilation and rendering for Sliver (native and WASM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+typst = "0.15.1"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+typst-layout = "0.15.1"
+typst-svg = "0.15.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pinned: must equal the nixpkgs wasm-bindgen-cli version (see flake.nix).
+wasm-bindgen = "=0.2.129"
