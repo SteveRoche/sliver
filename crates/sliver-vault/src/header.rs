@@ -21,6 +21,8 @@ pub struct NoteHeader {
     pub title: Option<String>,
     pub address: Option<String>,
     pub tags: Vec<String>,
+    /// The note's kind, which picks its kind preamble.
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,9 @@ pub fn format_header(header: &NoteHeader) -> String {
         let trailing = if tags.len() == 1 { "," } else { "" };
         fields.push(format!("tags: ({}{trailing})", tags.join(", ")));
     }
+    if let Some(kind) = &header.kind {
+        fields.push(format!("kind: {}", string_literal(kind)));
+    }
     let dict = if fields.is_empty() {
         "(:)".to_owned()
     } else {
@@ -87,6 +92,11 @@ pub fn set_title(text: &str, title: &str) -> Result<String, HeaderError> {
 /// Sets or (with `None`) removes the header's `address`, like [`set_title`].
 pub fn set_address(text: &str, address: Option<&str>) -> Result<String, HeaderError> {
     set_field(text, "address", address)
+}
+
+/// Sets or (with `None`) removes the header's `kind`, like [`set_title`].
+pub fn set_kind(text: &str, kind: Option<&str>) -> Result<String, HeaderError> {
+    set_field(text, "kind", kind)
 }
 
 fn set_field(text: &str, field: &str, value: Option<&str>) -> Result<String, HeaderError> {
@@ -207,6 +217,7 @@ fn header_from_dict(dict: ast::Dict) -> Result<NoteHeader, HeaderError> {
             "title" => header.title = optional_str(value, "title")?,
             "address" => header.address = optional_str(value, "address")?,
             "tags" => header.tags = str_array(value, "tags")?,
+            "kind" => header.kind = optional_str(value, "kind")?,
             _ => {}
         }
     }
@@ -247,6 +258,7 @@ mod tests {
                 title: Some("On \"tools\"".into()),
                 address: Some("1.1a".into()),
                 tags: vec!["craft".into(), "x".into()],
+                kind: None,
             }))
         );
     }
@@ -296,6 +308,7 @@ mod tests {
             title: Some("Quote \" and \\ back\nslash".into()),
             address: Some("1.1a".into()),
             tags: vec!["one".into()],
+            kind: Some("literature".into()),
         };
         let line = format_header(&header);
         assert_eq!(read_header(&line), Ok(Some(header)));

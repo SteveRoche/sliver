@@ -3,12 +3,18 @@ use std::fmt;
 use std::sync::Mutex;
 
 use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
-use typst::foundations::{Bytes, Datetime, Duration};
+use typst::foundations::{Bytes, CastInfo, Datetime, Duration, Repr, Value};
+use typst::introspection::PagedPosition;
+use typst::layout::{Abs, Point};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{DiagSpan, FileId, RootedPath, Source, VirtualPath, VirtualRoot};
+use typst::syntax::{
+    DiagSpan, FileId, LinkedNode, RootedPath, Side, Source, SyntaxKind, VirtualPath, VirtualRoot,
+    ast,
+};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World, WorldExt};
+use typst_ide::{CompletionKind, IdeWorld, Jump};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
@@ -27,6 +33,11 @@ pub struct Engine {
     packages: HashSet<PackageSpec>,
     /// Files each main file read during its last compile.
     deps: HashMap<FileId, HashSet<FileId>>,
+    /// Each main file's last successful layout, for jumping between source and preview.
+    documents: HashMap<FileId, PagedDocument>,
+    /// Hidden whole lines compiled before a file's own text (a note's preamble
+    /// imports). Positions crossing the API are in the file's own text.
+    prefixes: HashMap<FileId, String>,
 }
 
 #[derive(Debug)]
@@ -61,6 +72,50 @@ pub struct CompileOutput {
     /// `@namespace/name:version`. Load them with `add_package` and recompile.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = missingPackages))]
     pub missing_packages: Vec<String>,
+    /// Time spent compiling (parse, evaluate, layout), in milliseconds.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = compileMs))]
+    pub compile_ms: f64,
+    /// Time spent rendering pages to SVG, in milliseconds.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderMs))]
+    pub render_ms: f64,
+}
+
+/// A place in a source file, e.g. where a click in the preview came from.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceLocation {
+    pub path: String,
+    pub position: Position,
+}
+
+/// Completions at a cursor: they replace the text from `from` to the cursor.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Completions {
+    pub from: Position,
+    pub items: Vec<CompletionItem>,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionItem {
+    /// `syntax`, `func`, `type`, `param`, `constant`, `path`, `package`,
+    /// `label`, `font` or `symbol`.
+    pub kind: String,
+    pub label: String,
+    /// What to insert, possibly with `${placeholder}` snippet fields.
+    pub apply: String,
+    pub detail: Option<String>,
+}
+
+/// A point on a rendered page, in points from its top left.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PagePoint {
+    /// Zero-based.
+    pub page: u32,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
@@ -114,27 +169,96 @@ impl Engine {
             binaries: HashMap::new(),
             packages: HashSet::new(),
             deps: HashMap::new(),
+            documents: HashMap::new(),
+            prefixes: HashMap::new(),
         }
     }
 
     /// Adds or replaces a source file. Replacing reparses incrementally.
     pub fn set_source(&mut self, path: &str, text: &str) -> Result<(), InvalidPath> {
         let id = file_id(path)?;
+        let full = self.with_prefix(id, text);
         match self.sources.get_mut(&id) {
             Some(source) => {
-                source.replace(text);
+                source.replace(&full);
             }
             None => {
-                self.sources.insert(id, Source::new(id, text.to_owned()));
+                self.sources.insert(id, Source::new(id, full));
             }
         }
         Ok(())
     }
 
+    /// Sets the hidden lines compiled before `path`'s text, e.g. a note's
+    /// preamble imports. A non-empty prefix gets a final newline, so it only
+    /// ever shifts the text by whole lines.
+    pub fn set_prefix(&mut self, path: &str, prefix: &str) -> Result<(), InvalidPath> {
+        let id = file_id(path)?;
+        let mut prefix = prefix.to_owned();
+        if !prefix.is_empty() && !prefix.ends_with('\n') {
+            prefix.push('\n');
+        }
+        let old = self.prefixes.get(&id).map_or(0, String::len);
+        let text = self
+            .sources
+            .get(&id)
+            .map(|source| source.text()[old..].to_owned());
+        if prefix.is_empty() {
+            self.prefixes.remove(&id);
+        } else {
+            self.prefixes.insert(id, prefix);
+        }
+        if let Some(text) = text {
+            self.set_source(path, &text)?;
+        }
+        Ok(())
+    }
+
+    fn with_prefix(&self, id: FileId, text: &str) -> String {
+        match self.prefixes.get(&id) {
+            Some(prefix) => format!("{prefix}{text}"),
+            None => text.to_owned(),
+        }
+    }
+
+    /// How many lines of `id`'s source are its hidden prefix.
+    fn prefix_lines(&self, id: FileId) -> u32 {
+        self.prefixes
+            .get(&id)
+            .map_or(0, |p| p.matches('\n').count() as u32)
+    }
+
+    /// A byte offset in `source` as a position in its file's own text; the
+    /// prefix maps to the start.
+    fn position_in(&self, source: &Source, byte: usize) -> Option<Position> {
+        let position = position_in(source, byte)?;
+        let hidden = self.prefix_lines(source.id());
+        Some(match position.line.checked_sub(hidden) {
+            Some(line) => Position {
+                line,
+                column: position.column,
+            },
+            None => Position { line: 0, column: 0 },
+        })
+    }
+
+    /// A position in a file's own text as a byte offset in its `source`.
+    fn offset_in(&self, source: &Source, position: Position) -> Option<usize> {
+        offset_in(
+            source,
+            Position {
+                line: position.line + self.prefix_lines(source.id()),
+                column: position.column,
+            },
+        )
+    }
+
     pub fn remove_source(&mut self, path: &str) -> Result<(), InvalidPath> {
         let id = file_id(path)?;
         self.sources.remove(&id);
+        self.prefixes.remove(&id);
         self.deps.remove(&id);
+        self.documents.remove(&id);
         Ok(())
     }
 
@@ -181,33 +305,32 @@ impl Engine {
 
     pub fn compile(&mut self, main: &str) -> Result<CompileOutput, InvalidPath> {
         let main = file_id(main)?;
-        let world = CompileWorld {
-            engine: self,
-            main,
-            accessed: Mutex::default(),
-            missing: Mutex::default(),
-        };
+        let world = self.world(main);
 
+        let started = now_ms();
         let warned = typst::compile::<PagedDocument>(&world);
+        let compiled = now_ms();
         let mut diagnostics: Vec<Diagnostic> = warned
             .warnings
             .iter()
             .map(|d| convert_diagnostic(&world, d))
             .collect();
-        let pages = match warned.output {
+        let (pages, document) = match warned.output {
             Ok(document) => {
                 let opts = SvgOptions::default();
-                document
+                let pages = document
                     .pages()
                     .iter()
                     .map(|page| typst_svg::svg(page, &opts))
-                    .collect()
+                    .collect();
+                (pages, Some(document))
             }
             Err(errors) => {
                 diagnostics.extend(errors.iter().map(|d| convert_diagnostic(&world, d)));
-                Vec::new()
+                (Vec::new(), None)
             }
         };
+        let rendered = now_ms();
 
         let mut missing_packages: Vec<String> = world
             .missing
@@ -219,14 +342,384 @@ impl Engine {
         missing_packages.sort();
         let accessed = world.accessed.into_inner().unwrap_or_default();
         self.deps.insert(main, accessed);
+        // A failed compile keeps the last good layout, which the preview still shows.
+        if let Some(document) = document {
+            self.documents.insert(main, document);
+        }
         typst::comemo::evict(10);
 
         Ok(CompileOutput {
             pages,
             diagnostics,
             missing_packages,
+            compile_ms: compiled - started,
+            render_ms: rendered - compiled,
         })
     }
+
+    /// The source location behind a click at (`x`, `y`) points on page
+    /// `page` (zero-based) of `main`'s last layout. Links and blank space
+    /// have none.
+    pub fn jump_from_click(
+        &self,
+        main: &str,
+        page: u32,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<SourceLocation>, InvalidPath> {
+        let main = file_id(main)?;
+        let Some(document) = self.documents.get(&main) else {
+            return Ok(None);
+        };
+        let Some(page) = std::num::NonZeroUsize::new(page as usize + 1) else {
+            return Ok(None);
+        };
+        let position = PagedPosition {
+            page,
+            point: Point::new(Abs::pt(x), Abs::pt(y)),
+        };
+        let world = self.world(main);
+        let Some(Jump::File(id, offset)) = typst_ide::jump_from_click(&world, document, &position)
+        else {
+            return Ok(None);
+        };
+        Ok(self.sources.get(&id).and_then(|source| {
+            Some(SourceLocation {
+                path: path_of(id),
+                position: self.position_in(source, offset)?,
+            })
+        }))
+    }
+
+    /// Where the text at `position` in `path` appears in `main`'s last layout.
+    pub fn jump_from_cursor(
+        &self,
+        main: &str,
+        path: &str,
+        position: Position,
+    ) -> Result<Vec<PagePoint>, InvalidPath> {
+        let main = file_id(main)?;
+        let id = file_id(path)?;
+        let (Some(document), Some(source)) = (self.documents.get(&main), self.sources.get(&id))
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(offset) = self.offset_in(source, position) else {
+            return Ok(Vec::new());
+        };
+        Ok(typst_ide::jump_from_cursor(document, source, offset)
+            .into_iter()
+            .map(|p| PagePoint {
+                page: p.page.get() as u32 - 1,
+                x: p.point.x.to_pt(),
+                y: p.point.y.to_pt(),
+            })
+            .collect())
+    }
+
+    /// Typst completions for `text` (the current, possibly uncompiled
+    /// contents of `path`) at `position`, compiled as part of `main`.
+    /// `explicit` is a user request (e.g. Ctrl+Space) rather than typing.
+    pub fn complete(
+        &self,
+        main: &str,
+        path: &str,
+        text: &str,
+        position: Position,
+        explicit: bool,
+    ) -> Result<Option<Completions>, InvalidPath> {
+        let main = file_id(main)?;
+        let id = file_id(path)?;
+        let source = Source::new(id, self.with_prefix(id, text));
+        let Some(cursor) = self.offset_in(&source, position) else {
+            return Ok(None);
+        };
+        let world = self.world_with(main, Some(source.clone()));
+        let Some((from, completions)) =
+            typst_ide::autocomplete(&world, self.documents.get(&main), &source, cursor, explicit)
+        else {
+            return Ok(None);
+        };
+        let Some(from) = self.position_in(&source, from) else {
+            return Ok(None);
+        };
+        let items = completions
+            .into_iter()
+            .map(|c| {
+                let kind = match &c.kind {
+                    CompletionKind::Syntax => "syntax",
+                    CompletionKind::Func => "func",
+                    CompletionKind::Type => "type",
+                    CompletionKind::Param => "param",
+                    CompletionKind::Constant => "constant",
+                    CompletionKind::Path => "path",
+                    CompletionKind::Package => "package",
+                    CompletionKind::Label => "label",
+                    CompletionKind::Font => "font",
+                    CompletionKind::Symbol(_) => "symbol",
+                };
+                let detail = match (&c.kind, c.detail) {
+                    (CompletionKind::Symbol(glyph), None) => Some(glyph.to_string()),
+                    (_, detail) => detail.map(|d| d.to_string()),
+                };
+                CompletionItem {
+                    kind: kind.to_owned(),
+                    apply: c.apply.unwrap_or_else(|| c.label.clone()).to_string(),
+                    label: c.label.to_string(),
+                    detail,
+                }
+            })
+            .collect();
+        Ok(Some(Completions { from, items }))
+    }
+
+    /// The function call whose parentheses hold `position` in `text` (the
+    /// current contents of `path`), with its parameters and which one the
+    /// cursor is on: signature help.
+    pub fn signature(
+        &self,
+        main: &str,
+        path: &str,
+        text: &str,
+        position: Position,
+    ) -> Result<Option<Signature>, InvalidPath> {
+        let main = file_id(main)?;
+        let id = file_id(path)?;
+        let source = Source::new(id, self.with_prefix(id, text));
+        let Some(cursor) = self.offset_in(&source, position) else {
+            return Ok(None);
+        };
+        let world = self.world_with(main, Some(source.clone()));
+        Ok(signature_at(&world, &source, cursor))
+    }
+
+    fn world(&self, main: FileId) -> CompileWorld<'_> {
+        self.world_with(main, None)
+    }
+
+    /// A world where `overlay` replaces the engine's copy of its file, so
+    /// analysis sees the editor's latest text without disturbing compiles.
+    fn world_with(&self, main: FileId, overlay: Option<Source>) -> CompileWorld<'_> {
+        CompileWorld {
+            engine: self,
+            main,
+            overlay,
+            accessed: Mutex::default(),
+            missing: Mutex::default(),
+        }
+    }
+}
+
+/// A function's signature, for signature help.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Signature {
+    pub name: String,
+    /// The first paragraph of the function's documentation (Markdown).
+    pub docs: Option<String>,
+    pub params: Vec<ParamDoc>,
+    /// Index into `params` of the argument at the cursor.
+    pub active: Option<u32>,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamDoc {
+    pub name: String,
+    /// Accepted types and values, e.g. `length | auto`.
+    pub types: String,
+    pub docs: Option<String>,
+    pub named: bool,
+    pub positional: bool,
+    pub required: bool,
+    pub variadic: bool,
+    pub default: Option<String>,
+}
+
+fn first_paragraph(docs: &str) -> Option<String> {
+    let paragraph = docs.trim().split("\n\n").next()?.trim();
+    (!paragraph.is_empty()).then(|| paragraph.replace('\n', " "))
+}
+
+fn describe_types(info: &CastInfo) -> String {
+    const MAX: usize = 6;
+    let mut parts: Vec<String> = Vec::new();
+    info.walk(|info| {
+        let part = match info {
+            CastInfo::Any => "any".to_owned(),
+            CastInfo::Value(value, _) => value.repr().to_string(),
+            CastInfo::Type(ty) => ty.to_string(),
+            CastInfo::Union(_) => return,
+        };
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
+    });
+    if parts.len() > MAX {
+        parts.truncate(MAX);
+        parts.push("…".to_owned());
+    }
+    parts.join(" | ")
+}
+
+/// `name` or `module.name` from the standard library (markup and math scopes).
+fn library_value(world: &CompileWorld, node: &LinkedNode) -> Option<Value> {
+    let library = world.library();
+    let lookup = |name: &str| {
+        [&library.global, &library.math]
+            .into_iter()
+            .find_map(|module| module.scope().get(name))
+            .map(|binding| binding.read().clone())
+    };
+    match node.cast::<ast::Expr>()? {
+        ast::Expr::Ident(ident) => lookup(ident.get()),
+        ast::Expr::MathIdent(ident) => lookup(ident.get()),
+        ast::Expr::FieldAccess(access) => {
+            let ast::Expr::Ident(target) = access.target() else {
+                return None;
+            };
+            let field = access.field();
+            lookup(target.get())?
+                .scope()?
+                .get(field.get())
+                .map(|binding| binding.read().clone())
+        }
+        _ => None,
+    }
+}
+
+fn signature_at(world: &CompileWorld, source: &Source, cursor: usize) -> Option<Signature> {
+    let root = LinkedNode::new(source.root());
+    // Whitespace typed after an unclosed `(` ends up outside the call's
+    // node, so look for the call from before it.
+    let probe = source.text()[..cursor].trim_end().len();
+    let leaf = root.leaf_at(probe, Side::Before)?;
+    // The innermost call whose parentheses contain the cursor. An unclosed
+    // `(` parses as an error node.
+    let args = std::iter::successors(Some(leaf), |node| node.parent().cloned()).find(|node| {
+        if node.kind() != SyntaxKind::Args || node.parent_kind() != Some(SyntaxKind::FuncCall) {
+            return false;
+        }
+        let open = node.children().find(|c| {
+            c.kind() == SyntaxKind::LeftParen
+                || (c.kind() == SyntaxKind::Error && c.leaf_text() == "(")
+        });
+        let close = node.children().find(|c| c.kind() == SyntaxKind::RightParen);
+        open.is_some_and(|open| cursor >= open.range().end)
+            && close.is_none_or(|close| cursor <= close.range().start)
+    })?;
+    let callee = args.parent()?.children().next()?;
+    // Tracing needs a document that evaluates; while the call is still
+    // being typed it usually doesn't, so fall back to the standard library.
+    let func = typst_ide::analyze_expr(world, &callee)
+        .into_iter()
+        .map(|(value, _)| value)
+        .chain(library_value(world, &callee))
+        .find_map(|value| match value {
+            Value::Func(func) => Some(func),
+            _ => None,
+        })?;
+
+    let params: Vec<ParamDoc> = func
+        .params()
+        .map(|param| {
+            let native = param.to_native();
+            ParamDoc {
+                name: param.name().unwrap_or("..").to_owned(),
+                types: native.map(|n| describe_types(&n.input)).unwrap_or_default(),
+                docs: native.and_then(|n| first_paragraph(n.docs)),
+                named: param.named(),
+                positional: param.positional(),
+                required: param.required(),
+                variadic: param.variadic(),
+                default: param.default().map(|d| d.repr().to_string()),
+            }
+        })
+        .collect();
+
+    // Which argument the cursor is in: a named one by its name, else the
+    // number of positional arguments before it.
+    let mut positional_before = 0;
+    let mut segment_positional = false;
+    let mut segment_named: Option<String> = None;
+    for child in args.children() {
+        if child.range().start >= cursor {
+            break;
+        }
+        match child.kind() {
+            SyntaxKind::LeftParen | SyntaxKind::RightParen => {}
+            SyntaxKind::Comma => {
+                if segment_positional {
+                    positional_before += 1;
+                }
+                segment_positional = false;
+                segment_named = None;
+            }
+            SyntaxKind::Named => {
+                segment_named = child
+                    .cast::<ast::Named>()
+                    .map(|named| named.name().get().to_string());
+            }
+            kind if kind.is_trivia() => {}
+            _ => segment_positional = true,
+        }
+    }
+    let active = match segment_named {
+        Some(name) => params.iter().position(|p| p.name == name),
+        None => {
+            let positional: Vec<usize> = (0..params.len())
+                .filter(|&i| params[i].positional)
+                .collect();
+            positional
+                .get(positional_before)
+                .or_else(|| positional.last().filter(|&&i| params[i].variadic))
+                .copied()
+        }
+    };
+
+    Some(Signature {
+        name: func.name().unwrap_or("function").to_owned(),
+        docs: func.docs().and_then(first_paragraph),
+        params,
+        active: active.map(|i| i as u32),
+    })
+}
+
+/// Milliseconds from an arbitrary start, for timing compiles.
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> f64 {
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = performance, js_name = now)]
+        fn performance_now() -> f64;
+    }
+    performance_now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+fn position_in(source: &Source, byte: usize) -> Option<Position> {
+    let lines = source.lines();
+    let line = lines.byte_to_line(byte)?;
+    let line_start = lines.line_to_byte(line)?;
+    let column = lines.byte_to_utf16(byte)? - lines.byte_to_utf16(line_start)?;
+    Some(Position {
+        line: line as u32,
+        column: column as u32,
+    })
+}
+
+fn offset_in(source: &Source, position: Position) -> Option<usize> {
+    let lines = source.lines();
+    let line_start = lines.line_to_byte(position.line as usize)?;
+    let utf16 = lines.byte_to_utf16(line_start)? + position.column as usize;
+    lines.utf16_to_byte(utf16)
 }
 
 fn file_id(path: &str) -> Result<FileId, InvalidPath> {
@@ -254,25 +747,16 @@ fn convert_diagnostic(world: &CompileWorld, diag: &SourceDiagnostic) -> Diagnost
 fn text_range(world: &CompileWorld, span: DiagSpan) -> Option<TextRange> {
     let source = world.engine.sources.get(&span.id()?)?;
     let bytes = world.range(span)?;
-    let lines = source.lines();
-    let position = |byte: usize| {
-        let line = lines.byte_to_line(byte)?;
-        let line_start = lines.line_to_byte(line)?;
-        let column = lines.byte_to_utf16(byte)? - lines.byte_to_utf16(line_start)?;
-        Some(Position {
-            line: line as u32,
-            column: column as u32,
-        })
-    };
     Some(TextRange {
-        start: position(bytes.start)?,
-        end: position(bytes.end)?,
+        start: world.engine.position_in(source, bytes.start)?,
+        end: world.engine.position_in(source, bytes.end)?,
     })
 }
 
 struct CompileWorld<'a> {
     engine: &'a Engine,
     main: FileId,
+    overlay: Option<Source>,
     accessed: Mutex<HashSet<FileId>>,
     missing: Mutex<HashSet<PackageSpec>>,
 }
@@ -298,10 +782,19 @@ impl CompileWorld<'_> {
 
     fn lookup(&self, id: FileId) -> FileResult<&Source> {
         self.record(id);
+        if let Some(overlay) = self.overlay.as_ref().filter(|s| s.id() == id) {
+            return Ok(overlay);
+        }
         self.engine
             .sources
             .get(&id)
             .ok_or_else(|| self.not_found(id))
+    }
+}
+
+impl IdeWorld for CompileWorld<'_> {
+    fn upcast(&self) -> &dyn World {
+        self
     }
 }
 
@@ -434,5 +927,176 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.missing_packages.is_empty());
         assert_eq!(out.pages.len(), 1);
+    }
+
+    #[test]
+    fn jumps_between_source_and_layout() {
+        let mut engine = Engine::new();
+        engine
+            .set_source(
+                "/main.typ",
+                "#set page(width: 200pt, height: auto, margin: 10pt)\nFirst line\n\nSecond paragraph",
+            )
+            .unwrap();
+        let out = engine.compile("/main.typ").unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(out.compile_ms >= 0.0 && out.render_ms >= 0.0);
+
+        let second = Position { line: 3, column: 3 };
+        let points = engine
+            .jump_from_cursor("/main.typ", "/main.typ", second)
+            .unwrap();
+        assert_eq!(points.len(), 1);
+        let point = points[0];
+        assert_eq!(point.page, 0);
+
+        // Clicking just right of where the cursor maps lands in the same word.
+        let back = engine
+            .jump_from_click("/main.typ", 0, point.x + 1.0, point.y - 2.0)
+            .unwrap()
+            .expect("a source location");
+        assert_eq!(back.path, "/main.typ");
+        assert_eq!(back.position.line, 3);
+        assert!(
+            engine
+                .jump_from_click("/main.typ", 0, 190.0, 1.0)
+                .unwrap()
+                .is_none(),
+            "blank margin"
+        );
+    }
+
+    #[test]
+    fn completes_functions_at_a_hash() {
+        let mut engine = Engine::new();
+        engine.set_source("/main.typ", "").unwrap();
+        let text = "Some text #hea";
+        let found = engine
+            .complete(
+                "/main.typ",
+                "/main.typ",
+                text,
+                Position {
+                    line: 0,
+                    column: 14,
+                },
+                false,
+            )
+            .unwrap()
+            .expect("completions after #");
+        assert_eq!(
+            found.from,
+            Position {
+                line: 0,
+                column: 11
+            }
+        );
+        assert!(
+            found
+                .items
+                .iter()
+                .any(|c| c.label == "heading" && c.kind == "func")
+        );
+    }
+
+    #[test]
+    fn prefix_is_hidden_from_positions() {
+        let mut engine = Engine::new();
+        engine
+            .set_source("/lib.typ", "#let shout(x) = upper(x)")
+            .unwrap();
+        engine
+            .set_source(
+                "/main.typ",
+                "#set page(width: 200pt, height: auto, margin: 10pt)\n#shout[hi] #nope",
+            )
+            .unwrap();
+        engine
+            .set_prefix("/main.typ", "#import \"/lib.typ\": *")
+            .unwrap();
+        let out = engine.compile("/main.typ").unwrap();
+        // `shout` comes from the prefix; the error is on the text's own line 1.
+        assert_eq!(out.diagnostics.len(), 1, "{:?}", out.diagnostics);
+        let range = out.diagnostics[0].range.unwrap();
+        assert_eq!(
+            range.start,
+            Position {
+                line: 1,
+                column: 12
+            }
+        );
+
+        engine
+            .set_source(
+                "/main.typ",
+                "#set page(width: 200pt, height: auto, margin: 10pt)\n#shout[hi] there",
+            )
+            .unwrap();
+        let out = engine.compile("/main.typ").unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let points = engine
+            .jump_from_cursor(
+                "/main.typ",
+                "/main.typ",
+                Position {
+                    line: 1,
+                    column: 13,
+                },
+            )
+            .unwrap();
+        let back = engine
+            .jump_from_click("/main.typ", 0, points[0].x + 1.0, points[0].y - 2.0)
+            .unwrap()
+            .expect("a source location");
+        assert_eq!(back.position.line, 1);
+
+        let found = engine
+            .complete(
+                "/main.typ",
+                "/main.typ",
+                "#sho",
+                Position { line: 0, column: 4 },
+                false,
+            )
+            .unwrap()
+            .expect("completions");
+        assert_eq!(found.from, Position { line: 0, column: 1 });
+        assert!(found.items.iter().any(|c| c.label == "shout"));
+
+        engine.set_prefix("/main.typ", "").unwrap();
+        let out = engine.compile("/main.typ").unwrap();
+        assert_eq!(out.diagnostics.len(), 1, "unknown variable: shout");
+    }
+
+    #[test]
+    fn signature_help_tracks_the_argument() {
+        let mut engine = Engine::new();
+        engine.set_source("/main.typ", "").unwrap();
+        let text = "#rect(10pt, fill: red, ";
+        let at = |column| Position { line: 0, column };
+
+        let sig = engine
+            .signature("/main.typ", "/main.typ", text, at(7))
+            .unwrap()
+            .expect("inside rect(");
+        assert_eq!(sig.name, "rect");
+        assert!(sig.docs.is_some());
+        let active = |sig: &Signature| sig.params[sig.active.unwrap() as usize].name.clone();
+        assert_eq!(active(&sig), "body", "the first positional parameter");
+
+        let sig = engine
+            .signature("/main.typ", "/main.typ", text, at(20))
+            .unwrap()
+            .unwrap();
+        assert_eq!(active(&sig), "fill");
+        let fill = sig.params.iter().find(|p| p.name == "fill").unwrap();
+        assert!(fill.named && fill.types.contains("color"), "{fill:?}");
+
+        assert!(
+            engine
+                .signature("/main.typ", "/main.typ", "plain text", at(3))
+                .unwrap()
+                .is_none()
+        );
     }
 }

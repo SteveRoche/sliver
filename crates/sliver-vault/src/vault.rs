@@ -13,8 +13,12 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::header::{HeaderError, NoteHeader, format_header, header_in, set_title};
+use crate::header::{HeaderError, NoteHeader, format_header, header_in, set_kind, set_title};
 use crate::links::{LinkDisplay, LinkTarget, WikiLink, link_library, links_in};
+use crate::preambles::{
+    COMMON_FILE, KINDS_DIR, PreambleWarning, defines_template, note_prefix, preamble_file,
+    preamble_path, preamble_warnings,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -44,6 +48,29 @@ pub struct NoteSummary {
     pub header_error: Option<String>,
     /// The note's directory relative to the vault root, `/`-separated; `""` is the root.
     pub folder: String,
+    /// The note's kind, which picks its kind preamble.
+    pub kind: Option<String>,
+}
+
+/// A preamble as the settings view edits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Preamble {
+    /// `None` for the common preamble.
+    pub kind: Option<String>,
+    /// As Typst sees it, with the vault as root.
+    pub path: String,
+    /// Empty if the file doesn't exist yet.
+    pub text: String,
+    pub exists: bool,
+    pub warnings: Vec<PreambleWarning>,
+}
+
+/// What the preview compiles for a note: the wrapper main's source and the
+/// hidden lines that go before the note's own source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NotePreview {
+    pub main: String,
+    pub prefix: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -110,6 +137,9 @@ pub enum VaultError {
     FolderNotFound(String),
     InvalidFolderName(String),
     FolderExists(String),
+    InvalidKindName(String),
+    KindExists(String),
+    KindNotFound(String),
     /// An operation that would break the vault's rules, with the reason.
     Refused(String),
     Header(HeaderError),
@@ -138,6 +168,9 @@ impl fmt::Display for VaultError {
             Self::FolderNotFound(path) => write!(f, "folder {path:?} not found"),
             Self::InvalidFolderName(name) => write!(f, "{name:?} is not a valid folder name"),
             Self::FolderExists(name) => write!(f, "a folder named {name:?} already exists"),
+            Self::InvalidKindName(name) => write!(f, "{name:?} is not a valid kind name"),
+            Self::KindExists(name) => write!(f, "a kind named {name:?} already exists"),
+            Self::KindNotFound(name) => write!(f, "there is no kind named {name:?}"),
             Self::Refused(reason) => write!(f, "{reason}"),
             Self::Header(err) => write!(f, "{err}"),
             Self::Trash(err) => write!(f, "could not move to trash: {err}"),
@@ -174,6 +207,8 @@ pub struct Vault {
     extra_zettelkasten: Vec<String>,
     /// Files whose uuid was already taken by an earlier file, per uuid.
     duplicates: HashMap<Uuid, Vec<String>>,
+    /// Kinds of notes: the files in the kind preambles' directory.
+    kinds: BTreeSet<String>,
 }
 
 impl Vault {
@@ -186,6 +221,7 @@ impl Vault {
             zettelkasten: None,
             extra_zettelkasten: Vec::new(),
             duplicates: HashMap::new(),
+            kinds: BTreeSet::new(),
         }
     }
 
@@ -206,6 +242,7 @@ impl Vault {
         vault.folders.insert(DEFAULT_ZETTELKASTEN.to_owned());
         vault.zettelkasten = Some(DEFAULT_ZETTELKASTEN.to_owned());
         vault.write_theme_file()?;
+        vault.write_common_preamble()?;
         Ok(vault)
     }
 
@@ -218,7 +255,9 @@ impl Vault {
         let mut vault = Self::empty(root);
         let root = vault.root.clone();
         vault.scan(&root, "")?;
+        vault.scan_kinds()?;
         vault.write_theme_file()?;
+        vault.write_common_preamble()?;
         Ok(vault)
     }
 
@@ -233,6 +272,16 @@ impl Vault {
             != Some(text.as_str())
         {
             self.atomic_write(&self.root.join(THEME_FILE), text.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Gives a vault without a common preamble the default one. An existing
+    /// file, even an empty one, is the user's and stays as it is.
+    fn write_common_preamble(&self) -> Result<()> {
+        let path = self.root.join(COMMON_FILE);
+        if !path.exists() {
+            self.atomic_write(&path, crate::preambles::starter(None).as_bytes())?;
         }
         Ok(())
     }
@@ -373,6 +422,12 @@ impl Vault {
             ))
         } else if note.address.is_some() && !self.in_zettelkasten(note) {
             Some("Has an address but isn't in the Zettelkasten".to_owned())
+        } else if let Some(kind) = &note.kind
+            && !self.kinds.contains(kind)
+        {
+            Some(format!(
+                "Its kind {kind:?} has no preamble; only the common one applies"
+            ))
         } else {
             None
         };
@@ -459,6 +514,19 @@ impl Vault {
         title: Option<String>,
         placement: Placement,
     ) -> Result<NoteSummary> {
+        self.create_note_of_kind(title, placement, None)
+    }
+
+    /// Like [`Vault::create_note`], with `kind` in the new note's header.
+    pub fn create_note_of_kind(
+        &mut self,
+        title: Option<String>,
+        placement: Placement,
+        kind: Option<String>,
+    ) -> Result<NoteSummary> {
+        if let Some(kind) = &kind {
+            self.require_kind(kind)?;
+        }
         let (folder, address) = match placement {
             Placement::Unaddressed { folder } => {
                 self.require_folder(&folder)?;
@@ -474,6 +542,7 @@ impl Vault {
             title,
             address,
             tags: Vec::new(),
+            kind,
         });
         self.write_file(Uuid::new_v4(), &folder, &format!("{header}\n\n"))
     }
@@ -577,6 +646,174 @@ impl Vault {
             }),
             display,
         )
+    }
+
+    // --- preambles ---
+
+    /// Rereads which kinds exist; their files may change outside the app.
+    fn scan_kinds(&mut self) -> Result<()> {
+        self.kinds.clear();
+        let dir = self.root.join(KINDS_DIR);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some(EXTENSION)
+                && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+                && validate_folder_name(name).is_ok()
+            {
+                self.kinds.insert(name.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Kinds of notes, in name order.
+    pub fn kinds(&self) -> impl Iterator<Item = &str> {
+        self.kinds.iter().map(String::as_str)
+    }
+
+    fn require_kind(&self, kind: &str) -> Result<()> {
+        if self.kinds.contains(kind) {
+            Ok(())
+        } else {
+            Err(VaultError::KindNotFound(kind.to_owned()))
+        }
+    }
+
+    fn preamble_text(&self, kind: Option<&str>) -> Result<Option<String>> {
+        self.read_optional(&preamble_file(kind))
+    }
+
+    /// The common preamble, then one per kind. Rescans the kinds first.
+    pub fn preambles(&mut self) -> Result<Vec<Preamble>> {
+        self.scan_kinds()?;
+        let kinds: Vec<Option<String>> = std::iter::once(None)
+            .chain(self.kinds.iter().cloned().map(Some))
+            .collect();
+        kinds
+            .into_iter()
+            .map(|kind| {
+                let text = self.preamble_text(kind.as_deref())?;
+                let exists = text.is_some();
+                let text = text.unwrap_or_default();
+                Ok(Preamble {
+                    path: preamble_path(kind.as_deref()),
+                    warnings: preamble_warnings(&text),
+                    kind,
+                    text,
+                    exists,
+                })
+            })
+            .collect()
+    }
+
+    /// Writes a preamble and returns what it should be warned about.
+    pub fn save_preamble(
+        &mut self,
+        kind: Option<&str>,
+        text: &str,
+    ) -> Result<Vec<PreambleWarning>> {
+        if let Some(kind) = kind {
+            self.require_kind(kind)?;
+        }
+        self.atomic_write(&self.root.join(preamble_file(kind)), text.as_bytes())?;
+        Ok(preamble_warnings(text))
+    }
+
+    fn check_free_kind(&self, name: &str, except: Option<&str>) -> Result<()> {
+        validate_folder_name(name).map_err(|_| VaultError::InvalidKindName(name.to_owned()))?;
+        if self
+            .kinds
+            .iter()
+            .any(|k| Some(k.as_str()) != except && k.to_lowercase() == name.to_lowercase())
+        {
+            return Err(VaultError::KindExists(name.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Adds a kind with a starter preamble.
+    pub fn create_kind(&mut self, name: &str) -> Result<()> {
+        self.scan_kinds()?;
+        self.check_free_kind(name, None)?;
+        let starter = crate::preambles::starter(Some(name));
+        self.atomic_write(
+            &self.root.join(preamble_file(Some(name))),
+            starter.as_bytes(),
+        )?;
+        self.kinds.insert(name.to_owned());
+        Ok(())
+    }
+
+    /// Renames a kind and rewrites the `kind` of every note that has it;
+    /// returns those notes' ids.
+    pub fn rename_kind(&mut self, from: &str, to: &str) -> Result<Vec<Uuid>> {
+        self.scan_kinds()?;
+        self.require_kind(from)?;
+        self.check_free_kind(to, Some(from))?;
+        if from == to {
+            return Ok(Vec::new());
+        }
+        fs::rename(
+            self.root.join(preamble_file(Some(from))),
+            self.root.join(preamble_file(Some(to))),
+        )?;
+        self.kinds.remove(from);
+        self.kinds.insert(to.to_owned());
+        let ids: Vec<Uuid> = self
+            .notes
+            .values()
+            .filter(|n| n.kind.as_deref() == Some(from))
+            .map(|n| n.id)
+            .collect();
+        for &id in &ids {
+            self.set_kind(id, Some(to))?;
+        }
+        Ok(ids)
+    }
+
+    /// Deletes a kind's preamble. Notes keep their `kind` (and get a warning).
+    pub fn delete_kind(&mut self, name: &str, mode: DeleteMode) -> Result<()> {
+        self.scan_kinds()?;
+        self.require_kind(name)?;
+        remove_path(&self.root.join(preamble_file(Some(name))), mode)?;
+        self.kinds.remove(name);
+        Ok(())
+    }
+
+    /// Sets or (with `None`) removes a note's kind.
+    pub fn set_kind(&mut self, id: Uuid, kind: Option<&str>) -> Result<NoteSummary> {
+        if let Some(kind) = kind {
+            self.require_kind(kind)?;
+        }
+        let text = set_kind(&self.read_note(id)?, kind)?;
+        self.write_note(id, &text)
+    }
+
+    /// The wrapper main and hidden prefix the preview compiles note `id` with.
+    pub fn preview(&self, id: Uuid) -> Result<NotePreview> {
+        let note = self.note(id)?;
+        let kind = note.kind.as_deref().filter(|k| self.kinds.contains(*k));
+        let mut imports = Vec::new();
+        let mut templates = Vec::new();
+        for kind in std::iter::once(None).chain(kind.map(Some)) {
+            let Some(text) = self.preamble_text(kind)? else {
+                continue;
+            };
+            let path = preamble_path(kind);
+            if defines_template(&text) {
+                templates.push(path.clone());
+            }
+            imports.push(path);
+        }
+        Ok(NotePreview {
+            main: crate::preview_main(&id.to_string(), &templates),
+            prefix: note_prefix(&imports),
+        })
     }
 
     // --- folders ---
@@ -734,6 +971,7 @@ impl Vault {
                 tags: header.tags,
                 header_error,
                 folder: folder.to_owned(),
+                kind: header.kind,
             },
         );
         &self.notes[&id]
@@ -1055,7 +1293,10 @@ mod tests {
             .set_source(crate::LINKS_PATH, &vault.link_library(LinkDisplay::Title))
             .unwrap();
         engine
-            .set_source(crate::PAGE_PATH, "#let page-width = 400pt")
+            .set_source(
+                &crate::page_path(&id.to_string()),
+                "#let page-width = 400pt",
+            )
             .unwrap();
         engine
             .set_source(crate::THEME_PATH, &crate::theme_library(dark))
@@ -1066,8 +1307,17 @@ mod tests {
                 .set_source(&path, &vault.read_note(note.id).unwrap())
                 .unwrap();
         }
+        for kind in std::iter::once(None).chain(vault.kinds().map(Some)) {
+            if let Some(text) = vault.preamble_text(kind).unwrap() {
+                engine.set_source(&preamble_path(kind), &text).unwrap();
+            }
+        }
+        let preview = vault.preview(id).unwrap();
         engine
-            .set_source("/.sliver/main.typ", &crate::preview_main(&id.to_string()))
+            .set_prefix(&format!("/notes/{id}.typ"), &preview.prefix)
+            .unwrap();
+        engine
+            .set_source("/.sliver/main.typ", &preview.main)
             .unwrap();
         let out = engine.compile("/.sliver/main.typ").unwrap();
         let messages = out.diagnostics.iter().map(|d| d.message.clone()).collect();
@@ -1309,6 +1559,91 @@ mod tests {
     }
 
     #[test]
+    fn preambles_reach_notes_by_kind() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let common = vault.preambles().unwrap();
+        assert_eq!(common.len(), 1);
+        assert!(common[0].exists && common[0].warnings.is_empty());
+        vault
+            .save_preamble(
+                None,
+                "#let shout(x) = upper(x)\n#let template(body) = { set text(fill: rgb(\"#123456\")); body }",
+            )
+            .unwrap();
+
+        vault.create_kind("Literature").unwrap();
+        assert!(matches!(
+            vault.create_kind("literature"),
+            Err(VaultError::KindExists(_))
+        ));
+        assert!(matches!(
+            vault.create_kind(".hidden"),
+            Err(VaultError::InvalidKindName(_))
+        ));
+        let warnings = vault
+            .save_preamble(
+                Some("Literature"),
+                "#let template(body) = { set text(fill: rgb(\"#654321\")); body }\n#let cited = [cited]\n#set text(red)",
+            )
+            .unwrap();
+        assert_eq!(warnings.len(), 1, "top-level set rule");
+
+        let note = vault
+            .create_note_of_kind(
+                Some("Paper".into()),
+                Placement::Unaddressed {
+                    folder: String::new(),
+                },
+                Some("Literature".into()),
+            )
+            .unwrap();
+        assert_eq!(note.kind.as_deref(), Some("Literature"));
+        let text = vault.read_note(note.id).unwrap();
+        vault
+            .write_note(note.id, &format!("{text}#shout[a] #cited"))
+            .unwrap();
+        let preview = vault.preview(note.id).unwrap();
+        assert_eq!(preview.prefix.lines().count(), 2);
+        let (svg, diagnostics) = render(&vault, note.id);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(svg.contains("#654321"), "the kind's template wins");
+
+        assert_eq!(
+            vault.rename_kind("Literature", "Reading").unwrap(),
+            vec![note.id]
+        );
+        assert_eq!(
+            vault.note(note.id).unwrap().kind.as_deref(),
+            Some("Reading")
+        );
+        assert!(
+            vault
+                .read_note(note.id)
+                .unwrap()
+                .contains("kind: \"Reading\"")
+        );
+        assert_eq!(
+            Vault::open(&dir.0).unwrap().kinds().collect::<Vec<_>>(),
+            ["Reading"]
+        );
+
+        vault.delete_kind("Reading", DeleteMode::Permanent).unwrap();
+        assert_eq!(vault.preview(note.id).unwrap().prefix.lines().count(), 1);
+        let tree = vault.tree();
+        assert!(
+            tree.notes[0]
+                .warning
+                .as_deref()
+                .unwrap()
+                .contains("Reading")
+        );
+        vault.set_kind(note.id, None).unwrap();
+        assert_eq!(vault.note(note.id).unwrap().kind, None);
+        assert!(vault.tree().notes[0].warning.is_none());
+    }
+
+    #[test]
     fn preview_follows_the_theme_unless_a_note_opts_out() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
@@ -1333,10 +1668,19 @@ mod tests {
         let (dark, diagnostics) = render_themed(&vault, themed, true);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(
-            light.contains("#ffffff") && dark.contains("#2b2b2b"),
+            light.contains("#ffffff") && dark.contains("#232323"),
             "page fill"
         );
         assert!(dark.contains("#e8e8e8"), "dark ink");
+        vault
+            .write_note(
+                themed,
+                "#metadata((title: \"Themed\")) <note>\n#link(\"https://typst.app\")[x]",
+            )
+            .unwrap();
+        let (linked, diagnostics) = render_themed(&vault, themed, true);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(linked.contains("#6d9bff"), "links in the accent colour");
 
         let (opted_out, diagnostics) = render_themed(&vault, plain, true);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");

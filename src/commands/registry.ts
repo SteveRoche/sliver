@@ -41,13 +41,13 @@ interface Chord {
 }
 
 function parse(keybinding: string): Chord {
-  const parts = keybinding.split("+");
+  const parts = keybinding.split('+');
   const has = (name: string) => parts.includes(name);
   return {
-    mod: has("Mod"),
-    ctrl: has("Ctrl"),
-    shift: has("Shift"),
-    alt: has("Alt"),
+    mod: has('Mod'),
+    ctrl: has('Ctrl'),
+    shift: has('Shift'),
+    alt: has('Alt'),
     key: parts[parts.length - 1].toLowerCase(),
   };
 }
@@ -57,11 +57,13 @@ function matches(event: KeyboardEvent, chord: Chord): boolean {
   const meta = chord.mod && isMac;
   // `event.code` keeps Shift/Alt from changing the key (Shift+, is "<").
   const key =
-    event.code.startsWith("Key") || event.code.startsWith("Digit")
-      ? event.code.slice(event.code.startsWith("Key") ? 3 : 5).toLowerCase()
-      : event.code === "Comma"
-        ? ","
-        : event.key.toLowerCase();
+    event.code.startsWith('Key') || event.code.startsWith('Digit')
+      ? event.code.slice(event.code.startsWith('Key') ? 3 : 5).toLowerCase()
+      : event.code === 'Comma'
+        ? ','
+        : event.code === 'Backslash'
+          ? '\\'
+          : event.key.toLowerCase();
   return (
     event.ctrlKey === ctrl &&
     event.metaKey === meta &&
@@ -74,10 +76,10 @@ function matches(event: KeyboardEvent, chord: Chord): boolean {
 /** The keys of a keybinding as the platform labels them: `["⌘", "⇧", "P"]`. */
 export function keybindingKeys(keybinding: string): string[] {
   const names: Record<string, string> = isMac
-    ? { Mod: "⌘", Ctrl: "⌃", Shift: "⇧", Alt: "⌥" }
-    : { Mod: "Ctrl", Alt: "Alt" };
+    ? { Mod: '⌘', Ctrl: '⌃', Shift: '⇧', Alt: '⌥' }
+    : { Mod: 'Ctrl', Alt: 'Alt' };
   return keybinding
-    .split("+")
+    .split('+')
     .map((p) => names[p] ?? (p.length === 1 ? p.toUpperCase() : p));
 }
 
@@ -93,6 +95,6 @@ export function installKeybindings(): () => void {
       return;
     }
   };
-  window.addEventListener("keydown", onKeyDown, true);
-  return () => window.removeEventListener("keydown", onKeyDown, true);
+  window.addEventListener('keydown', onKeyDown, true);
+  return () => window.removeEventListener('keydown', onKeyDown, true);
 }

@@ -1,6 +1,6 @@
-import { Dialog } from "@ark-ui/solid";
-import { createSignal, Show } from "solid-js";
-import { Portal } from "solid-js/web";
+import { Dialog } from '@ark-ui/solid';
+import { createSignal, Show } from 'solid-js';
+import { Portal } from 'solid-js/web';
 
 interface PromptRequest {
   title: string;
@@ -22,8 +22,8 @@ export function prompt(options: {
   request()?.resolve(null);
   return new Promise((resolve) =>
     setRequest({
-      initial: "",
-      confirm: "OK",
+      initial: '',
+      confirm: 'OK',
       ...options,
       resolve,
     }),
@@ -56,7 +56,7 @@ export function PromptHost() {
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
-                    finish(input?.value ?? "");
+                    finish(input?.value ?? '');
                   }}
                 >
                   <Dialog.Title class="dialog-title">

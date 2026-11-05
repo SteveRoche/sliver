@@ -1,65 +1,76 @@
-import { ask, open } from "@tauri-apps/plugin-dialog";
-import { openPalette, pick } from "../components/Palette";
-import { prompt } from "../components/Prompt";
-import { openSettings } from "../components/SettingsDialog";
-import { menuFolder, menuTarget } from "../components/Sidebar";
-import { togglePreview } from "../components/Workspace";
-import { settings, updateSettings } from "../state/settings";
+import { ask, open } from '@tauri-apps/plugin-dialog';
+import { openPalette, pick } from '../components/Palette';
+import { prompt } from '../components/Prompt';
+import { openSettings } from '../components/SettingsDialog';
+import { menuFolder, menuTarget } from '../components/Sidebar';
+import { toggleDebug } from '../state/debug';
+import { settings, updateSettings } from '../state/settings';
 import {
   active,
   activeNote,
   allFolders,
   allNotes,
+  closePane,
   closeTab,
   createFolder,
   createNote,
+  cyclePane,
   cycleTab,
   deleteFolder,
   deleteNote,
+  focusedTabs,
   inZettelkasten,
+  kinds,
+  layout,
   moveToAddress,
   moveToFolder,
   newTab,
   noteById,
   noteLabel,
   openVault,
+  previewLayout,
   refreshLinks,
   renameFolder,
   renameNote,
+  saveNote,
+  setNoteKind,
+  setPreviewLayout,
   setZettelkasten,
-  tabs,
+  splitFocused,
+  togglePreview,
+  toggleReading,
   vaultRoot,
   zettelkasten,
-} from "../state/workspace";
-import { type NoteId, type Placement, vault } from "../vault/api";
-import { type Command, registerCommands } from "./registry";
+} from '../state/workspace';
+import { type NoteId, type Placement, vault } from '../vault/api';
+import { type Command, registerCommands } from './registry';
 
 export async function chooseAndOpenVault(create: boolean) {
   const path = await open({
     directory: true,
-    title: create ? "Choose an empty folder for the new vault" : "Open a vault",
+    title: create ? 'Choose an empty folder for the new vault' : 'Open a vault',
   });
-  if (typeof path !== "string") return;
+  if (typeof path !== 'string') return;
   await openVault(path, create);
 }
 
-async function newNote(placement: Placement, heading: string) {
+async function newNote(placement: Placement, heading: string, kind?: string) {
   const title = await prompt({
-    title: heading,
-    label: "Title",
-    confirm: "Create",
+    title: kind ? `${heading} (${kind})` : heading,
+    label: 'Title',
+    confirm: 'Create',
   });
   if (title === null) return;
-  await createNote(placement, title.trim());
+  await createNote(placement, title.trim(), kind);
 }
 
 async function rename(id: NoteId) {
   const note = noteById(id);
   const title = await prompt({
-    title: "Rename note",
-    label: "Title",
-    initial: note?.title ?? "",
-    confirm: "Rename",
+    title: 'Rename note',
+    label: 'Title',
+    initial: note?.title ?? '',
+    confirm: 'Rename',
   });
   if (title === null || !title.trim()) return;
   await renameNote(id, title.trim());
@@ -67,10 +78,10 @@ async function rename(id: NoteId) {
 
 async function remove(id: NoteId) {
   const verb =
-    settings.deleteMode === "trash" ? "Move to trash" : "Delete permanently";
+    settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
   const ok = await ask(`${verb}: "${noteLabel(noteById(id))}"?`, {
-    title: "Delete note",
-    kind: "warning",
+    title: 'Delete note',
+    kind: 'warning',
     okLabel: verb,
   });
   if (ok) await deleteNote(id);
@@ -87,17 +98,17 @@ async function chooseAddress(id: NoteId | null): Promise<Placement | null> {
       // A note can't be filed after or beside itself or the notes after it.
       !(filed && subtreeOf && isUnder(n.address, subtreeOf)),
   );
-  const target = await pick<NoteId | null>("File after or beside...", [
-    { label: "New top-level address", value: null },
+  const target = await pick<NoteId | null>('File after or beside...', [
+    { label: 'New top-level address', value: null },
     ...targets.map((n) => ({ label: noteLabel(n), value: n.id })),
   ]);
   if (!target) return null;
-  if (target.value === null) return { kind: "top" };
+  if (target.value === null) return { kind: 'top' };
   const of = target.value;
   const label = noteLabel(noteById(of));
-  const how = await pick<"next" | "aside">("Next note or aside?", [
-    { label: `Next note after ${label}`, value: "next" },
-    { label: `Aside to ${label}`, value: "aside" },
+  const how = await pick<'next' | 'aside'>('Next note or aside?', [
+    { label: `Next note after ${label}`, value: 'next' },
+    { label: `Aside to ${label}`, value: 'aside' },
   ]);
   return how && { kind: how.value, of };
 }
@@ -109,7 +120,7 @@ function isUnder(address: string, root: string): boolean {
   const next = address[root.length];
   const last = root[root.length - 1];
   // The next segment switches kind (digit <-> letter), or opens with "." after the top number.
-  return next === "." || /\d/.test(last) !== /\d/.test(next);
+  return next === '.' || /\d/.test(last) !== /\d/.test(next);
 }
 
 async function fileNote(id: NoteId) {
@@ -123,83 +134,108 @@ async function fileNote(id: NoteId) {
     if (rest.length > 0) {
       parts.push(`with the ${rest.length} note(s) under it`);
     }
-    let message = `${parts.join(" ")}?`;
+    let message = `${parts.join(' ')}?`;
     if (links > 0) {
       message += ` ${links} link(s) in ${plan.linkEdits.length} note(s) will be updated.`;
     }
     const ok = await ask(message, {
-      title: "Move note",
-      kind: "info",
-      okLabel: "Move",
+      title: 'Move note',
+      kind: 'info',
+      okLabel: 'Move',
     });
     if (!ok) return;
   }
   await moveToAddress(id, placement);
 }
 
-const folderLabel = (path: string) => (path === "" ? "Vault root" : path);
+const folderLabel = (path: string) => (path === '' ? 'Vault root' : path);
 
 async function moveNoteToFolder(id: NoteId) {
   const note = noteById(id);
   const zk = zettelkasten()?.path;
-  const choices = ["", ...allFolders().map((f) => f.path)]
+  const choices = ['', ...allFolders().map((f) => f.path)]
     .filter((path) => path !== zk && path !== note?.folder)
     .map((path) => ({ label: folderLabel(path), value: path }));
-  const choice = await pick("Move to folder...", choices);
+  const choice = await pick('Move to folder...', choices);
   if (!choice) return;
   if (note?.address && inZettelkasten(id)) {
     const ok = await ask(
       `Moving "${noteLabel(note)}" out of the Zettelkasten removes its address ${note.address}. Links to it will point at its id instead.`,
-      { title: "Move note", kind: "info", okLabel: "Move" },
+      { title: 'Move note', kind: 'info', okLabel: 'Move' },
     );
     if (!ok) return;
   }
   await moveToFolder(id, choice.value);
 }
 
+/** A folder that's gone (deleted or renamed outside the app) falls back to the root. */
+const existingFolder = (path: string) =>
+  path === '' || allFolders().some((f) => f.path === path) ? path : '';
+
 /** Mod+N: a note where the vault's settings say new notes go. */
-async function newNoteDefault() {
+async function newNoteDefault(kind?: string) {
   const current = activeNote();
   const wanted =
-    settings.newNoteLocation === "folder"
+    settings.newNoteLocation === 'folder'
       ? settings.newNoteFolder
-      : settings.newNoteLocation === "current" && current
-        ? (noteById(current)?.folder ?? "")
-        : "";
-  // A folder that's gone (deleted or renamed outside the app) falls back to the root.
-  const folder =
-    wanted === "" || allFolders().some((f) => f.path === wanted) ? wanted : "";
-  await newNoteIn(folder);
+      : settings.newNoteLocation === 'current' && current
+        ? (noteById(current)?.folder ?? '')
+        : '';
+  await newNoteIn(existingFolder(wanted), kind);
+}
+
+/** Asks for a kind, then creates a note in that kind's folder (else where Mod+N would). */
+async function newNoteOfKind() {
+  const choice = await pick(
+    'New note of kind...',
+    kinds().map((kind) => ({ label: kind, value: kind })),
+  );
+  if (!choice) return;
+  const kind = choice.value;
+  const folder = settings.kindFolders[kind];
+  if (folder !== undefined) await newNoteIn(existingFolder(folder), kind);
+  else await newNoteDefault(kind);
+}
+
+async function changeKind(id: NoteId) {
+  const current = noteById(id)?.kind ?? null;
+  const choice = await pick<string | null>('Change note kind...', [
+    { label: 'No kind', value: null },
+    ...kinds().map((kind) => ({ label: kind, value: kind })),
+  ]);
+  if (!choice || choice.value === current) return;
+  await setNoteKind(id, choice.value);
 }
 
 async function newFolder(parent: string) {
   const name = await prompt({
-    title: parent ? `New folder in ${parent}` : "New folder",
-    label: "Name",
-    confirm: "Create",
+    title: parent ? `New folder in ${parent}` : 'New folder',
+    label: 'Name',
+    confirm: 'Create',
   });
   if (name === null || !name.trim()) return;
   await createFolder(parent, name.trim());
 }
 
-async function newNoteIn(folder: string) {
+async function newNoteIn(folder: string, kind?: string) {
   if (folder === zettelkasten()?.path) {
     const placement = await chooseAddress(null);
-    if (placement) await newNote(placement, "New note");
+    if (placement) await newNote(placement, 'New note', kind);
     return;
   }
   return newNote(
-    { kind: "unaddressed", folder },
-    folder ? `New note in ${folder}` : "New note",
+    { kind: 'unaddressed', folder },
+    folder ? `New note in ${folder}` : 'New note',
+    kind,
   );
 }
 
 async function renameFolderPrompt(path: string) {
   const name = await prompt({
-    title: "Rename folder",
-    label: "Name",
-    initial: path.split("/").pop() ?? "",
-    confirm: "Rename",
+    title: 'Rename folder',
+    label: 'Name',
+    initial: path.split('/').pop() ?? '',
+    confirm: 'Rename',
   });
   if (name === null || !name.trim()) return;
   await renameFolder(path, name.trim());
@@ -207,13 +243,13 @@ async function renameFolderPrompt(path: string) {
 
 async function removeFolder(path: string) {
   const verb =
-    settings.deleteMode === "trash" ? "Move to trash" : "Delete permanently";
+    settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
   const count = allNotes().filter(
     (n) => n.folder === path || n.folder.startsWith(`${path}/`),
   ).length;
   const ok = await ask(
     `${verb}: the folder "${path}" with ${count} note(s) and everything else in it?`,
-    { title: "Delete folder", kind: "warning", okLabel: verb },
+    { title: 'Delete folder', kind: 'warning', okLabel: verb },
   );
   if (ok) await deleteFolder(path);
 }
@@ -242,38 +278,44 @@ function onNote(
   return [
     {
       id: `${idPrefix}.next`,
-      title: "New next note after current note",
+      title: 'New next note after current note',
       enabled: enabled(true),
-      run: withTarget((of) => newNote({ kind: "next", of }, "New next note")),
+      run: withTarget((of) => newNote({ kind: 'next', of }, 'New next note')),
     },
     {
       id: `${idPrefix}.aside`,
-      title: "New aside to current note",
+      title: 'New aside to current note',
       enabled: enabled(true),
-      run: withTarget((of) => newNote({ kind: "aside", of }, "New aside")),
+      run: withTarget((of) => newNote({ kind: 'aside', of }, 'New aside')),
     },
     {
       id: `${idPrefix}.moveToAddress`,
-      title: "File or move current note to a Zettelkasten address",
+      title: 'File or move current note to a Zettelkasten address',
       enabled: () => enabled()() && zettelkasten() !== null,
       run: withTarget(fileNote),
     },
     {
       id: `${idPrefix}.moveToFolder`,
-      title: "Move current note to a folder",
+      title: 'Move current note to a folder',
       enabled: enabled(),
       run: withTarget(moveNoteToFolder),
     },
     {
+      id: `${idPrefix}.changeKind`,
+      title: 'Change kind of current note',
+      enabled: enabled(),
+      run: withTarget(changeKind),
+    },
+    {
       id: `${idPrefix}.rename`,
-      title: "Rename current note",
-      keybinding: keybindings ? "F2" : undefined,
+      title: 'Rename current note',
+      keybinding: keybindings ? 'F2' : undefined,
       enabled: enabled(),
       run: withTarget(rename),
     },
     {
       id: `${idPrefix}.delete`,
-      title: "Delete current note",
+      title: 'Delete current note',
       enabled: enabled(),
       run: withTarget(remove),
     },
@@ -289,32 +331,32 @@ function onFolder(): Command[] {
   const enabled = () => hasVault() && menuFolder() !== null;
   return [
     {
-      id: "folder.menu.newNote",
-      title: "New note in folder",
+      id: 'folder.menu.newNote',
+      title: 'New note in folder',
       enabled,
       run: withFolder(newNoteIn),
     },
     {
-      id: "folder.menu.newFolder",
-      title: "New folder in folder",
+      id: 'folder.menu.newFolder',
+      title: 'New folder in folder',
       enabled,
       run: withFolder(newFolder),
     },
     {
-      id: "folder.menu.rename",
-      title: "Rename folder",
+      id: 'folder.menu.rename',
+      title: 'Rename folder',
       enabled,
       run: withFolder(renameFolderPrompt),
     },
     {
-      id: "folder.menu.delete",
-      title: "Delete folder",
+      id: 'folder.menu.delete',
+      title: 'Delete folder',
       enabled,
       run: withFolder(removeFolder),
     },
     {
-      id: "folder.menu.setZettelkasten",
-      title: "Use folder as the Zettelkasten",
+      id: 'folder.menu.setZettelkasten',
+      title: 'Use folder as the Zettelkasten',
       enabled: () => enabled() && zettelkasten() === null,
       run: withFolder(setZettelkasten),
     },
@@ -325,51 +367,68 @@ function onFolder(): Command[] {
 export function registerAppCommands(): () => void {
   return registerCommands([
     {
-      id: "palette.commands",
-      title: "Show all commands",
-      keybinding: "Mod+P",
-      run: () => openPalette("commands"),
+      id: 'palette.commands',
+      title: 'Show all commands',
+      keybinding: 'Mod+P',
+      run: () => openPalette('commands'),
     },
     {
-      id: "palette.notes",
-      title: "Go to note",
-      keybinding: "Mod+O",
+      id: 'palette.notes',
+      title: 'Go to note',
+      keybinding: 'Mod+O',
       enabled: hasVault,
-      run: () => openPalette("notes"),
+      run: () => openPalette('notes'),
     },
     {
-      id: "note.new",
-      title: "New note",
-      keybinding: "Mod+N",
+      id: 'note.new',
+      title: 'New note',
+      keybinding: 'Mod+N',
       enabled: hasVault,
-      run: newNoteDefault,
+      run: () => newNoteDefault(),
     },
     {
-      id: "note.newUnaddressed",
-      title: "New note without an address",
-      enabled: hasVault,
-      run: () => newNote({ kind: "unaddressed" }, "New note"),
+      id: 'note.newOfKind',
+      title: 'New note of kind',
+      keybinding: 'Mod+Shift+N',
+      enabled: () => hasVault() && kinds().length > 0,
+      run: newNoteOfKind,
     },
-    ...onNote("note", activeNote, true),
-    ...onNote("menu", menuTarget, false),
+    {
+      id: 'note.newUnaddressed',
+      title: 'New note without an address',
+      enabled: hasVault,
+      run: () => newNote({ kind: 'unaddressed' }, 'New note'),
+    },
+    ...onNote('note', activeNote, true),
+    ...onNote('menu', menuTarget, false),
     ...onFolder(),
     {
-      id: "folder.new",
-      title: "New folder",
+      id: 'folder.new',
+      title: 'New folder',
       enabled: hasVault,
-      run: () => newFolder(""),
+      run: () => newFolder(''),
     },
     {
-      id: "tab.new",
-      title: "New tab",
-      keybinding: "Mod+T",
+      id: 'tab.new',
+      title: 'New tab',
+      keybinding: 'Mod+T',
       enabled: hasVault,
       run: newTab,
     },
     {
-      id: "tab.close",
-      title: "Close tab",
-      keybinding: "Mod+W",
+      id: 'note.save',
+      title: 'Save current note',
+      keybinding: 'Mod+S',
+      enabled: () => activeNote() !== null,
+      run: () => {
+        const id = activeNote();
+        if (id) return saveNote(id);
+      },
+    },
+    {
+      id: 'tab.close',
+      title: 'Close tab',
+      keybinding: 'Mod+W',
       enabled: () => active() !== null,
       run: () => {
         const key = active();
@@ -377,58 +436,117 @@ export function registerAppCommands(): () => void {
       },
     },
     {
-      id: "tab.next",
-      title: "Next tab",
-      keybinding: "Ctrl+Tab",
-      enabled: () => tabs.length > 1,
+      id: 'tab.next',
+      title: 'Next tab',
+      keybinding: 'Ctrl+Tab',
+      enabled: () => focusedTabs().length > 1,
       run: () => cycleTab(1),
     },
     {
-      id: "tab.previous",
-      title: "Previous tab",
-      keybinding: "Ctrl+Shift+Tab",
-      enabled: () => tabs.length > 1,
+      id: 'tab.previous',
+      title: 'Previous tab',
+      keybinding: 'Ctrl+Shift+Tab',
+      enabled: () => focusedTabs().length > 1,
       run: () => cycleTab(-1),
     },
     {
-      id: "view.togglePreview",
-      title: "Toggle preview pane",
-      keybinding: "Mod+Shift+P",
+      id: 'view.togglePreview',
+      title: 'Toggle preview',
+      keybinding: 'Mod+Shift+P',
       enabled: hasVault,
       run: togglePreview,
     },
     {
-      id: "settings.open",
-      title: "Open settings",
-      keybinding: "Mod+,",
+      id: 'view.toggleReading',
+      title: 'Toggle reading view',
+      keybinding: 'Mod+E',
       enabled: hasVault,
-      run: openSettings,
+      run: toggleReading,
     },
     {
-      id: "editor.toggleVim",
-      title: "Toggle Vim key bindings",
+      id: 'view.togglePreviewLayout',
+      title: 'Toggle global preview mode',
+      enabled: hasVault,
+      run: () =>
+        setPreviewLayout(previewLayout() === 'pane' ? 'global' : 'pane'),
+    },
+    {
+      id: 'pane.splitRight',
+      title: 'Split right (move tab to a new pane)',
+      keybinding: 'Mod+\\',
+      enabled: () => hasVault() && focusedTabs().length > 1,
+      run: () => splitFocused('right'),
+    },
+    {
+      id: 'pane.splitDown',
+      title: 'Split down (move tab to a new pane)',
+      keybinding: 'Mod+Shift+\\',
+      enabled: () => hasVault() && focusedTabs().length > 1,
+      run: () => splitFocused('bottom'),
+    },
+    {
+      id: 'pane.next',
+      title: 'Focus next pane',
+      keybinding: 'Mod+Alt+ArrowRight',
+      enabled: () => hasVault() && layout.root.kind === 'split',
+      run: () => cyclePane(1),
+    },
+    {
+      id: 'pane.previous',
+      title: 'Focus previous pane',
+      keybinding: 'Mod+Alt+ArrowLeft',
+      enabled: () => hasVault() && layout.root.kind === 'split',
+      run: () => cyclePane(-1),
+    },
+    {
+      id: 'pane.close',
+      title: 'Close pane',
+      enabled: () => hasVault() && layout.root.kind === 'split',
+      run: closePane,
+    },
+    {
+      id: 'debug.toggle',
+      title: 'Toggle debug view (compile timings)',
+      run: toggleDebug,
+    },
+    {
+      id: 'settings.open',
+      title: 'Open settings',
+      keybinding: 'Mod+,',
+      enabled: hasVault,
+      run: () => openSettings(),
+    },
+    {
+      id: 'settings.preambles',
+      title: 'Edit preambles (shared Typst code)',
+      enabled: hasVault,
+      run: () => openSettings('preambles'),
+    },
+    {
+      id: 'editor.toggleVim',
+      title: 'Toggle Vim key bindings',
       enabled: hasVault,
       run: () => updateSettings({ vim: !settings.vim }),
     },
     {
-      id: "links.toggleDisplay",
-      title: "Toggle wikilinks between titles and addresses",
+      id: 'links.toggleDisplay',
+      title: 'Toggle wikilinks between titles and addresses',
       enabled: hasVault,
       run: () => {
         updateSettings({
-          linkDisplay: settings.linkDisplay === "title" ? "address" : "title",
+          linkDisplay: settings.linkDisplay === 'title' ? 'address' : 'title',
         });
         return refreshLinks();
       },
     },
     {
-      id: "vault.open",
-      title: "Open another vault...",
+      id: 'vault.open',
+      title: 'Open another vault...',
       run: () => chooseAndOpenVault(false),
     },
     {
-      id: "vault.create",
-      title: "Create a new vault...",
+      id: 'vault.create',
+      title: 'Create a new vault...',
       run: () => chooseAndOpenVault(true),
     },
   ]);

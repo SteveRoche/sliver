@@ -1,7 +1,7 @@
-import FolderOpen from "lucide-solid/icons/folder-open";
-import FolderPlus from "lucide-solid/icons/folder-plus";
-import { createSignal, Show } from "solid-js";
-import { chooseAndOpenVault } from "../commands/app";
+import FolderOpen from 'lucide-solid/icons/folder-open';
+import FolderPlus from 'lucide-solid/icons/folder-plus';
+import { createSignal, Show } from 'solid-js';
+import { chooseAndOpenVault } from '../commands/app';
 
 /** Shown when no vault is open (first launch, or the last one is gone). */
 export function Welcome() {

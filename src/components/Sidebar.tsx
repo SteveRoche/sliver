@@ -1,30 +1,33 @@
-import { createTreeCollection, Menu, TreeView } from "@ark-ui/solid";
-import ArrowDown from "lucide-solid/icons/arrow-down";
-import CornerDownRight from "lucide-solid/icons/corner-down-right";
-import FilePlus from "lucide-solid/icons/file-plus";
-import Folder from "lucide-solid/icons/folder";
-import FolderInput from "lucide-solid/icons/folder-input";
-import FolderOpen from "lucide-solid/icons/folder-open";
-import FolderPen from "lucide-solid/icons/folder-pen";
-import FolderPlus from "lucide-solid/icons/folder-plus";
-import FolderX from "lucide-solid/icons/folder-x";
-import Library from "lucide-solid/icons/library";
-import Milestone from "lucide-solid/icons/milestone";
-import Pencil from "lucide-solid/icons/pencil";
-import Plus from "lucide-solid/icons/plus";
-import Trash2 from "lucide-solid/icons/trash";
-import TriangleAlert from "lucide-solid/icons/triangle-exclamation-point";
+import { createTreeCollection, Menu, TreeView } from '@ark-ui/solid';
+import ArrowDown from 'lucide-solid/icons/arrow-down';
+import CornerDownRight from 'lucide-solid/icons/corner-down-right';
+import FilePlus from 'lucide-solid/icons/file-plus';
+import Folder from 'lucide-solid/icons/folder';
+import FolderInput from 'lucide-solid/icons/folder-input';
+import FolderOpen from 'lucide-solid/icons/folder-open';
+import FolderPen from 'lucide-solid/icons/folder-pen';
+import FolderPlus from 'lucide-solid/icons/folder-plus';
+import FolderX from 'lucide-solid/icons/folder-x';
+import Library from 'lucide-solid/icons/library';
+import Milestone from 'lucide-solid/icons/milestone';
+import Pencil from 'lucide-solid/icons/pencil';
+import Plus from 'lucide-solid/icons/plus';
+import Shapes from 'lucide-solid/icons/shapes';
+import Trash2 from 'lucide-solid/icons/trash';
+import TriangleAlert from 'lucide-solid/icons/triangle-exclamation-point';
 import {
   createMemo,
   createSignal,
   For,
   type JSX,
   Match,
+  onCleanup,
+  onMount,
   Show,
   Switch,
-} from "solid-js";
-import { Portal } from "solid-js/web";
-import { runCommand } from "../commands/registry";
+} from 'solid-js';
+import { Portal } from 'solid-js/web';
+import { runCommand } from '../commands/registry';
 import {
   activeNote,
   collapsedFolders,
@@ -35,33 +38,34 @@ import {
   setFolderCollapsed,
   tree,
   zettelkasten,
-} from "../state/workspace";
-import type { FolderNode, NoteId, TreeNode } from "../vault/api";
+} from '../state/workspace';
+import type { FolderNode, NoteId, TreeNode } from '../vault/api';
+import { overlayScrollbar } from './scrollbars';
 
 /** Row data for Ark's tree: folders and notes share one collection. */
 type Node =
   | {
       id: string;
-      kind: "folder";
+      kind: 'folder';
       folder: FolderNode;
       depth: number;
       children: Node[];
     }
   | {
       id: string;
-      kind: "note";
+      kind: 'note';
       note: TreeNode;
       depth: number;
       children?: Node[];
     };
 
-const FOLDER_PREFIX = "folder:";
+const FOLDER_PREFIX = 'folder:';
 const folderId = (path: string) => FOLDER_PREFIX + path;
 
 function noteNodes(notes: TreeNode[], depth: number): Node[] {
   return notes.map((note) => ({
     id: note.id,
-    kind: "note",
+    kind: 'note',
     note,
     depth,
     // Ark treats a node as a branch whenever it has a children array.
@@ -76,7 +80,7 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
     ...folder.folders.map(
       (sub): Node => ({
         id: folderId(sub.path),
-        kind: "folder",
+        kind: 'folder',
         folder: sub,
         depth,
         children: folderContents(sub, depth + 1),
@@ -88,7 +92,7 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
 
 function noteBranchIds(nodes: Node[], out: string[] = []): string[] {
   for (const node of nodes) {
-    if (node.kind === "note" && node.children) out.push(node.id);
+    if (node.kind === 'note' && node.children) out.push(node.id);
     noteBranchIds(node.children ?? [], out);
   }
   return out;
@@ -106,10 +110,10 @@ export function Sidebar() {
     createTreeCollection<Node>({
       nodeToValue: (node) => node.id,
       nodeToString: (node) =>
-        node.kind === "folder" ? node.folder.name : noteLabel(node.note),
+        node.kind === 'folder' ? node.folder.name : noteLabel(node.note),
       rootNode: {
-        id: "root",
-        kind: "folder",
+        id: 'root',
+        kind: 'folder',
         folder: tree(),
         depth: 0,
         children: nodes(),
@@ -147,20 +151,28 @@ export function Sidebar() {
 
   const onContextMenu = (event: MouseEvent) => {
     const row = (event.target as Element).closest<HTMLElement>(
-      "[data-note-id], [data-folder-path]",
+      '[data-note-id], [data-folder-path]',
     );
     setMenuTarget(row?.dataset.noteId ?? null);
     setMenuFolder(row?.dataset.folderPath ?? null);
   };
 
-  const targetNote = () => noteById(menuTarget() ?? "");
+  const targetNote = () => noteById(menuTarget() ?? '');
   const targetFolder = () =>
     allSubfolders(tree()).find((f) => f.path === menuFolder());
   const isEmpty = () =>
     tree().folders.length === 0 && tree().notes.length === 0;
 
   return (
-    <aside class="sidebar">
+    <aside
+      class="sidebar"
+      ref={(aside) =>
+        onMount(() => {
+          const tree = aside.querySelector<HTMLElement>('.sidebar-tree');
+          if (tree) onCleanup(overlayScrollbar(tree));
+        })
+      }
+    >
       <div class="sidebar-header">
         <span>Notes</span>
         <div class="sidebar-actions">
@@ -169,7 +181,7 @@ export function Sidebar() {
             class="icon-button"
             title="New folder"
             aria-label="New folder"
-            onClick={() => runCommand("folder.new")}
+            onClick={() => runCommand('folder.new')}
           >
             <FolderPlus size={16} />
           </button>
@@ -178,7 +190,7 @@ export function Sidebar() {
             class="icon-button"
             title="New note"
             aria-label="New note"
-            onClick={() => runCommand("note.new")}
+            onClick={() => runCommand('note.new')}
           >
             <Plus size={16} />
           </button>
@@ -279,11 +291,14 @@ function NoteMenu(props: { addressed: boolean; filed: boolean }) {
         <Menu.Separator class="menu-separator" />
       </Show>
       <Menu.Item value="menu.moveToAddress" disabled={!zettelkasten()}>
-        <Milestone size={14} />{" "}
-        {props.filed ? "Move to address..." : "File into Zettelkasten..."}
+        <Milestone size={14} />{' '}
+        {props.filed ? 'Move to address...' : 'File into Zettelkasten...'}
       </Menu.Item>
       <Menu.Item value="menu.moveToFolder">
         <FolderInput size={14} /> Move to folder...
+      </Menu.Item>
+      <Menu.Item value="menu.changeKind">
+        <Shapes size={14} /> Change kind...
       </Menu.Item>
       <Menu.Separator class="menu-separator" />
       <Menu.Item value="menu.rename">
@@ -297,7 +312,7 @@ function NoteMenu(props: { addressed: boolean; filed: boolean }) {
 }
 
 function FolderMenu(props: { folder: FolderNode }) {
-  const isZettelkasten = () => props.folder.kind === "zettelkasten";
+  const isZettelkasten = () => props.folder.kind === 'zettelkasten';
   return (
     <>
       <Menu.Item value="folder.menu.newNote">
@@ -340,24 +355,24 @@ function Warning(props: { message: string | null; label: string }) {
 
 function NodeView(props: { node: Node; indexPath: number[] }) {
   const depthStyle = (): JSX.CSSProperties => ({
-    "--depth": String(props.node.depth),
+    '--depth': String(props.node.depth),
   });
   return (
     <TreeView.NodeProvider node={props.node} indexPath={props.indexPath}>
       <Switch>
-        <Match when={props.node.kind === "folder" && props.node}>
+        <Match when={props.node.kind === 'folder' && props.node}>
           {(node) => (
             <FolderView
-              node={node() as Extract<Node, { kind: "folder" }>}
+              node={node() as Extract<Node, { kind: 'folder' }>}
               indexPath={props.indexPath}
               style={depthStyle()}
             />
           )}
         </Match>
-        <Match when={props.node.kind === "note" && props.node}>
+        <Match when={props.node.kind === 'note' && props.node}>
           {(node) => (
             <NoteView
-              node={node() as Extract<Node, { kind: "note" }>}
+              node={node() as Extract<Node, { kind: 'note' }>}
               indexPath={props.indexPath}
               style={depthStyle()}
             />
@@ -381,7 +396,7 @@ function Children(props: { nodes: Node[]; indexPath: number[] }) {
 }
 
 function FolderView(props: {
-  node: Extract<Node, { kind: "folder" }>;
+  node: Extract<Node, { kind: 'folder' }>;
   indexPath: number[];
   style: JSX.CSSProperties;
 }) {
@@ -399,7 +414,7 @@ function FolderView(props: {
             {(node) => (
               <span class="folder-icon">
                 <Switch>
-                  <Match when={folder().kind === "zettelkasten"}>
+                  <Match when={folder().kind === 'zettelkasten'}>
                     <Library size={14} aria-label="Zettelkasten" />
                   </Match>
                   <Match when={node().expanded}>
@@ -422,14 +437,14 @@ function FolderView(props: {
 }
 
 function NoteView(props: {
-  node: Extract<Node, { kind: "note" }>;
+  node: Extract<Node, { kind: 'note' }>;
   indexPath: number[];
   style: JSX.CSSProperties;
 }) {
   const note = () => props.node.note;
   const title = () => (
     <>
-      <span class="note-title">{note().title ?? "Untitled"}</span>
+      <span class="note-title">{note().title ?? 'Untitled'}</span>
       <Warning message={note().headerError} label="Header error" />
       <Warning message={note().warning} label="Note warning" />
     </>
@@ -466,7 +481,7 @@ function NoteView(props: {
               {(node) => (
                 <TreeView.BranchTrigger
                   class="note-address fold-toggle"
-                  title={node().expanded ? "Fold" : "Unfold"}
+                  title={node().expanded ? 'Fold' : 'Unfold'}
                 >
                   {note().address}
                 </TreeView.BranchTrigger>

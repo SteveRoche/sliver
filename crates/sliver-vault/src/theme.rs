@@ -29,7 +29,7 @@ const LIGHT: Palette = Palette {
 
 const DARK: Palette = Palette {
     ink: "#e8e8e8",
-    paper: "#2b2b2b",
+    paper: "#232323",
     muted: "#9a9a9a",
     accent: "#6d9bff",
     error: "#ef5350",
@@ -42,7 +42,7 @@ pub fn theme_library(dark: bool) -> String {
     let p = if dark { &DARK } else { &LIGHT };
     // In the light theme everything is already on light paper.
     let untheme = if dark {
-        "block(fill: light.paper, inset: 6pt, width: 100%, { set text(fill: light.ink); body })"
+        "block(fill: light.paper, inset: 6pt, width: 100%, { set text(fill: light.ink); show link: set text(fill: light.accent); body })"
     } else {
         "body"
     };
@@ -58,7 +58,7 @@ pub fn theme_library(dark: bool) -> String {
 #let warning = rgb("{warning}")
 #let rule = rgb("{rule}")
 // The light theme's colours, whatever the current theme.
-#let light = (ink: rgb("{light_ink}"), paper: rgb("{light_paper}"))
+#let light = (ink: rgb("{light_ink}"), paper: rgb("{light_paper}"), accent: rgb("{light_accent}"))
 // Shows `body` as on light paper in every theme, for content drawn for a
 // white page (diagrams, images with black lines).
 #let untheme(body) = {untheme}
@@ -73,5 +73,6 @@ pub fn theme_library(dark: bool) -> String {
         rule = p.rule,
         light_ink = LIGHT.ink,
         light_paper = LIGHT.paper,
+        light_accent = LIGHT.accent,
     )
 }

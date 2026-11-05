@@ -1,12 +1,13 @@
-import { Dialog } from "@ark-ui/solid";
-import Search from "lucide-solid/icons/search";
-import { createMemo, createSignal, For, Show } from "solid-js";
-import { Portal } from "solid-js/web";
-import { availableCommands } from "../commands/registry";
-import { allNotes, noteLabel, openNote } from "../state/workspace";
-import { Keys } from "./Keys";
+import { Dialog } from '@ark-ui/solid';
+import Search from 'lucide-solid/icons/search';
+import { createMemo, createSignal, For, Show } from 'solid-js';
+import { Portal } from 'solid-js/web';
+import { availableCommands } from '../commands/registry';
+import { allNotes, noteLabel, openNote } from '../state/workspace';
+import { Keys } from './Keys';
+import { withOverlayScrollbar } from './scrollbars';
 
-export type PaletteMode = "commands" | "notes";
+export type PaletteMode = 'commands' | 'notes';
 
 interface Item {
   key: string;
@@ -28,7 +29,7 @@ const [request, setRequest] = createSignal<Request | null>(null);
 export function openPalette(mode: PaletteMode) {
   request()?.cancel?.();
   setRequest({
-    placeholder: mode === "notes" ? "Go to note..." : "Run a command...",
+    placeholder: mode === 'notes' ? 'Go to note...' : 'Run a command...',
     items: () => itemsFor(mode),
   });
 }
@@ -71,7 +72,7 @@ export function fuzzyScore(query: string, text: string): number | null {
   let from = 0;
   let previous = -2;
   for (const char of q) {
-    if (char === " ") continue;
+    if (char === ' ') continue;
     const at = t.indexOf(char, from);
     if (at < 0) return null;
     score += 1;
@@ -84,7 +85,7 @@ export function fuzzyScore(query: string, text: string): number | null {
 }
 
 function itemsFor(m: PaletteMode): Item[] {
-  if (m === "notes") {
+  if (m === 'notes') {
     return allNotes().map((note) => ({
       key: note.id,
       label: noteLabel(note),
@@ -92,7 +93,7 @@ function itemsFor(m: PaletteMode): Item[] {
     }));
   }
   return availableCommands()
-    .filter((c) => !c.id.startsWith("palette."))
+    .filter((c) => !c.id.startsWith('palette.'))
     .map((command) => ({
       key: command.id,
       label: command.title,
@@ -103,10 +104,21 @@ function itemsFor(m: PaletteMode): Item[] {
 }
 
 export function Palette() {
-  const [query, setQuery] = createSignal("");
+  const [query, setQuery] = createSignal('');
   const [highlighted, setHighlighted] = createSignal(0);
   let input: HTMLInputElement | undefined;
   let list: HTMLDivElement | undefined;
+  /**
+   * Where the pointer last was. Scrolling the list under a still pointer
+   * fires `pointermove` too (WebKit), which would steal the highlight from
+   * the keyboard; only a real move should highlight the row under it.
+   */
+  let pointer = { x: -1, y: -1 };
+  const hover = (event: PointerEvent, index: number) => {
+    if (event.clientX === pointer.x && event.clientY === pointer.y) return;
+    pointer = { x: event.clientX, y: event.clientY };
+    setHighlighted(index);
+  };
 
   const items = createMemo(() => {
     const req = request();
@@ -126,7 +138,7 @@ export function Palette() {
   const close = () => {
     request()?.cancel?.();
     setRequest(null);
-    setQuery("");
+    setQuery('');
     setHighlighted(0);
   };
 
@@ -143,20 +155,20 @@ export function Palette() {
     if (count === 0) return;
     const next = (highlighted() + delta + count) % count;
     setHighlighted(next);
-    list?.children[next]?.scrollIntoView({ block: "nearest" });
+    list?.children[next]?.scrollIntoView({ block: 'nearest' });
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "ArrowDown" || (event.ctrlKey && event.key === "n")) {
+    if (event.key === 'ArrowDown' || (event.ctrlKey && event.key === 'n')) {
       event.preventDefault();
       move(1);
     } else if (
-      event.key === "ArrowUp" ||
-      (event.ctrlKey && event.key === "p")
+      event.key === 'ArrowUp' ||
+      (event.ctrlKey && event.key === 'p')
     ) {
       event.preventDefault();
       move(-1);
-    } else if (event.key === "Enter") {
+    } else if (event.key === 'Enter') {
       event.preventDefault();
       choose(items()[highlighted()]);
     }
@@ -193,7 +205,10 @@ export function Palette() {
               />
             </div>
             <div
-              ref={list}
+              ref={(el) => {
+                list = el;
+                withOverlayScrollbar(el);
+              }}
               id="palette-list"
               class="palette-list"
               role="listbox"
@@ -207,7 +222,7 @@ export function Palette() {
                     tabIndex={-1}
                     aria-selected={i() === highlighted()}
                     class="palette-item"
-                    onPointerMove={() => setHighlighted(i())}
+                    onPointerMove={(e) => hover(e, i())}
                     onClick={() => choose(item)}
                   >
                     <span>{item.label}</span>

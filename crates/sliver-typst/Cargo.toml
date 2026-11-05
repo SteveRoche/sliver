@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 typst = "0.15.1"
 typst-assets = { version = "0.15.1", features = ["fonts"] }
+typst-ide = "0.15.1"
 typst-layout = "0.15.1"
 typst-svg = "0.15.1"
 

@@ -10,5 +10,6 @@ mod tar;
 mod wasm;
 
 pub use engine::{
-    CompileOutput, Diagnostic, Engine, InvalidPackage, InvalidPath, Position, Severity, TextRange,
+    CompileOutput, CompletionItem, Completions, Diagnostic, Engine, InvalidPackage, InvalidPath,
+    PagePoint, ParamDoc, Position, Severity, Signature, SourceLocation, TextRange,
 };

@@ -1,15 +1,15 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createSignal, Match, onCleanup, onMount, Switch } from "solid-js";
-import "./App.css";
-import { registerAppCommands } from "./commands/app";
-import { installKeybindings } from "./commands/registry";
-import { Palette } from "./components/Palette";
-import { PromptHost } from "./components/Prompt";
-import { SettingsDialog } from "./components/SettingsDialog";
-import { Welcome } from "./components/Welcome";
-import { Workspace } from "./components/Workspace";
-import { flushAll, openVault, vaultRoot } from "./state/workspace";
-import { vault } from "./vault/api";
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { createSignal, Match, onCleanup, onMount, Switch } from 'solid-js';
+import './App.css';
+import { registerAppCommands } from './commands/app';
+import { installKeybindings } from './commands/registry';
+import { Palette } from './components/Palette';
+import { PromptHost } from './components/Prompt';
+import { SettingsDialog } from './components/SettingsDialog';
+import { Welcome } from './components/Welcome';
+import { Workspace } from './components/Workspace';
+import { flushAll, openVault, vaultRoot } from './state/workspace';
+import { vault } from './vault/api';
 
 function App() {
   const [starting, setStarting] = createSignal(true);
@@ -25,7 +25,7 @@ function App() {
       const last = await vault.last();
       if (last) await openVault(last);
     } catch (error) {
-      console.warn("could not reopen the last vault:", error);
+      console.warn('could not reopen the last vault:', error);
     } finally {
       setStarting(false);
     }

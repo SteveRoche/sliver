@@ -1,5 +1,5 @@
-import { For, Show } from "solid-js";
-import { isMac, keybindingKeys } from "../commands/registry";
+import { For, Show } from 'solid-js';
+import { isMac, keybindingKeys } from '../commands/registry';
 
 /** A keybinding hint, one spaced-out key at a time. */
 export function Keys(props: { keybinding: string }) {

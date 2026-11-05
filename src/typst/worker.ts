@@ -2,7 +2,7 @@ import init, {
   type CompileOutput,
   Compiler,
   Severity,
-} from "./pkg/sliver_typst.js";
+} from './pkg/sliver_typst.js';
 import type {
   CompileResult,
   FromWorker,
@@ -10,7 +10,7 @@ import type {
   HostRequest,
   Request,
   Response,
-} from "./protocol";
+} from './protocol';
 
 // The DOM lib types `self` as Window; this file only runs as a module worker.
 const scope = self as unknown as Worker;
@@ -27,7 +27,7 @@ let nextHostId = 0;
 const hostReplies = new Map<number, (value: ArrayBuffer | null) => void>();
 
 function host(request: {
-  op: "loadPackage";
+  op: 'loadPackage';
   spec: string;
 }): Promise<ArrayBuffer | null> {
   const hostId = nextHostId++;
@@ -47,14 +47,14 @@ function packageUrl(spec: string): string {
 async function gunzip(gz: ArrayBuffer): Promise<Uint8Array> {
   const stream = new Blob([gz])
     .stream()
-    .pipeThrough(new DecompressionStream("gzip"));
+    .pipeThrough(new DecompressionStream('gzip'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 // The vault cache is a local read, so it's tried first; the network download
 // goes straight into the compiler and is saved to the vault off the critical path.
 async function loadPackage(compiler: Compiler, spec: string): Promise<void> {
-  const cached = await host({ op: "loadPackage", spec });
+  const cached = await host({ op: 'loadPackage', spec });
   if (cached && cached.byteLength > 0) {
     compiler.addPackage(spec, await gunzip(cached));
     return;
@@ -63,7 +63,7 @@ async function loadPackage(compiler: Compiler, spec: string): Promise<void> {
   if (!response.ok) throw new Error(`${spec}: HTTP ${response.status}`);
   const gz = await response.arrayBuffer();
   compiler.addPackage(spec, await gunzip(gz));
-  post({ hostId: nextHostId++, op: "savePackage", spec, data: gz }, [gz]);
+  post({ hostId: nextHostId++, op: 'savePackage', spec, data: gz }, [gz]);
 }
 
 function ensurePackages(compiler: Compiler, specs: string[]) {
@@ -72,7 +72,7 @@ function ensurePackages(compiler: Compiler, specs: string[]) {
     if (Date.now() - (failedAt.get(spec) ?? -Infinity) < RETRY_MS) continue;
     const task = loadPackage(compiler, spec)
       .then(
-        () => post({ event: "packagesLoaded", specs: [spec] }),
+        () => post({ event: 'packagesLoaded', specs: [spec] }),
         (error) => {
           failedAt.set(spec, Date.now());
           console.warn(`could not load ${spec}:`, error);
@@ -92,11 +92,13 @@ function toResult(compiler: Compiler, out: CompileOutput): CompileResult {
   const result: CompileResult = {
     pages: out.pages,
     loadingPackages,
+    compileMs: out.compileMs,
+    renderMs: out.renderMs,
     diagnostics: out.diagnostics
       .map((d) => {
         const range = d.range;
         return {
-          severity: d.severity === Severity.Error ? "error" : "warning",
+          severity: d.severity === Severity.Error ? 'error' : 'warning',
           message: d.message,
           hints: d.hints,
           path: d.path,
@@ -114,18 +116,102 @@ function toResult(compiler: Compiler, out: CompileOutput): CompileResult {
 
 function handle(compiler: Compiler, req: Request): unknown {
   switch (req.kind) {
-    case "setSource":
+    case 'setSource':
       return compiler.setSource(req.path, req.text);
-    case "removeSource":
+    case 'setPrefix':
+      return compiler.setPrefix(req.path, req.prefix);
+    case 'removeSource':
       return compiler.removeSource(req.path);
-    case "compile":
+    case 'compile':
       return toResult(compiler, compiler.compile(req.main));
+    case 'complete': {
+      const found = compiler.complete(
+        req.main,
+        req.path,
+        req.text,
+        req.position.line,
+        req.position.column,
+        req.explicit,
+      );
+      if (!found) return null;
+      const from = found.from;
+      const completions = {
+        from: { line: from.line, column: from.column },
+        items: found.items.map((item) => {
+          const plain = {
+            kind: item.kind,
+            label: item.label,
+            apply: item.apply,
+            detail: item.detail,
+          };
+          item.free();
+          return plain;
+        }),
+      };
+      found.free();
+      return completions;
+    }
+    case 'signature': {
+      const found = compiler.signature(
+        req.main,
+        req.path,
+        req.text,
+        req.position.line,
+        req.position.column,
+      );
+      if (!found) return null;
+      const signature = {
+        name: found.name,
+        docs: found.docs,
+        active: found.active,
+        params: found.params.map((p) => {
+          const plain = {
+            name: p.name,
+            types: p.types,
+            docs: p.docs,
+            named: p.named,
+            positional: p.positional,
+            required: p.required,
+            variadic: p.variadic,
+            default: p.default,
+          };
+          p.free();
+          return plain;
+        }),
+      };
+      found.free();
+      return signature;
+    }
+    case 'jumpFromClick': {
+      const found = compiler.jumpFromClick(req.main, req.page, req.x, req.y);
+      if (!found) return null;
+      const position = found.position;
+      const location = {
+        path: found.path,
+        position: { line: position.line, column: position.column },
+      };
+      found.free();
+      return location;
+    }
+    case 'jumpFromCursor':
+      return compiler
+        .jumpFromCursor(
+          req.main,
+          req.path,
+          req.position.line,
+          req.position.column,
+        )
+        .map((point) => {
+          const plain = { page: point.page, x: point.x, y: point.y };
+          point.free();
+          return plain;
+        });
   }
 }
 
 scope.onmessage = async (event: MessageEvent<Request | HostReply>) => {
   const message = event.data;
-  if ("hostId" in message) {
+  if ('hostId' in message) {
     hostReplies.get(message.hostId)?.(message.value);
     hostReplies.delete(message.hostId);
     return;

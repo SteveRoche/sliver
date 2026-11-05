@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use sliver_vault::{
-    DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary, Placement, Uuid, Vault,
+    DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary, Placement, Preamble,
+    PreambleWarning, Uuid, Vault,
 };
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, State};
@@ -76,8 +77,11 @@ pub async fn create_note(
     open: State<'_, OpenVault>,
     title: Option<String>,
     placement: Placement,
+    kind: Option<String>,
 ) -> CommandResult<NoteSummary> {
-    with_vault(&open, |vault| vault.create_note(title, placement))
+    with_vault(&open, |vault| {
+        vault.create_note_of_kind(title, placement, kind)
+    })
 }
 
 #[tauri::command]
@@ -218,6 +222,12 @@ pub async fn link_library(
     })
 }
 
+/// Highlighting and wikilink ranges for the editor. Doesn't need a vault.
+#[tauri::command]
+pub async fn analyze(text: String) -> sliver_vault::Analysis {
+    sliver_vault::analyze(&text)
+}
+
 /// `/.sliver/theme.typ` for the preview: the current app theme's colours.
 #[tauri::command]
 pub async fn theme_library(dark: bool) -> SourceFile {
@@ -227,17 +237,76 @@ pub async fn theme_library(dark: bool) -> SourceFile {
     }
 }
 
-/// The wrapper main the preview compiles for note `id`.
+#[derive(serde::Serialize)]
+pub struct PreviewMain {
+    path: String,
+    text: String,
+    /// Hidden lines the engine compiles before the note's own text.
+    prefix: String,
+}
+
+/// The wrapper main the preview compiles for note `id`, and its note's prefix.
 #[tauri::command]
-pub async fn preview_main(open: State<'_, OpenVault>, id: Uuid) -> CommandResult<SourceFile> {
+pub async fn preview_main(open: State<'_, OpenVault>, id: Uuid) -> CommandResult<PreviewMain> {
     with_vault(&open, |vault| {
-        vault.note(id)?;
-        let id = id.to_string();
-        Ok(SourceFile {
-            path: sliver_vault::preview_main_path(&id),
-            text: sliver_vault::preview_main(&id),
+        let preview = vault.preview(id)?;
+        Ok(PreviewMain {
+            path: sliver_vault::preview_main_path(&id.to_string()),
+            text: preview.main,
+            prefix: preview.prefix,
         })
     })
+}
+
+/// The common preamble, then one per kind of note.
+#[tauri::command]
+pub async fn list_preambles(open: State<'_, OpenVault>) -> CommandResult<Vec<Preamble>> {
+    with_vault(&open, |vault| vault.preambles())
+}
+
+/// Saves a preamble (`kind` `None` is the common one); returns its warnings.
+#[tauri::command]
+pub async fn save_preamble(
+    open: State<'_, OpenVault>,
+    kind: Option<String>,
+    text: String,
+) -> CommandResult<Vec<PreambleWarning>> {
+    with_vault(&open, |vault| vault.save_preamble(kind.as_deref(), &text))
+}
+
+#[tauri::command]
+pub async fn create_kind(open: State<'_, OpenVault>, name: String) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.create_kind(&name))
+}
+
+/// Returns the ids of the notes whose `kind` was rewritten.
+#[tauri::command]
+pub async fn rename_kind(
+    open: State<'_, OpenVault>,
+    from: String,
+    to: String,
+) -> CommandResult<Vec<Uuid>> {
+    with_vault(&open, |vault| vault.rename_kind(&from, &to))
+}
+
+#[tauri::command]
+pub async fn delete_kind(
+    open: State<'_, OpenVault>,
+    name: String,
+    mode: Option<DeleteMode>,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| {
+        vault.delete_kind(&name, mode.unwrap_or_default())
+    })
+}
+
+#[tauri::command]
+pub async fn set_kind(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    kind: Option<String>,
+) -> CommandResult<NoteSummary> {
+    with_vault(&open, |vault| vault.set_kind(id, kind.as_deref()))
 }
 
 #[tauri::command]

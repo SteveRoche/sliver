@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use crate::{CompileOutput, Engine};
+use crate::{CompileOutput, Completions, Engine, PagePoint, Position, Signature, SourceLocation};
 
 #[wasm_bindgen]
 pub struct Compiler(Engine);
@@ -16,6 +16,11 @@ impl Compiler {
     #[wasm_bindgen(js_name = setSource)]
     pub fn set_source(&mut self, path: &str, text: &str) -> Result<(), JsError> {
         Ok(self.0.set_source(path, text)?)
+    }
+
+    #[wasm_bindgen(js_name = setPrefix)]
+    pub fn set_prefix(&mut self, path: &str, prefix: &str) -> Result<(), JsError> {
+        Ok(self.0.set_prefix(path, prefix)?)
     }
 
     #[wasm_bindgen(js_name = removeSource)]
@@ -41,5 +46,56 @@ impl Compiler {
 
     pub fn compile(&mut self, main: &str) -> Result<CompileOutput, JsError> {
         Ok(self.0.compile(main)?)
+    }
+
+    pub fn complete(
+        &self,
+        main: &str,
+        path: &str,
+        text: &str,
+        line: u32,
+        column: u32,
+        explicit: bool,
+    ) -> Result<Option<Completions>, JsError> {
+        Ok(self
+            .0
+            .complete(main, path, text, Position { line, column }, explicit)?)
+    }
+
+    pub fn signature(
+        &self,
+        main: &str,
+        path: &str,
+        text: &str,
+        line: u32,
+        column: u32,
+    ) -> Result<Option<Signature>, JsError> {
+        Ok(self
+            .0
+            .signature(main, path, text, Position { line, column })?)
+    }
+
+    #[wasm_bindgen(js_name = jumpFromClick)]
+    pub fn jump_from_click(
+        &self,
+        main: &str,
+        page: u32,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<SourceLocation>, JsError> {
+        Ok(self.0.jump_from_click(main, page, x, y)?)
+    }
+
+    #[wasm_bindgen(js_name = jumpFromCursor)]
+    pub fn jump_from_cursor(
+        &self,
+        main: &str,
+        path: &str,
+        line: u32,
+        column: u32,
+    ) -> Result<Vec<PagePoint>, JsError> {
+        Ok(self
+            .0
+            .jump_from_cursor(main, path, Position { line, column })?)
     }
 }

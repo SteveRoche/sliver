@@ -12,6 +12,17 @@
   --selected: #0000001a;
   --accent: #396cd8;
   --active-line: #0000000a;
+  --selection: #396cd840;
+  --selection-inactive: #0000001f;
+  /* Typst syntax colours in the editor (classes from typst-syntax's Tag). */
+  --syn-comment: #8a8a8a;
+  --syn-keyword: #a626a4;
+  --syn-string: #2e7d32;
+  --syn-number: #b5520a;
+  --syn-function: #2f5fbf;
+  --syn-raw: #7a5a1c;
+  --syn-label: #0f7c8a;
+  --syn-math: #b5520a;
   --error: #c62828;
   --warning: #b26a00;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -35,7 +46,7 @@
   --fg: #f0f0f0;
   --bg: #2b2b2b;
   --pane-bg: #232323;
-  --paper: #2b2b2b;
+  --paper: #232323;
   --surface: #333333;
   --muted: #8a8a8a;
   --folded: #cfcfcf;
@@ -44,28 +55,54 @@
   --selected: #ffffff1f;
   --accent: #6d9bff;
   --active-line: #ffffff0d;
+  --selection: #6d9bff4d;
+  --selection-inactive: #ffffff24;
+  --syn-comment: #7d7d7d;
+  --syn-keyword: #c792ea;
+  --syn-string: #a5d6a7;
+  --syn-number: #f0a36b;
+  --syn-function: #82aaff;
+  --syn-raw: #e3c48b;
+  --syn-label: #6fd3dc;
+  --syn-math: #f0a36b;
   --error: #ef5350;
   --warning: #ffb74d;
 }
 
-/* Square scrollbars everywhere (no rounded thumbs), in the app's colours. */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* Native scrollbars are hidden everywhere; overlay thumbs (scrollbars.ts)
+   float over the content instead, so they never take up space. */
+* {
+  scrollbar-width: none;
 }
 
-::-webkit-scrollbar-track,
-::-webkit-scrollbar-corner {
-  background: transparent;
+*::-webkit-scrollbar {
+  display: none;
 }
 
-::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
-  background: var(--border) padding-box;
+.overlay-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 5;
+  background: var(--muted);
+  opacity: 0;
+  transition: opacity 0.2s;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background-color: var(--muted);
+.overlay-thumb-y {
+  width: 8px;
+}
+
+.overlay-thumb-x {
+  height: 8px;
+}
+
+.overlay-thumb.visible {
+  opacity: 0.5;
+}
+
+.overlay-thumb.visible:hover {
+  opacity: 0.8;
 }
 
 html,
@@ -90,6 +127,11 @@ button:where(:not([data-scope])) {
   border: 1px solid var(--border);
   background: var(--surface);
   cursor: pointer;
+}
+
+/* Buttons only show a focus ring when reached by keyboard. */
+button:focus:not(:focus-visible) {
+  outline: none;
 }
 
 button:where(:not([data-scope])):hover {
@@ -161,7 +203,8 @@ button.primary {
 
 .resize-trigger {
   position: relative;
-  flex: 0 0 1px;
+  /* Ark sets an inline `flex: 0 0 auto`, so the width must be explicit. */
+  width: 1px;
   padding: 0;
   border: none;
   background: var(--border);
@@ -181,10 +224,11 @@ button.primary {
   z-index: 1;
 }
 
+/* Muted rather than the accent, which is too bright for a hairline. Ark
+   keeps `data-focus` after a drag, so only keyboard focus counts. */
 .resize-trigger:hover,
-.resize-trigger[data-focus],
-.resize-trigger:focus-visible {
-  background: var(--accent);
+:root[data-input="keyboard"] .resize-trigger:focus {
+  background: var(--muted);
 }
 
 /* --- sidebar --- */
@@ -343,10 +387,6 @@ button.primary {
 
 /* --- tabs --- */
 
-.editor-pane {
-  background: var(--bg);
-}
-
 /* The tab bar and the preview's header share a height, so the editor and
    the preview start at the same line. */
 .tab-bar,
@@ -360,8 +400,43 @@ button.primary {
 
 .tab-bar {
   display: flex;
+}
+
+.tab-list {
+  display: flex;
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+.pane-modes {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+.pane-mode.active {
+  background: var(--selected);
+  color: var(--fg);
+}
+
+/* Follows the pointer while a tab is dragged off its bar. */
+.tab-ghost {
+  position: fixed;
+  z-index: 50;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .tab {
@@ -383,6 +458,11 @@ button.primary {
   background: var(--bg);
   color: var(--fg);
   box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Only the focused pane's active tab carries the accent. */
+.tab-bar:not(.focused) .tab.active {
+  box-shadow: inset 0 -2px 0 var(--border);
 }
 
 .tab-bar.reordering,
@@ -459,13 +539,172 @@ button.primary {
   visibility: visible;
 }
 
+/* Flex all the way down to CodeMirror, not percentage heights: WebKit
+   doesn't resolve `height: 100%` inside the nested flex items of a pane. */
 .note-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* --- panes --- */
+
+.main-area {
+  position: relative;
+}
+
+.weighted {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.weighted-column {
+  flex-direction: column;
+}
+
+.weighted-child {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.divider {
+  position: relative;
+  flex: 0 0 1px;
+  align-self: stretch;
+  margin: 0;
+  border: none;
+  background: var(--border);
+}
+
+.divider-row {
+  cursor: col-resize;
+}
+
+.divider-column {
+  cursor: row-resize;
+}
+
+/* A 7px invisible grab area centred on the line. */
+.divider::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+}
+
+.divider-row::after {
+  inset: 0 -3px;
+}
+
+.divider-column::after {
+  inset: -3px 0;
+}
+
+/* Between panes the line is stronger than the one between an editor and its preview. */
+.split > .divider {
+  flex-basis: 4px;
+}
+
+.divider:hover,
+.divider.dragging {
+  background: var(--muted);
+}
+
+.pane-view {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.pane-body {
+  position: relative;
+  display: flex;
   flex: 1;
   min-height: 0;
 }
 
+.pane-editor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pane-editor[hidden] {
+  display: none;
+}
+
+.pane-editor > .pane-message.empty {
+  position: absolute;
+  inset: 0;
+}
+
+.pane-preview,
+.global-preview {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.preview-title {
+  display: block;
+  overflow: hidden;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 29px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Where a tab dragged off its bar would land. */
+.drop-overlay {
+  position: absolute;
+  z-index: 5;
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  pointer-events: none;
+}
+
+.drop-center {
+  inset: 0;
+}
+
+.drop-left {
+  inset: 0 50% 0 0;
+}
+
+.drop-right {
+  inset: 0 0 0 50%;
+}
+
+.drop-top {
+  inset: 0 0 50% 0;
+}
+
+.drop-bottom {
+  inset: 50% 0 0 0;
+}
+
+/* Wraps each note's editor (`editorHosts`); takes no box of its own. */
+.editor-host {
+  display: contents;
+}
+
 .note-tab {
-  height: 100%;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .note-tab[hidden] {
@@ -473,9 +712,17 @@ button.primary {
 }
 
 .editor {
-  height: 100%;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
+}
+
+.editor > .cm-editor {
+  flex: 1;
+  min-height: 0;
 }
 
 /* --- preview --- */
@@ -487,7 +734,8 @@ button.primary {
   gap: 8px;
   min-width: 0;
   overflow: auto;
-  background: var(--pane-bg);
+  /* The page blends into the pane: no visible sheet around the note. */
+  background: var(--paper);
 }
 
 /* The preview can have its own theme; its pages follow it, not the app's. */
@@ -496,10 +744,11 @@ button.primary {
 }
 
 .preview[data-preview-theme="dark"] {
-  --paper: #2b2b2b;
+  --paper: #232323;
 }
 
 .page {
+  position: relative;
   flex: none;
   width: 100%;
   max-width: var(--max-page-width);
@@ -610,11 +859,37 @@ button.primary {
   background: var(--bg);
 }
 
+/* Drawn by us, not WebKit: the native control ignores padding and has
+   rounded corners. The chevron is mid-grey so it reads in both themes. */
+select.setting-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding: 6px 32px 6px 12px;
+  border-radius: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  cursor: pointer;
+}
+
+/* No focus ring on text fields and dropdowns (WebKit's is rounded and
+   stays after a click); keyboard focus shows on the border instead
+   (`inputModality.ts`). */
+.field input:focus,
+.setting-select:focus {
+  outline: none;
+}
+
+:root[data-input="keyboard"] .field input:focus,
+:root[data-input="keyboard"] .setting-select:focus {
+  border-color: var(--accent);
+}
+
 /* Settings: section list on the left, the chosen section on the right. */
 .dialog.settings {
   display: flex;
-  width: min(720px, 100%);
-  height: min(480px, 100%);
+  width: min(960px, 100%);
+  height: min(680px, 100%);
   padding: 0;
 }
 
@@ -653,6 +928,16 @@ button.settings-nav-item:hover {
   background: var(--hover);
 }
 
+/* Pinned to the bottom of the section list. */
+button.settings-restore {
+  margin-top: auto;
+  color: var(--muted);
+}
+
+button.settings-restore:hover {
+  color: var(--fg);
+}
+
 button.settings-nav-item.active {
   background: var(--selected);
 }
@@ -663,6 +948,61 @@ button.settings-nav-item.active {
   min-width: 0;
   overflow-y: auto;
   padding: 16px 20px;
+}
+
+.settings-body.fill {
+  display: flex;
+  flex-direction: column;
+}
+
+.preamble-settings {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.preamble-intro {
+  margin: 0 32px 12px 0;
+}
+
+.preamble-intro code {
+  font-family: var(--mono);
+}
+
+.preamble-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.preamble-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preamble-toolbar button.danger:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.preamble-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 160px;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.preamble-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--error);
 }
 
 .settings-close {
@@ -910,4 +1250,182 @@ button.settings-nav-item.active {
 .welcome .welcome-error {
   max-width: 480px;
   color: var(--error);
+}
+
+/* --- editor: syntax, wikilinks, diagnostics --- */
+
+.cm-editor .typ-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+
+.cm-editor .typ-key {
+  color: var(--syn-keyword);
+}
+
+.cm-editor .typ-str {
+  color: var(--syn-string);
+}
+
+.cm-editor .typ-num,
+.cm-editor .typ-escape {
+  color: var(--syn-number);
+}
+
+.cm-editor .typ-func {
+  color: var(--syn-function);
+}
+
+.cm-editor .typ-raw {
+  color: var(--syn-raw);
+}
+
+.cm-editor .typ-label,
+.cm-editor .typ-ref {
+  color: var(--syn-label);
+}
+
+.cm-editor .typ-math-delim,
+.cm-editor .typ-math-op {
+  color: var(--syn-math);
+}
+
+.cm-editor .typ-punct,
+.cm-editor .typ-marker,
+.cm-editor .typ-op {
+  color: var(--muted);
+}
+
+.cm-editor .typ-heading,
+.cm-editor .typ-strong,
+.cm-editor .typ-term {
+  font-weight: 700;
+}
+
+.cm-editor .typ-emph {
+  font-style: italic;
+}
+
+.cm-editor .typ-link {
+  text-decoration: underline;
+}
+
+/* A wikilink shown as its target's title until the cursor enters it. */
+.cm-wikilink {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.cm-wikilink.broken {
+  color: var(--error);
+}
+
+.cm-wikilink-source {
+  color: var(--accent);
+}
+
+.cm-squiggle {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 3px;
+}
+
+.cm-squiggle-error {
+  text-decoration-color: var(--error);
+}
+
+.cm-squiggle-warning {
+  text-decoration-color: var(--warning);
+}
+
+.cm-diagnostic-tooltip {
+  max-width: 480px;
+  padding: 6px 10px;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.cm-diagnostic + .cm-diagnostic {
+  margin-top: 6px;
+}
+
+.cm-diagnostic.error {
+  border-left: 2px solid var(--error);
+  padding-left: 6px;
+}
+
+.cm-diagnostic.warning {
+  border-left: 2px solid var(--warning);
+  padding-left: 6px;
+}
+
+.cm-diagnostic-hint {
+  color: var(--muted);
+}
+
+/* --- preview: cursor marker, debug view --- */
+
+.preview-marker {
+  position: absolute;
+  width: 4px;
+  height: 22px;
+  margin: -16px 0 0 -2px;
+  background: var(--accent);
+  pointer-events: none;
+  animation: preview-marker 1.2s ease-out forwards;
+}
+
+@keyframes preview-marker {
+  from {
+    opacity: 0.9;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.debug-panel {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 300px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.debug-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.debug-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 32px;
+}
+
+.debug-bar {
+  flex: 1;
+  min-height: 1px;
+  background: var(--accent);
+}
+
+.debug-bar.slow {
+  background: var(--error);
 }

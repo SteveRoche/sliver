@@ -1,19 +1,24 @@
 import type {
   Calls,
   CompileResult,
+  Completions,
   FromWorker,
   HostReply,
   PackageHost,
+  PagePoint,
+  Position,
   Request,
-} from "./protocol";
+  Signature,
+  SourceLocation,
+} from './protocol';
 
-type Args<K extends keyof Calls> = Calls[K]["args"];
-type Result<K extends keyof Calls> = Calls[K]["result"];
+type Args<K extends keyof Calls> = Calls[K]['args'];
+type Result<K extends keyof Calls> = Calls[K]['result'];
 
 /** Talks to the Typst compiler running in a Web Worker. */
 export class TypstClient {
-  private worker = new Worker(new URL("./worker.ts", import.meta.url), {
-    type: "module",
+  private worker = new Worker(new URL('./worker.ts', import.meta.url), {
+    type: 'module',
   });
   private nextId = 0;
   private pending = new Map<
@@ -25,9 +30,9 @@ export class TypstClient {
   constructor(private packages: PackageHost) {
     this.worker.onmessage = (event: MessageEvent<FromWorker>) => {
       const message = event.data;
-      if ("event" in message) {
+      if ('event' in message) {
         for (const listener of this.packageListeners) listener(message.specs);
-      } else if ("op" in message) {
+      } else if ('op' in message) {
         void this.serveHost(message);
       } else {
         const call = this.pending.get(message.id);
@@ -39,15 +44,66 @@ export class TypstClient {
   }
 
   setSource(path: string, text: string): Promise<void> {
-    return this.call("setSource", { path, text });
+    return this.call('setSource', { path, text });
+  }
+
+  /**
+   * Hidden whole lines compiled before `path`'s text (a note's preamble
+   * imports). Positions in results stay relative to the text itself.
+   */
+  setPrefix(path: string, prefix: string): Promise<void> {
+    return this.call('setPrefix', { path, prefix });
   }
 
   removeSource(path: string): Promise<void> {
-    return this.call("removeSource", { path });
+    return this.call('removeSource', { path });
   }
 
   compile(main: string): Promise<CompileResult> {
-    return this.call("compile", { main });
+    return this.call('compile', { main });
+  }
+
+  /**
+   * Typst completions for `text` (the current, maybe uncompiled contents of
+   * `path`) at `position`, as part of `main`.
+   */
+  complete(
+    main: string,
+    path: string,
+    text: string,
+    position: Position,
+    explicit: boolean,
+  ): Promise<Completions | null> {
+    return this.call('complete', { main, path, text, position, explicit });
+  }
+
+  /** Signature help for the call around `position` in `text`. */
+  signature(
+    main: string,
+    path: string,
+    text: string,
+    position: Position,
+  ): Promise<Signature | null> {
+    return this.call('signature', { main, path, text, position });
+  }
+
+  /** The source behind a click on page `page` at (`x`, `y`) points. */
+  jumpFromClick(
+    main: string,
+    page: number,
+    x: number,
+    y: number,
+  ): Promise<SourceLocation | null> {
+    return this.call('jumpFromClick', { main, page, x, y });
+  }
+
+  /** Where the text at `position` in `path` appears in `main`'s pages. */
+  jumpFromCursor(
+    main: string,
+    path: string,
+    position: Position,
+  ): Promise<PagePoint[]> {
+    return this.call('jumpFromCursor', { main, path, position });
   }
 
   /** Fires when packages finish loading, so dependent documents can recompile. */
@@ -57,7 +113,7 @@ export class TypstClient {
   }
 
   private async serveHost(request: Extract<FromWorker, { op: string }>) {
-    if (request.op === "savePackage") {
+    if (request.op === 'savePackage') {
       await this.packages
         .save(request.spec, request.data)
         .catch((error) =>
@@ -85,6 +141,14 @@ export class TypstClient {
   }
 }
 
+/** One compile as the live preview saw it, for the debug view. */
+export interface CompileTiming {
+  compileMs: number;
+  renderMs: number;
+  /** From the latest edit it includes to its result arriving. */
+  totalMs: number;
+}
+
 export interface LivePreview {
   /** Replaces the note's source and recompiles. */
   update(text: string): void;
@@ -104,24 +168,37 @@ export function livePreview(
   client: TypstClient,
   sourcePath: string,
   mainPath: string,
-  onResult: (result: CompileResult) => void,
+  /** `text` is the source the result was compiled from. */
+  onResult: (
+    result: CompileResult,
+    text: string,
+    timing: CompileTiming,
+  ) => void,
   onError: (error: Error) => void,
 ): LivePreview {
   let running = false;
   let queued: string | undefined;
+  let queuedAt = 0;
   let latest: string | undefined;
 
   const run = async (text: string) => {
     latest = text;
     queued = text;
+    queuedAt = performance.now();
     if (running) return;
     running = true;
     try {
       while (queued !== undefined) {
         const next = queued;
+        const since = queuedAt;
         queued = undefined;
         await client.setSource(sourcePath, next);
-        onResult(await client.compile(mainPath));
+        const result = await client.compile(mainPath);
+        onResult(result, next, {
+          compileMs: result.compileMs,
+          renderMs: result.renderMs,
+          totalMs: performance.now() - since,
+        });
       }
     } catch (error) {
       onError(error as Error);
