@@ -92,6 +92,14 @@ export interface ParamDoc {
   default?: string;
 }
 
+/** Where a citation (or, with `key` null, a cross-reference) starts, in points. */
+export interface CitationMark {
+  key: string | null;
+  page: number;
+  x: number;
+  y: number;
+}
+
 /** The function call around the cursor, for signature help. */
 export interface Signature {
   name: string;
@@ -138,6 +146,29 @@ export interface Calls {
   jumpFromCursor: {
     args: { main: string; path: string; position: Position };
     result: PagePoint[];
+  };
+  /** The string metadata labelled `label` in `main`'s last good compile. */
+  metadataText: {
+    args: { main: string; label: string };
+    result: string | null;
+  };
+  /**
+   * Compiles a throwaway main file and forgets it again, e.g. to render one
+   * bibliography entry; `pages` is empty without `render` or on errors.
+   */
+  standalone: {
+    args: { path: string; text: string; render: boolean };
+    result: { pages: string[]; errors: string[] };
+  };
+  /** Where citations (and, without a key, cross-references) start. */
+  citationMarks: {
+    args: { main: string };
+    result: CitationMark[];
+  };
+  /** Typst's built-in citation styles. */
+  citationStyles: {
+    args: Record<string, never>;
+    result: { name: string; label: string }[];
   };
 }
 

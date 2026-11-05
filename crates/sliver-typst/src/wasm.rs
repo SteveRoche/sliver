@@ -100,6 +100,29 @@ pub struct Location {
     pub column: u32,
 }
 
+/// Where citations start: mark `i` is `keys[i]` (empty for a
+/// cross-reference) on page `pages[i]` at `points[2i..2i+2]`.
+#[wasm_bindgen(getter_with_clone)]
+pub struct CitationMarks {
+    pub keys: Vec<String>,
+    pub pages: Vec<u32>,
+    pub points: Vec<f64>,
+}
+
+/// Typst's built-in citation styles: `names[i]` is accepted as a style,
+/// `labels[i]` describes it.
+#[wasm_bindgen(getter_with_clone)]
+pub struct StyleList {
+    pub names: Vec<String>,
+    pub labels: Vec<String>,
+}
+
+#[wasm_bindgen(js_name = citationStyles)]
+pub fn citation_styles() -> StyleList {
+    let (names, labels) = crate::citation_styles().into_iter().unzip();
+    StyleList { names, labels }
+}
+
 #[wasm_bindgen]
 impl Compiler {
     #[wasm_bindgen(constructor)]
@@ -137,6 +160,28 @@ impl Compiler {
     #[wasm_bindgen(js_name = hasPackage)]
     pub fn has_package(&self, spec: &str) -> bool {
         self.0.has_package(spec)
+    }
+
+    /// The string metadata labelled `label` in `main`'s last good compile.
+    #[wasm_bindgen(js_name = metadataText)]
+    pub fn metadata_text(&self, main: &str, label: &str) -> Result<Option<String>, JsError> {
+        Ok(self.0.metadata_text(main, label)?)
+    }
+
+    /// See [`crate::Engine::citation_marks`].
+    #[wasm_bindgen(js_name = citationMarks)]
+    pub fn citation_marks(&self, main: &str) -> Result<CitationMarks, JsError> {
+        let mut marks = CitationMarks {
+            keys: Vec::new(),
+            pages: Vec::new(),
+            points: Vec::new(),
+        };
+        for mark in self.0.citation_marks(main)? {
+            marks.keys.push(mark.key.unwrap_or_default());
+            marks.pages.push(mark.page as u32);
+            marks.points.extend([mark.x, mark.y]);
+        }
+        Ok(marks)
     }
 
     pub fn compile(&mut self, main: &str, render: bool) -> Result<Compiled, JsError> {

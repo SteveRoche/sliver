@@ -13,6 +13,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::citations::{
+    REFERENCES_FILE, STYLES_DIR, bib_entries, citations_in, entry_title, merge_references,
+};
 use crate::header::{HeaderError, NoteHeader, format_header, header_in, set_kind, set_title};
 use crate::links::{LinkDisplay, LinkTarget, WikiLink, link_library, links_in};
 use crate::preambles::{
@@ -63,6 +66,22 @@ pub struct Preamble {
     pub text: String,
     pub exists: bool,
     pub warnings: Vec<PreambleWarning>,
+}
+
+/// An entry of `references.bib`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reference {
+    pub key: String,
+    pub title: Option<String>,
+}
+
+/// A custom CSL style file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CitationStyle {
+    pub name: String,
+    /// As Typst sees it, with the vault as root.
+    pub path: String,
+    pub text: String,
 }
 
 /// What the preview compiles for a note: the wrapper main's source and the
@@ -200,6 +219,10 @@ pub struct Vault {
     notes: HashMap<Uuid, NoteSummary>,
     /// Outgoing wikilinks per note, for backlinks.
     links: HashMap<Uuid, Vec<WikiLink>>,
+    /// Citation keys per note.
+    citations: HashMap<Uuid, BTreeSet<String>>,
+    /// Keys of the entries in `references.bib`.
+    reference_keys: BTreeSet<String>,
     /// Every folder (not the root), including empty ones.
     folders: BTreeSet<String>,
     zettelkasten: Option<String>,
@@ -217,6 +240,8 @@ impl Vault {
             root,
             notes: HashMap::new(),
             links: HashMap::new(),
+            citations: HashMap::new(),
+            reference_keys: BTreeSet::new(),
             folders: BTreeSet::new(),
             zettelkasten: None,
             extra_zettelkasten: Vec::new(),
@@ -256,6 +281,10 @@ impl Vault {
         let root = vault.root.clone();
         vault.scan(&root, "")?;
         vault.scan_kinds()?;
+        vault.reference_keys = bib_entries(&vault.references()?)
+            .into_iter()
+            .map(|e| e.key.to_owned())
+            .collect();
         vault.write_theme_file()?;
         vault.write_common_preamble()?;
         Ok(vault)
@@ -556,6 +585,7 @@ impl Vault {
         remove_path(&self.note_path(id)?, mode)?;
         self.notes.remove(&id);
         self.links.remove(&id);
+        self.citations.remove(&id);
         Ok(())
     }
 
@@ -646,6 +676,83 @@ impl Vault {
             }),
             display,
         )
+    }
+
+    // --- citations ---
+
+    /// Every citation key the vault's notes use.
+    pub fn cited_keys(&self) -> BTreeSet<String> {
+        self.citations.values().flatten().cloned().collect()
+    }
+
+    /// Cited keys with no entry in `references.bib`.
+    pub fn missing_references(&self) -> BTreeSet<String> {
+        self.citations
+            .values()
+            .flatten()
+            .filter(|key| !self.reference_keys.contains(*key))
+            .cloned()
+            .collect()
+    }
+
+    /// The text of `references.bib`; empty if there is none yet.
+    pub fn references(&self) -> Result<String> {
+        Ok(self.read_optional(REFERENCES_FILE)?.unwrap_or_default())
+    }
+
+    /// The keys and titles of the entries in `references.bib`.
+    pub fn reference_list(&self) -> Result<Vec<Reference>> {
+        Ok(bib_entries(&self.references()?)
+            .into_iter()
+            .map(|e| Reference {
+                key: e.key.to_owned(),
+                title: entry_title(e.text),
+            })
+            .collect())
+    }
+
+    /// Merges entries exported from Zotero into `references.bib`; with
+    /// `prune`, entries no note cites any more are dropped. Returns whether
+    /// the file changed.
+    pub fn update_references(&mut self, exported: &str, prune: bool) -> Result<bool> {
+        let existing = self.references()?;
+        let keep = prune.then(|| self.cited_keys());
+        let merged = merge_references(&existing, exported, keep.as_ref());
+        if merged == existing || (existing.is_empty() && bib_entries(&merged).is_empty()) {
+            return Ok(false);
+        }
+        self.atomic_write(&self.root.join(REFERENCES_FILE), merged.as_bytes())?;
+        self.reference_keys = bib_entries(&merged)
+            .into_iter()
+            .map(|e| e.key.to_owned())
+            .collect();
+        Ok(true)
+    }
+
+    /// The custom CSL styles in `.sliver/styles/`, by name.
+    pub fn citation_styles(&self) -> Result<Vec<CitationStyle>> {
+        let entries = match fs::read_dir(self.root.join(STYLES_DIR)) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut styles = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("csl") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            styles.push(CitationStyle {
+                name: name.to_owned(),
+                path: format!("/{STYLES_DIR}/{name}.csl"),
+                text: fs::read_to_string(&path)?,
+            });
+        }
+        styles.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(styles)
     }
 
     // --- preambles ---
@@ -916,6 +1023,7 @@ impl Vault {
         for id in &removed {
             self.notes.remove(id);
             self.links.remove(id);
+            self.citations.remove(id);
         }
         self.folders.retain(|f| !inside(f));
         self.extra_zettelkasten.retain(|f| !inside(f));
@@ -962,6 +1070,8 @@ impl Vault {
             Err(err) => (NoteHeader::default(), Some(err.to_string())),
         };
         self.links.insert(id, links_in(&root));
+        self.citations
+            .insert(id, citations_in(&root).into_iter().map(|c| c.key).collect());
         self.notes.insert(
             id,
             NoteSummary {
@@ -1312,6 +1422,25 @@ mod tests {
                 engine.set_source(&preamble_path(kind), &text).unwrap();
             }
         }
+        let references = vault.references().unwrap();
+        let keys = crate::citations::bib_entries(&references);
+        engine
+            .set_source(crate::REFERENCES_PATH, &references)
+            .unwrap();
+        engine
+            .set_source(
+                crate::CITATIONS_PATH,
+                &crate::citation_library(
+                    keys.iter().map(|e| e.key),
+                    &crate::CitationOptions {
+                        style: "apa",
+                        styles: &["apa".into(), "ieee".into()],
+                        show_references: true,
+                        enabled: true,
+                    },
+                ),
+            )
+            .unwrap();
         let preview = vault.preview(id).unwrap();
         engine
             .set_prefix(&format!("/notes/{id}.typ"), &preview.prefix)
@@ -1688,5 +1817,76 @@ mod tests {
         let (opted_out, diagnostics) = render_themed(&vault, plain, true);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(opted_out.contains("#0f0f0f") && !opted_out.contains("#e8e8e8"));
+    }
+
+    #[test]
+    fn citations_render_and_unknown_keys_never_fail() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let note = vault
+            .create_note(
+                Some("Cites".into()),
+                Placement::Unaddressed {
+                    folder: String::new(),
+                },
+            )
+            .unwrap();
+        let header = vault.read_note(note.id).unwrap();
+        vault
+            .write_note(
+                note.id,
+                &format!("{header}#set heading(numbering: \"1.\")\n= Intro <intro>\nSee @doe2020 @roe2021, @intro and @missing.\n"),
+            )
+            .unwrap();
+        assert_eq!(
+            vault.missing_references(),
+            BTreeSet::from(["doe2020".into(), "missing".into(), "roe2021".into()])
+        );
+
+        // Nothing fetched yet: every citation is unknown, and still renders.
+        let (svg, messages) = render(&vault, note.id);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(!svg.contains("sliver-cite:"));
+
+        let exported = "@article{doe2020, title = {A Study}, author = {Doe, Jane}, date = {2020}, file = {/x.pdf}}\n\
+            @book{roe2021, title = {A Book}, author = {Roe, Rick}, date = {2021}}\n\
+            @book{unused, title = {Unused}}\n";
+        assert!(vault.update_references(exported, true).unwrap());
+        assert!(!vault.update_references(exported, true).unwrap());
+        assert_eq!(
+            vault
+                .reference_list()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.key)
+                .collect::<Vec<_>>(),
+            ["doe2020", "roe2021"]
+        );
+        assert_eq!(
+            vault.missing_references(),
+            BTreeSet::from(["missing".into()])
+        );
+        assert!(!vault.references().unwrap().contains("x.pdf"));
+
+        let (svg, messages) = render(&vault, note.id);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(svg.contains("sliver-cite:doe2020"));
+
+        // A note's own style wins; an unknown one is ignored, with a notice.
+        let text = vault.read_note(note.id).unwrap();
+        vault
+            .write_note(
+                note.id,
+                &text.replacen("))", ", citation-style: \"ieee\"))", 1),
+            )
+            .unwrap();
+        let (_, messages) = render(&vault, note.id);
+        assert!(messages.is_empty(), "{messages:?}");
+        let text = vault.read_note(note.id).unwrap();
+        vault
+            .write_note(note.id, &text.replace("\"ieee\"", "\"nope\""))
+            .unwrap();
+        let (_, messages) = render(&vault, note.id);
+        assert!(messages.is_empty(), "{messages:?}");
     }
 }

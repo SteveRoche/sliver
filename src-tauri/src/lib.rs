@@ -2,6 +2,7 @@ mod commands;
 #[cfg(target_os = "macos")]
 mod menu;
 mod state;
+mod zotero;
 
 use std::sync::Mutex;
 
@@ -12,6 +13,7 @@ pub fn run() {
     let builder = builder.menu(menu::app_menu);
     builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(commands::OpenVault(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
@@ -48,6 +50,13 @@ pub fn run() {
             commands::save_settings,
             commands::load_package,
             commands::save_package,
+            commands::references,
+            commands::citation_library,
+            commands::citation_styles,
+            commands::refresh_references,
+            commands::zotero_ready,
+            commands::zotero_pick,
+            commands::open_in_zotero,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

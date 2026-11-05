@@ -1,5 +1,10 @@
 import { Splitter, useSplitter } from '@ark-ui/solid';
 import { createEffect, For, type JSX, Show } from 'solid-js';
+import {
+  citationsAt,
+  openCitations,
+  referencesError,
+} from '../state/citations';
 import { type LayoutNode, paneNote, type Split } from '../state/layout';
 import {
   focusedPane,
@@ -22,6 +27,7 @@ import {
   setSplitSizes,
 } from '../state/workspace';
 import type { NoteId } from '../vault/api';
+import { citationCard } from './citationCard';
 import { DebugPanel } from './DebugPanel';
 import { editorElement } from './editorHosts';
 import { Keys } from './Keys';
@@ -164,6 +170,10 @@ function NotePreview(props: { note: NoteId; jumps?: () => boolean }) {
       diagnostics={session()?.result()?.diagnostics ?? []}
       loadingPackages={session()?.result()?.loadingPackages ?? []}
       onOpenNote={openNote}
+      citationsAt={(page, box) => citationsAt(props.note, page, box)}
+      onCitation={keys => void openCitations(keys)}
+      citationCard={keys => citationCard(props.note, keys)}
+      notice={referencesError()}
       onJump={(page, x, y) => {
         if (props.jumps?.() === false) return;
         void session()?.jumpFromClick(page, x, y);

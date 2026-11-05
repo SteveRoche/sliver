@@ -60,12 +60,20 @@ export interface LinkRange {
   text: string | null;
 }
 
-/** Highlighting and wikilinks of a note's text (`sliver_vault::analyze`). */
+/** A citation key in the editor's text: `@key`, or `<key>` in `cite(<key>)`. */
+export interface CitationRange {
+  from: number;
+  to: number;
+  key: string;
+}
+
+/** Highlighting, wikilinks and citations of a note's text (`sliver_vault::analyze`). */
 export interface Analysis {
   /** Flat `from, to, tag` triples; `tag` indexes `tagClasses`. */
   highlights: number[];
   tagClasses: string[];
   links: LinkRange[];
+  citations: CitationRange[];
 }
 
 /** A generated Typst file the preview compiles alongside the notes. */
@@ -94,6 +102,25 @@ export interface Preamble {
   text: string;
   exists: boolean;
   warnings: PreambleWarning[];
+}
+
+/** `.sliver/references.bib`: the entries for the keys the vault cites. */
+export interface References extends SourceFile {
+  entries: { key: string; title: string | null }[];
+}
+
+/** A custom CSL style from `.sliver/styles/`. */
+export interface CitationStyle extends SourceFile {
+  name: string;
+}
+
+/** A citation chosen in Zotero's picker. */
+export interface ZoteroPick {
+  citationKey: string;
+  locator: string;
+  /** What the locator counts, e.g. `page`. */
+  label: string;
+  suppressAuthor: boolean;
 }
 
 export const vault = {
@@ -152,6 +179,27 @@ export const vault = {
   /** The open vault's `.sliver/settings.json`, if it has one. */
   loadSettings: () => invoke<string | null>('load_settings'),
   saveSettings: (json: string) => invoke<void>('save_settings', { json }),
+  references: () => invoke<References>('references'),
+  /** `/.sliver/citations.typ`, what the preview wrapper knows about citations. */
+  citationLibrary: (options: {
+    style: string;
+    styles: string[];
+    showReferences: boolean;
+    enabled: boolean;
+  }) => invoke<SourceFile>('citation_library', options),
+  citationStyles: () => invoke<CitationStyle[]>('citation_styles'),
+  /**
+   * Fetches entries from Zotero: with `all` every cited key (and drops
+   * uncited entries), else only the missing ones.
+   */
+  refreshReferences: (all: boolean) =>
+    invoke<{ changed: boolean; reachable: boolean }>('refresh_references', {
+      all,
+    }),
+  zoteroReady: () => invoke<boolean>('zotero_ready'),
+  /** Opens Zotero's citation picker; the picks' entries are saved first. */
+  zoteroPick: () => invoke<ZoteroPick[]>('zotero_pick'),
+  openInZotero: (key: string) => invoke<void>('open_in_zotero', { key }),
 };
 
 /**

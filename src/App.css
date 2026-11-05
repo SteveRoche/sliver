@@ -185,6 +185,16 @@ button.primary {
 
 /* --- layout --- */
 
+/* Holds the editors' tooltips (see `tooltipHost` in Editor.tsx). */
+.tooltip-layer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 50;
+  width: 0;
+  height: 0;
+}
+
 .workspace {
   display: flex;
   height: 100%;
@@ -1013,6 +1023,7 @@ button.settings-nav-item.active {
 
 .setting-select {
   flex-shrink: 0;
+  max-width: 280px;
 }
 
 .setting-number {
@@ -1339,6 +1350,83 @@ button.settings-nav-item.active {
 
 .cm-diagnostic-hint {
   color: var(--muted);
+}
+
+/* A citation key; unknown keys (no entry in references.bib) in red. */
+.cm-citation {
+  color: var(--accent);
+}
+
+.cm-citation.unknown {
+  color: var(--error);
+}
+
+/* Details of cited entries: in the editor's hover tooltip, or floating
+   over the preview. Entries are rendered in the preview's theme. */
+.citation-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 316px;
+  padding: 8px;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.citation-card.floating {
+  position: fixed;
+  z-index: 50;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px #0000002e;
+}
+
+.citation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.citation-key {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.citation-entry.unknown .citation-key {
+  color: var(--error);
+}
+
+.citation-open {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.citation-body svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.citation-reason {
+  color: var(--muted);
+}
+
+.setting-note {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.setting-note code {
+  font-family: var(--mono);
+  font-size: 12px;
 }
 
 /* --- preview: cursor marker, debug view --- */

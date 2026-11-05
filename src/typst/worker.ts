@@ -1,4 +1,8 @@
-import init, { type Compiled, Compiler } from './pkg/sliver_typst.js';
+import init, {
+  type Compiled,
+  Compiler,
+  citationStyles,
+} from './pkg/sliver_typst.js';
 import type {
   CompletionItem,
   Completions,
@@ -153,6 +157,8 @@ function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
   });
 }
 
+const decoder = new TextDecoder();
+
 /** Buffers to transfer (not copy) with the current response. */
 let transfer: Transferable[] = [];
 
@@ -259,6 +265,44 @@ function handle(compiler: Compiler, req: Request): unknown {
       }
       return points;
     }
+    case 'metadataText':
+      return compiler.metadataText(req.main, req.label) ?? null;
+    case 'standalone': {
+      compiler.setSource(req.path, req.text);
+      try {
+        return using(compiler.compile(req.path, req.render), out => {
+          const errors = out.diagnosticMessages.filter(
+            (_, i) => out.diagnosticSeverities[i] === 0,
+          );
+          const bytes = out.svg;
+          let start = 0;
+          const pages = [...out.svgEnds].map(end => {
+            const page = decoder.decode(bytes.subarray(start, end));
+            start = end;
+            return page;
+          });
+          return { pages: errors.length ? [] : pages, errors };
+        });
+      } finally {
+        compiler.removeSource(req.path);
+      }
+    }
+    case 'citationMarks':
+      return using(compiler.citationMarks(req.main), marks => {
+        const pages = marks.pages;
+        const points = marks.points;
+        return marks.keys.map((key, i) => ({
+          key: key || null,
+          page: pages[i],
+          x: points[2 * i],
+          y: points[2 * i + 1],
+        }));
+      });
+    case 'citationStyles':
+      return using(citationStyles(), list => {
+        const labels = list.labels;
+        return list.names.map((name, i) => ({ name, label: labels[i] }));
+      });
   }
 }
 

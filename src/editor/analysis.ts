@@ -12,17 +12,23 @@ import {
   type ViewUpdate,
 } from '@codemirror/view';
 import { recordAnalysis } from '../state/debug';
-import { type Analysis, type LinkRange, vault } from '../vault/api';
+import {
+  type Analysis,
+  type CitationRange,
+  type LinkRange,
+  vault,
+} from '../vault/api';
 
 /**
- * The note's syntax as `sliver-vault` sees it (`analyze`): highlighting and
- * wikilink ranges. Requests run off the editor (native, over IPC), at most
+ * The note's syntax as `sliver-vault` sees it (`analyze`): highlighting,
+ * wikilink and citation ranges. Requests run off the editor (native, over IPC), at most
  * one at a time, always for the latest text; between results the previous
  * one is mapped through edits so nothing flickers.
  */
 interface SyntaxState {
   highlights: DecorationSet;
   links: LinkRange[];
+  citations: CitationRange[];
   /** Ranges of raw text, where `[[` doesn't start a link. */
   raw: { from: number; to: number }[];
 }
@@ -30,7 +36,12 @@ interface SyntaxState {
 const setAnalysis = StateEffect.define<{ text: string; analysis: Analysis }>();
 
 export const syntaxField = StateField.define<SyntaxState>({
-  create: () => ({ highlights: Decoration.none, links: [], raw: [] }),
+  create: () => ({
+    highlights: Decoration.none,
+    links: [],
+    citations: [],
+    raw: [],
+  }),
   update(value, tr) {
     for (const effect of tr.effects) {
       if (
@@ -60,6 +71,9 @@ export const syntaxField = StateField.define<SyntaxState>({
           };
         })
         .filter(link => link.from < link.to),
+      citations: value.citations
+        .map(c => ({ ...c, ...map(c.from, c.to) }))
+        .filter(c => c.from < c.to),
       raw: value.raw.map(r => map(r.from, r.to)),
     };
   },
@@ -88,11 +102,15 @@ function fromAnalysis(analysis: Analysis): SyntaxState {
   return {
     highlights: Decoration.set(ranges, true),
     links: analysis.links,
+    citations: analysis.citations,
     raw,
   };
 }
 
 export const linksAt = (state: EditorState) => state.field(syntaxField).links;
+
+export const citationsAt = (state: EditorState) =>
+  state.field(syntaxField).citations;
 
 export const inRaw = (state: EditorState, pos: number) =>
   state.field(syntaxField).raw.some(r => r.from < pos && pos < r.to);

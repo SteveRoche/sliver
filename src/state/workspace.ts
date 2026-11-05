@@ -28,6 +28,7 @@ import {
   type TreeNode,
   vault,
 } from '../vault/api';
+import { loadCitations, syncReferences, unloadCitations } from './citations';
 import { recordCompile } from './debug';
 import {
   type DropZone,
@@ -81,6 +82,8 @@ export interface NoteSession {
   flush(): Promise<void>;
   /** Swaps in text changed outside the editor (e.g. a rename), keeping the cursor. */
   replaceText(text: string): void;
+  /** Replaces the editor's selection with `text` (inserts at the cursor) and focuses it. */
+  insert(text: string): void;
   attachView(view: EditorView | undefined): void;
   /** The main file the preview compiles, once known. */
   mainPath(): string | undefined;
@@ -286,6 +289,10 @@ function createSession(id: NoteId): NoteSession {
       if (!saver.hasPending()) setDirty(false);
       const kindChanged = noteById(id)?.kind !== summary.kind;
       if (metadataChanged(summary)) void refreshTree();
+      // Fetches entries for keys it cites that the vault has none for yet.
+      void syncReferences(false).catch(error =>
+        console.warn('could not fetch references:', error),
+      );
       if (kindChanged) {
         void reloadMain().then(() => preview?.refresh());
       }
@@ -410,6 +417,11 @@ function createSession(id: NoteId): NoteSession {
         },
       });
     },
+    insert(text) {
+      if (!view) return;
+      view.dispatch(view.state.replaceSelection(text));
+      view.focus();
+    },
     attachView(v) {
       view = v;
     },
@@ -456,9 +468,14 @@ export async function openVault(path: string, create = false) {
   await loadLinks();
   await loadPreambles();
   await sendTheme();
+  await loadCitations();
   await restoreWorkspace();
   // Last, so the workspace mounts with the restored tabs and pane sizes.
   setVaultRoot(path);
+  // Picks up edits made in Zotero; previews use the vault's copy meanwhile.
+  void syncReferences(true).catch(error =>
+    console.warn('could not refresh references:', error),
+  );
 }
 
 async function closeVault() {
@@ -473,6 +490,7 @@ async function closeVault() {
   setCollapsedFolders([]);
   for (const preamble of preambles()) void typst.removeSource(preamble.path);
   setPreambles([]);
+  unloadCitations();
   resetSettings();
   setVaultRoot(null);
 }
@@ -544,12 +562,11 @@ async function sendTheme() {
   await typst.setSource(theme.path, theme.text);
 }
 
-/** Recompiles the previews on screen now and the others when they're shown. */
 /**
  * Recompiles the previews on screen now and the others when they're shown;
  * only `only`'s when given.
  */
-function invalidatePreviews(only?: Iterable<NoteSession>) {
+export function invalidatePreviews(only?: Iterable<NoteSession>) {
   const visible = visibleNotes();
   for (const session of only ?? sessions.values()) {
     if (visible.has(session.id)) session.refresh();

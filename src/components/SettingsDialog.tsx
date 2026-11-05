@@ -3,6 +3,7 @@ import { ask } from '@tauri-apps/plugin-dialog';
 import Eye from 'lucide-solid/icons/eye';
 import FileCode from 'lucide-solid/icons/file-code';
 import FileText from 'lucide-solid/icons/file-text';
+import Quote from 'lucide-solid/icons/quote';
 import RotateCcw from 'lucide-solid/icons/rotate-ccw';
 import SquarePen from 'lucide-solid/icons/square-pen';
 import SunMoon from 'lucide-solid/icons/sun-moon';
@@ -19,6 +20,7 @@ import {
   Show,
 } from 'solid-js';
 import { Portal } from 'solid-js/web';
+import { citationStyleChoices, refreshReferences } from '../state/citations';
 import {
   restoreDefaults,
   type Settings,
@@ -35,10 +37,17 @@ import {
   NumberSetting,
   SectionBody,
   SelectSetting,
+  SettingText,
   ToggleSetting,
 } from './settingControls';
 
-type SectionId = 'appearance' | 'editor' | 'preview' | 'notes' | 'preambles';
+type SectionId =
+  | 'appearance'
+  | 'editor'
+  | 'preview'
+  | 'notes'
+  | 'citations'
+  | 'preambles';
 
 const SECTIONS: {
   id: SectionId;
@@ -49,6 +58,7 @@ const SECTIONS: {
   { id: 'editor', label: 'Editor', icon: SquarePen },
   { id: 'preview', label: 'Preview', icon: Eye },
   { id: 'notes', label: 'Notes', icon: FileText },
+  { id: 'citations', label: 'Citations', icon: Quote },
   { id: 'preambles', label: 'Preambles', icon: FileCode },
 ];
 
@@ -304,6 +314,49 @@ export function SettingsDialog() {
                       ]}
                       onChange={deleteMode => updateSettings({ deleteMode })}
                     />
+                  </SectionBody>
+                </Match>
+                <Match when={section() === 'citations'}>
+                  <SectionBody title="Citations">
+                    <p class="setting-note">
+                      Cite with <code>@citationKey</code>, keys from Zotero with
+                      the Better BibTeX add-on. "Insert citation from Zotero"
+                      (Mod+Shift+C) opens Zotero's picker. Entries are kept in{' '}
+                      <code>.sliver/references.bib</code>, so previews work
+                      while Zotero is closed.
+                    </p>
+                    <SelectSetting<string>
+                      id="setting-citation-style"
+                      name="Citation style"
+                      description="How citations and reference lists are formatted. A kind's template can set its own, and a note its own with citation-style in its header. Custom CSL files go in .sliver/styles."
+                      value={settings.citationStyle}
+                      options={citationStyleChoices()}
+                      onChange={citationStyle =>
+                        updateSettings({ citationStyle })
+                      }
+                    />
+                    <ToggleSetting
+                      name="Reference list"
+                      description="End each preview with the references the note cites."
+                      checked={settings.showReferences}
+                      onChange={showReferences =>
+                        updateSettings({ showReferences })
+                      }
+                    />
+                    <div class="setting">
+                      <div class="setting-text">
+                        <SettingText
+                          name="Refresh references"
+                          description="Fetch every cited entry from Zotero again, e.g. after editing items there. Also happens when the vault opens."
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshReferences()}
+                      >
+                        Refresh
+                      </button>
+                    </div>
                   </SectionBody>
                 </Match>
                 <Match when={section() === 'preambles'}>

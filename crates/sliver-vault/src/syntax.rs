@@ -1,9 +1,10 @@
-//! What the editor needs from a note's syntax tree: highlighting and wikilink
-//! ranges. Offsets are UTF-16 code units, like CodeMirror's.
+//! What the editor needs from a note's syntax tree: highlighting, wikilink
+//! and citation ranges. Offsets are UTF-16 code units, like CodeMirror's.
 
 use serde::Serialize;
 use typst_syntax::{Lines, LinkedNode, Tag, highlight};
 
+use crate::citations::citations_in;
 use crate::links::links_in;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -15,6 +16,15 @@ pub struct Analysis {
     /// CSS class per highlight tag (`typ-heading`, `typ-str`, ...).
     pub tag_classes: Vec<&'static str>,
     pub links: Vec<LinkRange>,
+    pub citations: Vec<CitationRange>,
+}
+
+/// A citation key: `@key` (without a supplement) or the `<key>` in `cite(<key>)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CitationRange {
+    pub from: u32,
+    pub to: u32,
+    pub key: String,
 }
 
 /// A wikilink as the syntax tree sees it, so never one inside raw text.
@@ -54,10 +64,20 @@ pub fn analyze(text: &str) -> Analysis {
         })
         .collect();
 
+    let citations = citations_in(&root)
+        .into_iter()
+        .map(|c| CitationRange {
+            from: utf16(c.range.start),
+            to: utf16(c.range.end),
+            key: c.key,
+        })
+        .collect();
+
     Analysis {
         highlights,
         tag_classes: Tag::LIST.iter().map(|t| t.css_class()).collect(),
         links,
+        citations,
     }
 }
 

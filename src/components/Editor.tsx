@@ -13,6 +13,7 @@ import {
   highlightActiveLineGutter,
   keymap,
   lineNumbers,
+  tooltips,
 } from '@codemirror/view';
 import { getCM, Vim, vim } from '@replit/codemirror-vim';
 import { createEffect, onCleanup, onMount } from 'solid-js';
@@ -25,6 +26,23 @@ interface EditorProps {
   vim?: boolean;
   lineNumbers?: boolean;
   onView?: (view: EditorView | undefined) => void;
+}
+
+let tooltipLayer: HTMLElement | undefined;
+
+/**
+ * Where editor tooltips go: outside the panes, so they aren't clipped. Each
+ * editor puts a container carrying its theme classes in here, and the theme
+ * makes those `height: 100%`; directly in the body they would stack below
+ * the app and let the window scroll, so the layer has no size.
+ */
+function tooltipHost() {
+  if (!tooltipLayer) {
+    tooltipLayer = document.createElement('div');
+    tooltipLayer.className = 'tooltip-layer';
+    document.body.appendChild(tooltipLayer);
+  }
+  return tooltipLayer;
 }
 
 const theme = EditorView.theme({
@@ -170,6 +188,7 @@ export function Editor(props: EditorProps) {
       state: EditorState.create({
         doc: props.initialDoc,
         extensions: [
+          tooltips({ parent: tooltipHost() }),
           vimMode.of(props.vim ? vim() : []),
           gutter.of(gutterFor(props.lineNumbers)),
           highlightActiveLine(),

@@ -5,13 +5,15 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use sliver_vault::{
-    DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary, Placement, Preamble,
-    PreambleWarning, Uuid, Vault,
+    CitationOptions, CitationStyle, DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary,
+    Placement, Preamble, PreambleWarning, Reference, Uuid, Vault,
 };
 use tauri::ipc::{InvokeBody, Request, Response};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::state;
+use crate::zotero::{self, Pick};
 
 pub struct OpenVault(pub Mutex<Option<Vault>>);
 
@@ -348,4 +350,145 @@ pub async fn save_package(open: State<'_, OpenVault>, request: Request<'_>) -> C
         Some(vault) => vault.save_package(spec, bytes).map_err(|e| e.to_string()),
         None => Ok(()),
     }
+}
+
+// --- citations ---
+
+#[derive(serde::Serialize)]
+pub struct References {
+    path: String,
+    text: String,
+    entries: Vec<Reference>,
+}
+
+/// `.sliver/references.bib` and the keys and titles of its entries.
+#[tauri::command]
+pub async fn references(open: State<'_, OpenVault>) -> CommandResult<References> {
+    with_vault(&open, |vault| {
+        Ok(References {
+            path: sliver_vault::REFERENCES_PATH.to_owned(),
+            text: vault.references()?,
+            entries: vault.reference_list()?,
+        })
+    })
+}
+
+/// The generated `/.sliver/citations.typ`; `styles` are the style names a
+/// note may use, `enabled` false when `references.bib` doesn't parse.
+#[tauri::command]
+pub async fn citation_library(
+    open: State<'_, OpenVault>,
+    style: String,
+    styles: Vec<String>,
+    show_references: bool,
+    enabled: bool,
+) -> CommandResult<SourceFile> {
+    with_vault(&open, |vault| {
+        let entries = vault.reference_list()?;
+        Ok(SourceFile {
+            path: sliver_vault::CITATIONS_PATH.to_owned(),
+            text: sliver_vault::citation_library(
+                entries.iter().map(|e| e.key.as_str()),
+                &CitationOptions {
+                    style: &style,
+                    styles: &styles,
+                    show_references,
+                    enabled,
+                },
+            ),
+        })
+    })
+}
+
+/// The custom CSL styles in `.sliver/styles/`.
+#[tauri::command]
+pub async fn citation_styles(open: State<'_, OpenVault>) -> CommandResult<Vec<CitationStyle>> {
+    with_vault(&open, |vault| vault.citation_styles())
+}
+
+async fn export(keys: Vec<String>) -> Result<String, zotero::ZoteroError> {
+    tauri::async_runtime::spawn_blocking(move || zotero::export(&keys))
+        .await
+        .map_err(|e| zotero::ZoteroError::Failed(e.to_string()))?
+}
+
+#[derive(serde::Serialize)]
+pub struct Refreshed {
+    /// Whether `references.bib` changed.
+    changed: bool,
+    /// False when Zotero couldn't be reached; nothing changed then.
+    reachable: bool,
+}
+
+/// Fetches entries from Zotero into `references.bib`: with `all`, every
+/// cited key (picking up edits made in Zotero) and dropping entries no note
+/// cites; otherwise only cited keys it has no entry for. The vault isn't
+/// locked while Zotero answers.
+#[tauri::command]
+pub async fn refresh_references(open: State<'_, OpenVault>, all: bool) -> CommandResult<Refreshed> {
+    let keys = with_vault(&open, |vault| {
+        Ok(if all {
+            vault.cited_keys()
+        } else {
+            vault.missing_references()
+        })
+    })?;
+    if keys.is_empty() && !all {
+        return Ok(Refreshed {
+            changed: false,
+            reachable: true,
+        });
+    }
+    let exported = match export(keys.into_iter().collect()).await {
+        Ok(exported) => exported,
+        Err(zotero::ZoteroError::Unavailable) => {
+            return Ok(Refreshed {
+                changed: false,
+                reachable: false,
+            });
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let changed = with_vault(&open, |vault| vault.update_references(&exported, all))?;
+    Ok(Refreshed {
+        changed,
+        reachable: true,
+    })
+}
+
+#[tauri::command]
+pub async fn zotero_ready() -> bool {
+    tauri::async_runtime::spawn_blocking(zotero::ready)
+        .await
+        .unwrap_or(false)
+}
+
+/// Opens Zotero's citation picker; the picked entries are added to
+/// `references.bib` before this returns. Brings the app back to the front.
+#[tauri::command]
+pub async fn zotero_pick(app: AppHandle, open: State<'_, OpenVault>) -> CommandResult<Vec<Pick>> {
+    let picked = tauri::async_runtime::spawn_blocking(zotero::pick)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_focus();
+    }
+    let picks = picked.map_err(|e| e.to_string())?;
+    if !picks.is_empty() {
+        let keys = picks.iter().map(|p| p.citation_key.clone()).collect();
+        let exported = export(keys).await.map_err(|e| e.to_string())?;
+        with_vault(&open, |vault| vault.update_references(&exported, false))?;
+    }
+    Ok(picks)
+}
+
+/// Selects the item with citation key `key` in Zotero (starting it if needed).
+#[tauri::command]
+pub async fn open_in_zotero(app: AppHandle, key: String) -> CommandResult<()> {
+    let url = tauri::async_runtime::spawn_blocking(move || zotero::select_url(&key))
+        .await
+        .map_err(|e| e.to_string())?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }

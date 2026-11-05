@@ -31,7 +31,18 @@ export interface Settings {
   defaultViewMode: ViewMode;
   /** Where "New note of kind" puts each kind's notes, by kind name. */
   kindFolders: Record<string, string>;
+  /**
+   * How citations and reference lists are formatted: a Typst style name or
+   * a custom style's path. Kinds (through their template) and notes (the
+   * `citation-style` header field) can override it.
+   */
+  citationStyle: string;
+  /** End each preview with the reference list of what the note cites. */
+  showReferences: boolean;
 }
+
+/** APA, the default citation style (Typst's full name; `apa` is its alias). */
+export const DEFAULT_CITATION_STYLE = 'american-psychological-association';
 
 const DEFAULTS: Settings = {
   vim: false,
@@ -48,6 +59,8 @@ const DEFAULTS: Settings = {
   previewFollowsCursor: true,
   defaultViewMode: 'edit',
   kindFolders: {},
+  citationStyle: DEFAULT_CITATION_STYLE,
+  showReferences: true,
 };
 
 /** The allowed values of the settings that are a choice. */

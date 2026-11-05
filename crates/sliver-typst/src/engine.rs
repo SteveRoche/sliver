@@ -3,9 +3,13 @@ use std::fmt;
 use std::sync::Mutex;
 
 use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
-use typst::foundations::{Bytes, CastInfo, Datetime, Duration, Repr, Value};
+use typst::foundations::{
+    Bytes, CastInfo, Datetime, Duration, Label, NativeElement, Reflect, Repr, Value,
+};
 use typst::introspection::PagedPosition;
+use typst::introspection::{Introspector, MetadataElem};
 use typst::layout::{Abs, Point};
+use typst::model::{CiteElem, CslSource, RefElem};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{
     DiagSpan, FileId, LinkedNode, RootedPath, Side, Source, SyntaxKind, VirtualPath, VirtualRoot,
@@ -13,6 +17,7 @@ use typst::syntax::{
 };
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
+use typst::utils::PicoStr;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_ide::{CompletionKind, IdeWorld, Jump};
 use typst_layout::PagedDocument;
@@ -296,6 +301,83 @@ impl Engine {
             .collect())
     }
 
+    /// The text of the metadata labelled `label` in `main`'s last successful
+    /// compile, if it is a string.
+    pub fn metadata_text(&self, main: &str, label: &str) -> Result<Option<String>, InvalidPath> {
+        let main = file_id(main)?;
+        let Some(document) = self.documents.get(&main) else {
+            return Ok(None);
+        };
+        let Some(label) = Label::new(PicoStr::intern(label)) else {
+            return Ok(None);
+        };
+        let text = document
+            .introspector()
+            .query_label(label)
+            .ok()
+            .and_then(|content| content.to_packed::<MetadataElem>())
+            .and_then(|meta| match &meta.value {
+                Value::Str(text) => Some(text.to_string()),
+                _ => None,
+            });
+        Ok(text)
+    }
+
+    /// Where citations and cross-references start in `main`'s last good
+    /// layout, in document order. Cited text in the preview is covered by
+    /// Typst's own links to bibliography entries (which SVG can't express),
+    /// so the preview finds the citation under the pointer from these:
+    /// the nearest mark before it on its line. A cross-reference's mark has
+    /// no key and stops the search.
+    pub fn citation_marks(&self, main: &str) -> Result<Vec<CitationMark>, InvalidPath> {
+        let main = file_id(main)?;
+        let Some(document) = self.documents.get(&main) else {
+            return Ok(Vec::new());
+        };
+        let introspector = document.introspector();
+        let mut marks = Vec::new();
+        for content in introspector.query(&CiteElem::ELEM.select()) {
+            let (Some(cite), Some(location)) =
+                (content.to_packed::<CiteElem>(), content.location())
+            else {
+                continue;
+            };
+            if let Some(position) = introspector.position(location) {
+                marks.push(CitationMark {
+                    key: Some(cite.key.resolve().to_string()),
+                    page: position.page.get() - 1,
+                    x: position.point.x.to_pt(),
+                    y: position.point.y.to_pt(),
+                });
+            }
+        }
+        for content in introspector.query(&RefElem::ELEM.select()) {
+            let Some(location) = content.location() else {
+                continue;
+            };
+            // A citation's reference sits where its cite does.
+            let Some(position) = introspector.position(location) else {
+                continue;
+            };
+            let (x, y) = (position.point.x.to_pt(), position.point.y.to_pt());
+            let page = position.page.get() - 1;
+            if marks
+                .iter()
+                .any(|m| m.page == page && (m.x - x).abs() < 0.01 && (m.y - y).abs() < 0.01)
+            {
+                continue;
+            }
+            marks.push(CitationMark {
+                key: None,
+                page,
+                x,
+                y,
+            });
+        }
+        marks.sort_by(|a, b| (a.page, a.y, a.x).partial_cmp(&(b.page, b.y, b.x)).unwrap());
+        Ok(marks)
+    }
+
     /// Compiles `main`. With `render`, pages that changed since its last
     /// render are rendered to SVG; without, only diagnostics come back (for a
     /// preview that isn't on screen).
@@ -540,6 +622,28 @@ pub struct ParamDoc {
     pub required: bool,
     pub variadic: bool,
     pub default: Option<String>,
+}
+
+/// Where a citation (`key`) or a cross-reference (no key) starts on a page,
+/// in points from its top left.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CitationMark {
+    pub key: Option<String>,
+    pub page: usize,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Typst's built-in citation styles: each name it accepts (aliases
+/// included) with a display name.
+pub fn citation_styles() -> Vec<(String, String)> {
+    let mut styles = Vec::new();
+    <CslSource as Reflect>::input().walk(|info| {
+        if let CastInfo::Value(Value::Str(name), docs) = info {
+            styles.push((name.to_string(), (*docs).to_owned()));
+        }
+    });
+    styles
 }
 
 fn first_paragraph(docs: &str) -> Option<String> {
@@ -872,6 +976,52 @@ mod tests {
         let range = diag.range.unwrap();
         assert_eq!(range.start, Position { line: 1, column: 4 });
         assert_eq!(range.end, Position { line: 1, column: 8 });
+    }
+
+    #[test]
+    fn reads_metadata_and_lists_citation_styles() {
+        let mut engine = Engine::new();
+        engine
+            .set_source("/main.typ", "#metadata(\"apa\") <style>\n#metadata(1) <n>")
+            .unwrap();
+        engine.compile("/main.typ", false).unwrap();
+        assert_eq!(
+            engine
+                .metadata_text("/main.typ", "style")
+                .unwrap()
+                .as_deref(),
+            Some("apa")
+        );
+        assert_eq!(engine.metadata_text("/main.typ", "n").unwrap(), None);
+        assert_eq!(engine.metadata_text("/main.typ", "nope").unwrap(), None);
+        let styles = citation_styles();
+        assert!(styles.iter().any(|(name, _)| name == "apa"));
+        assert!(styles.iter().any(|(name, _)| name == "chicago-author-date"));
+    }
+
+    #[test]
+    fn marks_where_citations_and_references_start() {
+        let mut engine = Engine::new();
+        engine
+            .set_source(
+                "/refs.bib",
+                "@book{doe, title = {A}, author = {Doe, J}, date = {2020}}\n\
+                 @book{roe, title = {B}, author = {Roe, R}, date = {2021}}\n",
+            )
+            .unwrap();
+        engine
+            .set_source(
+                "/main.typ",
+                "#set heading(numbering: \"1.\")\n= Intro <intro>\n\
+                 See @doe @roe, @intro and @roe[p. 7].\n#bibliography(\"/refs.bib\")",
+            )
+            .unwrap();
+        let out = engine.compile("/main.typ", false).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let marks = engine.citation_marks("/main.typ").unwrap();
+        let keys: Vec<Option<&str>> = marks.iter().map(|m| m.key.as_deref()).collect();
+        assert_eq!(keys, [Some("doe"), Some("roe"), None, Some("roe")]);
+        assert!(marks.windows(2).all(|w| w[0].x <= w[1].x));
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { openPalette, pick } from '../components/Palette';
 import { prompt } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
 import { menuFolder, menuTarget } from '../components/Sidebar';
+import { insertCitation, refreshReferences } from '../state/citations';
 import { toggleDebug } from '../state/debug';
 import { settings, updateSettings } from '../state/settings';
 import {
@@ -503,6 +504,19 @@ export function registerAppCommands(): () => void {
       title: 'Close pane',
       enabled: () => hasVault() && layout.root.kind === 'split',
       run: closePane,
+    },
+    {
+      id: 'citation.insert',
+      title: 'Insert citation from Zotero',
+      keybinding: 'Mod+Shift+C',
+      enabled: () => activeNote() !== null,
+      run: insertCitation,
+    },
+    {
+      id: 'citation.refresh',
+      title: 'Refresh references from Zotero',
+      enabled: hasVault,
+      run: refreshReferences,
     },
     {
       id: 'debug.toggle',

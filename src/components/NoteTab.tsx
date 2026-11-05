@@ -1,10 +1,16 @@
 import type { EditorView } from '@codemirror/view';
 import { createEffect, createResource, Match, on, Switch } from 'solid-js';
+import { citations, refreshCitations } from '../editor/citations';
 import { setDiagnostics } from '../editor/diagnostics';
 import { followCursor } from '../editor/sync';
 import { typstEditing } from '../editor/typst';
 import { setVimActions } from '../editor/vimCommands';
 import { refreshWikilinks, wikilinks } from '../editor/wikilinks';
+import {
+  hasReference,
+  openInZotero,
+  referenceEntries,
+} from '../state/citations';
 import { settings } from '../state/settings';
 import {
   allNotes,
@@ -20,6 +26,7 @@ import {
   tree,
 } from '../state/workspace';
 import type { NoteId } from '../vault/api';
+import { citationCard } from './citationCard';
 import { Editor } from './Editor';
 
 const links = wikilinks({
@@ -66,6 +73,12 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
       (await session?.signature(text, position)) ?? null,
   });
 
+  const cites = citations({
+    known: hasReference,
+    card: key => citationCard(props.id, [key]),
+    open: key => void openInZotero(key),
+  });
+
   const attach = (v: EditorView | undefined) => {
     view = v;
     session?.attachView(v);
@@ -92,6 +105,13 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
       defer: true,
     }),
   );
+  createEffect(
+    on(
+      referenceEntries,
+      () => view?.dispatch({ effects: refreshCitations.of(null) }),
+      { defer: true },
+    ),
+  );
 
   return (
     <Switch>
@@ -104,7 +124,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
             initialDoc={text() ?? ''}
             onChange={next => s().edit(next)}
             onView={attach}
-            extensions={[editing, links, follow]}
+            extensions={[editing, links, cites, follow]}
             vim={settings.vim}
             lineNumbers={settings.lineNumbers}
           />

@@ -1,5 +1,6 @@
 import type {
   Calls,
+  CitationMark,
   CompileResult,
   Completions,
   FromWorker,
@@ -126,6 +127,30 @@ export class TypstClient {
     position: Position,
   ): Promise<PagePoint[]> {
     return this.call('jumpFromCursor', { main, path, position });
+  }
+
+  /** The string metadata labelled `label` in `main`'s last good compile. */
+  metadataText(main: string, label: string): Promise<string | null> {
+    return this.call('metadataText', { main, label });
+  }
+
+  /** Compiles `text` as a main file of its own, which is then forgotten. */
+  standalone(
+    path: string,
+    text: string,
+    render: boolean,
+  ): Promise<{ pages: string[]; errors: string[] }> {
+    return this.call('standalone', { path, text, render });
+  }
+
+  /** Where citations and cross-references start in `main`'s last good layout. */
+  citationMarks(main: string): Promise<CitationMark[]> {
+    return this.call('citationMarks', { main });
+  }
+
+  /** Typst's built-in citation styles. */
+  citationStyles(): Promise<{ name: string; label: string }[]> {
+    return this.call('citationStyles', {});
   }
 
   /** Fires when packages finish loading, so dependent documents can recompile. */

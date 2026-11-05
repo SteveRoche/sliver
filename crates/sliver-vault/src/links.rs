@@ -13,6 +13,7 @@ use std::ops::Range;
 use serde::Serialize;
 use typst_syntax::{SyntaxKind, SyntaxNode};
 
+use crate::citations::{CITATIONS_PATH, CITE_SCHEME, REFERENCES_PATH};
 use crate::header::{HEADER_LABEL, string_literal};
 use crate::theme::THEME_PATH;
 
@@ -210,6 +211,13 @@ pub fn preview_main_path(id: &str) -> String {
 /// the note's preambles that define `template`, applied in order (common
 /// first) inside the theme's defaults; the preview's page size is applied
 /// after them, so a preamble's page setup can't break the fit to the pane.
+///
+/// Citations: the vault's citation style is the default, a template can set
+/// its own, and a note's `citation-style` header field wins over both. A
+/// reference that is neither a label nor a known key (`citations.keys`)
+/// shows in red instead of failing the compile; known ones link to
+/// `sliver-cite:<key>`. The style the note ended up with is recorded as
+/// `<sliver-citation-style>` metadata, for rendering one entry elsewhere.
 pub fn preview_main(id: &str, templates: &[String]) -> String {
     let templates: String = templates
         .iter()
@@ -225,10 +233,16 @@ pub fn preview_main(id: &str, templates: &[String]) -> String {
         r#"#import "{LINKS_PATH}": wikilinks
 #import "/.sliver/page/{id}.typ": page-width
 #import "{THEME_PATH}" as theme
-#let unthemed() = {{
+#import "{CITATIONS_PATH}" as citations
+#let header-field(name, default) = {{
   let header = query(<{HEADER_LABEL}>)
-  header.len() > 0 and type(header.first().value) == dictionary and header.first().value.at("theme", default: true) == false
+  if header.len() > 0 and type(header.first().value) == dictionary {{
+    header.first().value.at(name, default: default)
+  }} else {{
+    default
+  }}
 }}
+#let unthemed() = header-field("theme", true) == false
 #set page(
   width: page-width,
   height: auto,
@@ -245,12 +259,39 @@ pub fn preview_main(id: &str, templates: &[String]) -> String {
   set table(stroke: if unthemed() {{ ink }} else {{ theme.rule }})
   body
 }}
-{templates}#show: body => {{
+#set bibliography(style: citations.style)
+{templates}#show: body => context {{
+  let style = header-field("citation-style", none)
+  if style != none and style not in citations.styles {{
+    text(fill: theme.error)[Unknown citation style #repr(style); using the default.]
+    parbreak()
+  }}
+  set bibliography(style: style) if style in citations.styles
+  body
+}}
+#show: body => {{
   set page(width: page-width, height: auto)
   body
 }}
+#show ref: it => if it.element == none and str(it.target) not in citations.keys {{
+  text(fill: theme.error, "@" + str(it.target))
+}} else {{
+  it
+}}
+#show cite: it => if str(it.key) not in citations.keys {{
+  text(fill: theme.error, "@" + str(it.key))
+}} else {{
+  link("{CITE_SCHEME}" + str(it.key), it)
+}}
 #show: wikilinks
 #include "/notes/{id}.typ"
+#context [#metadata(bibliography.style) <sliver-citation-style>]
+#if citations.enabled {{
+  // Shown only when something in the note cites a known entry: otherwise
+  // it would be a heading over nothing.
+  show bibliography: it => context if citations.show-references and query(cite).any(c => str(c.key) in citations.keys) {{ it }}
+  bibliography("{REFERENCES_PATH}")
+}}
 "#
     )
 }
