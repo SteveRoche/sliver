@@ -543,6 +543,27 @@ function sendPageWidth(id: NoteId) {
   return typst.setSource(pagePath(id), `#let page-width = ${pt}pt\n`);
 }
 
+/**
+ * Whether the layout is being resized: a divider is dragged, or the window
+ * resized within the last moment (it has no end event). Previews keep their
+ * page meanwhile, stretched by CSS, and recompile for the new width after.
+ */
+const [dragResizing, setDragResizing] = createSignal(false);
+const [windowResizing, setWindowResizing] = createSignal(false);
+export const resizing = () => dragResizing() || windowResizing();
+export { setDragResizing };
+
+const WINDOW_RESIZE_SETTLE_MS = 200;
+let windowResizeTimer: ReturnType<typeof setTimeout> | undefined;
+window.addEventListener('resize', () => {
+  setWindowResizing(true);
+  clearTimeout(windowResizeTimer);
+  windowResizeTimer = setTimeout(
+    () => setWindowResizing(false),
+    WINDOW_RESIZE_SETTLE_MS,
+  );
+});
+
 /** Sets note `id`'s preview page width (CSS px) and recompiles it if it changed. */
 export function setPreviewWidth(id: NoteId, px: number) {
   const pt = Math.max(

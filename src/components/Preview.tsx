@@ -9,7 +9,7 @@ import {
 } from 'solid-js';
 import { settings } from '../state/settings';
 import { isPreviewDark } from '../state/theme';
-import { setPreviewWidth } from '../state/workspace';
+import { resizing, setPreviewWidth } from '../state/workspace';
 import type { Diagnostic, PagePoint } from '../typst/protocol';
 import type { NoteId } from '../vault/api';
 import { withOverlayScrollbar } from './scrollbars';
@@ -269,8 +269,9 @@ export function Preview(props: PreviewProps) {
       if (focus) showPoint(focus.points[0]);
     });
     createEffect(() => {
-      // A hidden preview keeps its last compile.
-      if (available() < 1) return;
+      // A hidden preview keeps its last compile; during a resize CSS
+      // stretches the page, and the last width compiles once it ends.
+      if (available() < 1 || resizing()) return;
       setPreviewWidth(
         props.note,
         Math.min(available(), settings.maxPreviewWidth),

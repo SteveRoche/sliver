@@ -21,6 +21,7 @@ import {
   previewFocus,
   previewLayout,
   sessionFor,
+  setDragResizing,
   setGlobalSizes,
   setPaneSplitSizes,
   setSizes,
@@ -63,6 +64,7 @@ function Divider(props: {
     const start = row ? event.clientX : event.clientY;
     el.setPointerCapture(event.pointerId);
     el.classList.add('dragging');
+    setDragResizing(true);
     const onMove = (move: PointerEvent) => {
       const delta = (row ? move.clientX : move.clientY) - start;
       const min = Math.min(MIN_PX, totalPx / 2);
@@ -71,6 +73,7 @@ function Divider(props: {
       props.onResize(weight, total - weight);
     };
     const onUp = () => {
+      setDragResizing(false);
       el.classList.remove('dragging');
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
@@ -295,7 +298,11 @@ export function Workspace() {
       { id: 'main', minSize: 30 },
     ],
     defaultSize: paneSizes(),
-    onResizeEnd: details => setSizes(details.size),
+    onResizeStart: () => setDragResizing(true),
+    onResizeEnd: details => {
+      setDragResizing(false);
+      setSizes(details.size);
+    },
   });
 
   return (
