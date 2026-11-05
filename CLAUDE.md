@@ -1,0 +1,217 @@
+# CLAUDE.md
+
+## Project
+
+A Typst-based Zettelkasten notetaking desktop app (Tauri 2 + SolidJS + TypeScript, Rust crates for Typst and the vault).
+
+## Decisions
+
+- **Native only:** Windows, macOS and Linux via Tauri. There is no browser build, so don't add browser fallbacks or conditions.
+- **Vault layout:** notes are `<uuid>.typ` files in folders, which are plain directories at any depth under the vault root (`Inbox/`, `Projects/Sliver/`); filenames never come from titles, and links never contain paths, so moving a file breaks nothing. The scan skips anything starting with a dot and any `.typ` not named by a uuid. Everything else lives under `.sliver/`: `pkg/<namespace>/<name>-<version>.tar.gz` (Typst packages exactly as downloaded), `tmp/` (atomic-write staging: temp file, `sync_all`, rename), `workspace.json` (open tabs, active tab, pane sizes), `settings.json`, `theme.typ` (light theme colours, regenerated on open), `preambles/` (`common.typ`, `kinds/<kind>.typ`), `references.bib` (cited Zotero entries), `styles/` (custom CSL files).
+- **Note files are the only source of truth; there is no database.** Each note starts with a plain-Typst header, `#metadata((title: "…", address: "1.1a", tags: ("…",), kind: "…")) <note>` (optionally `citation-style: "…"`, read only by the preview wrapper). It has no imports, compiles anywhere, and its known fields must be literals. On vault open every header is parsed with `typst-syntax` (no evaluation) into an in-memory index: about 23 µs per note, versus about 2.7 ms to compile one. Anything derived (tree, backlinks, search) is computed from the files, never stored. Renaming edits only the title literal (`set_title`).
+- **The Zettelkasten** is one ordinary, renamable folder (`Zettelkasten/` in new vaults), identified by an empty `.zettelkasten` marker file inside it so a rename anywhere (even in Finder) keeps it. Exactly one per vault (extra markers get a warning; a vault without one offers "Use as Zettelkasten" on a folder); it can't be deleted from the app and holds no subfolders. Only notes in it have addresses; other folders are flat lists sorted by title. Mismatches (an address outside it, a folder inside it, a duplicate uuid) are warnings in the sidebar, never errors, since files can be edited outside the app.
+- **Note identity:** every note has a permanent uuid and, in the Zettelkasten, a **Zettelkasten address**, a Folgezettel in Bob Doto's style.
+  - Numbers and letters alternate: `1`, `1.1`, `1.1a`, `1.1a1`, `1.1a2`, `1.1b`, … Letters are bijective base 26 (`z` → `aa`).
+  - Two ways to add a note after an existing one (the user's terms; use them in UI and code): a **next note** goes one level deeper (`1.1a` → `1.1a1`, `Placement::Next`, `Address::first_child`); an **aside** takes the next sibling (`1.1a` → `1.1b`, `Placement::Aside`, `Address::next_sibling`). Never call them "continuation" or "branch". A taken address moves on to the next free sibling.
+  - Sorting by address gives the tree's order. Notes whose parent address is missing attach to their nearest existing ancestor; unaddressed notes come last. A free address is one that no note has and no note lies under (an orphan `3.2a1` blocks `3.2a`).
+  - Notes move between places explicitly (`vault/moves.rs`): **filing** a folder note gives it an address and moves its file into the Zettelkasten; **re-addressing** moves a Zettelkasten note with its whole subtree, renumbered by prefix (`Address::rebase`); **unfiling** to a folder drops the address (the notes under it stay and reattach to the nearest ancestor). Every `[[old address]]` link in the vault is then rewritten (to the new address, or to the uuid when unfiling), after a confirmation that `plan_move` feeds. Not transactional across files: a failure partway leaves stale links (shown broken), never a half-written file.
+  - The sidebar is one folder tree: folders indent (they are a hierarchy, and the whole folder row folds; folded folders persist in `workspace.json`), but inside the Zettelkasten the address tree shows trains of thought, not a hierarchy: no indentation and no fold icons. Clicking a note's address folds or unfolds the notes under it; folded addresses are drawn brighter (`--folded`). The rest of the row opens the note (`expandOnClick={false}`).
+- **Wikilinks:** `[[target]]` or `[[target|custom text]]`, where the target is an address or, for unaddressed notes, a uuid. Titles never go in links: they'd need rewriting on rename, can be ambiguous, and can contain markup characters (and `|`).
+  - In the source it's plain Typst text. In the app each note compiles through a wrapper main (`preview_main`) that applies the `wikilinks` show rule from the generated `/.sliver/links.typ` (`link_library`). It renders `sliver://<uuid>` links labelled with the target's current title (or address, per the link-display setting), and broken targets in red. `links.typ` is regenerated whenever a save changes a title, address or tags. The preview never rewrites note sources, so diagnostics keep their positions; the app rewrites other notes' links only on an explicit, confirmed move.
+  - Backlinks come from a syntax-tree scan (`links_in`) that accepts only plain text between the brackets, which is also all the regex rule can match; raw text is excluded in both. Known limits: styled text or smart quotes inside `[[...]]` don't form a link, and `\[\[x\]\]` still renders as a link (use raw for literal brackets).
+- **Crates:** `sliver-typst` is the compile/render service, built to WASM for live preview in a Web Worker and usable natively. `sliver-vault` (native) owns vault semantics: filesystem, index, addresses, reading/editing Typst syntax (it depends on `typst-syntax`, not `sliver-typst`). `sliver-typst` also uses `typst-ide` (jumps; later completion). Don't add more crates without asking first.
+- **Editor (M4):** CodeMirror extensions live in `src/editor/`.
+  - Highlighting and wikilink ranges come from the native `analyze` command (`sliver-vault/syntax.rs`, `typst-syntax`'s `highlight` tags as `typ-*` classes coloured by `--syn-*` tokens), not the worker: an IPC round trip never waits behind a compile. At most one request is in flight, always for the latest text; results for older text are dropped and the previous decorations are mapped through edits meanwhile.
+  - Wikilinks show as their target's title (or custom text, red when broken) until the cursor enters them, then as source. Cmd/Ctrl-click opens the target. Typing `[[` (outside raw) opens an autocomplete menu of all notes that inserts `address]]`, or `uuid]]` for unaddressed notes.
+  - Autocomplete (`@codemirror/autocomplete`, `src/editor/completion.ts`) has two sources: wikilink targets after `[[`, and Typst completions from `typst-ide` in the worker (`complete`, run on the editor's current text without touching the engine's copy, so compiles and diagnostics stay consistent). Typst's `${field}` snippets go through CodeMirror's `snippet()` with a literal `#{` escaped. Completion icons are Lucide icons (`addToOptions`), not CodeMirror's text glyphs.
+  - Signature help (`signature.ts`, engine `signature`): inside a call's parentheses a tooltip shows the function's parameters with their types, bolds the one at the cursor (by name for named arguments, else by position) and shows its docs (or the function's). The callee is resolved by tracing, falling back to the standard library while the call doesn't evaluate yet. Engine analysis (completion, signature) runs on the editor's text through an overlay source in the world, never the engine's stored copy.
+  - Vim ex commands (`vimCommands.ts`): `:w` saves, and `:q`, `:wq` and `:x` close the note's tab (saving first, like every tab close). Ex commands are global to the page, so each editor registers its own actions (`setVimActions`); the settings view's preamble editor only has `:w`.
+  - Auto-closing pairs (`brackets.ts`): `( [ { " $` and backticks, not `'` (an apostrophe in prose).
+  - Squiggles and hover messages are our own `StateField` + `hoverTooltip` (no `@codemirror/lint`). Only the note's own diagnostics are shown, and only when the compiled text equals the document; otherwise the old ones follow the edits.
+  - Preview ↔ source sync uses `typst-ide` in the engine, which keeps each main file's last good `PagedDocument`. A click on a preview page (not on a link) moves the editor's cursor there; when the cursor rests for 150 ms after a move (not typing), the preview scrolls to it if it's off-screen and flashes a marker (setting `previewFollowsCursor`, on by default).
+  - "Toggle debug view (compile timings)" shows the visible note's compile and render times (measured in the engine), edit-to-preview round trip and syntax-analysis round trip, with the recent maximum and a bar per compile.
+- **Compiling:** one long-lived `Engine` in the worker holds every open note, compiled per tab (`compile(main, render)`); `comemo` caches the work (`evict(10)` after each compile). At most one compile is in flight per tab, and edits made meanwhile collapse into one follow-up compile (`livePreview`, which sends the new source with the compile request, one message). Diagnostics use 0-based lines and UTF-16 columns. Fonts are the embedded `typst-assets` set only so far.
+  - Only what's on screen renders: a note whose preview isn't shown (`visibleNotes`) compiles after a 400 ms pause and without rendering pages (its diagnostics still feed the editor's squiggles), and is marked stale until shown. Pages render in **bands** (`bands.rs`): a preview page is as tall as its note, so the engine cuts each laid-out page (the `Frame`, not the SVG) into horizontal bands of at least 400 pt and renders each as its own SVG. Cuts go only where no content crosses, and where depends on the content after the cut (a hash), so an edit only changes the bands around it and the cuts after it stay put. Each band has a key, a hash of what it draws, ignoring source spans and introspection locations (an edit renumbers those in everything after it) and with positions rounded. The engine renders (and sends) only bands whose key wasn't in the main file's last render; the frontend reuses the rest by key. In the preview each page is a box sized by its aspect ratio with its fill (`background`) and its bands positioned in percent, and only bands within half a viewport of the visible area have their SVG in the DOM (`showNearBands`, on scroll and resize). So the DOM work of a compile is a few screens of SVG whatever the note's length: a width change on a 21,000 px note went from about 565 ms to about 50 ms on the main thread. Band SVGs don't clip (`overflow: visible`), since text extents come from font metrics and a big glyph may overhang. `page_svgs` renders whole pages for small throwaway mains (the citation card).
+  - Changes recompile only what they affect: links, theme and preamble changes recompile visible previews now and mark the rest stale; a preamble save reloads only the notes whose last compile read it (`affectedMains`).
+  - Closing a note removes everything the worker holds for it: its text, prefix, wrapper (with the last layout, dependencies and page hashes) and page file.
+- **WASM ↔ JS boundary:** the engine's Rust API uses ordinary structs; `wasm.rs` returns each result to JS as one wasm-bindgen class of flat arrays (numbers, strings, bytes), never nested wasm objects, so each result needs exactly one `free()` (the worker's `using` helper frees in a `finally`) and nothing can leak by forgetting a nested object. No JSON. Rendered pages cross as UTF-8 bytes that the worker transfers (not copies) to the main thread, which decodes them. Binary IPC (packages) uses raw bodies (`tauri::ipc::Request` / `Response`).
+- **Packages** (optimized for latency): the engine reports `missingPackages`; the worker asks the vault cache (`load_package`), else fetches `packages.typst.org` itself, gunzips with `DecompressionStream`, calls `addPackage` and recompiles, then caches the download via `save_package` off the critical path. Failed specs retry after 30 s, and "not found" errors show as a "Downloading ..." notice. With no vault open, packages live only in worker memory.
+- **Panes** (`src/state/layout.ts`, `Workspace.tsx`): the editor area is a tree of splits (`row`/`column`, nested any which way, flex weights resized by our own `Divider`) whose leaves are panes. A pane is the unit: its own tab bar, its active note's editor and, in per-pane preview layout, that note's preview, in one frame, so layout shows which preview belongs to which editor. The focused pane (last clicked or typed in) is where commands and `openNote` act; only its active tab carries the accent.
+  - Tabs are editor-style containers (custom `TabBar`, not Ark `Tabs`): Mod+T opens an empty tab, and opening a note fills the focused pane's active empty tab, else activates the note's existing tab in whichever pane, else opens a new one. A note is in at most one tab across all panes. Dragging a tab within its bar reorders; dragging it off onto a pane drops it into that pane (centre or tab bar) or splits it off on that side (an edge), with an overlay showing where. A pane left without tabs disappears (never the last one). Commands: split right/down (Mod+\\, Mod+Shift+\\), focus next/previous pane, close pane.
+  - Editors live outside the pane tree (`editorHosts.tsx`: one Solid root per open note) and panes adopt their elements, so splitting and moving tabs never remount an editor: inactive tabs keep their cursor and undo history.
+  - View modes per pane: editing (editor and preview), reading (preview only, Mod+E; clicks in it never move or show the editor, only links act) and source (editor only; "Toggle preview", Mod+Shift+P). A new pane (from a split, or an empty workspace) starts in the `defaultViewMode` setting. Preview layout (`previewLayout`, "Toggle global preview mode"): one preview per pane, or global: one shared column showing the note of the last focused pane not in reading mode (there Mod+Shift+P hides the column; it also goes away while it has no note to show, e.g. every pane is in reading view). The layout, focused pane and sizes persist in `workspace.json`.
+  - Each tab autosaves after a pause (`autosave`, `autosaveDelay` settings); with autosave off it saves on Mod+S. Either way pending edits are flushed on tab close, window close, and before renames and moves, so nothing is lost silently.
+- **Commands:** every user action is a command in the registry (`src/commands/registry.ts`, `Mod` = Cmd on macOS, Ctrl elsewhere). The palette (Mod+P) and note switcher (Mod+O) list them; keybinding hints render through `Keys` (one spaced span per key, system UI font); keybindings are dispatched in the capture phase, before the editor, and are off while a modal dialog (settings, palette, prompt) is open.
+- **Settings** are per vault, in `.sliver/settings.json` (`load_settings`/`save_settings`), so vaults can have different workflows; the schema and defaults are frontend-owned in `src/state/settings.ts`, and the settings dialog needs an open vault and has "Restore defaults" (`restoreDefaults`). Only the last vault (`<app config dir>/state.json`) and window geometry are app-level.
+- **Preambles** (`preambles.rs`): shared Typst code in `.sliver/preambles/`. `common.typ` applies to every note (a vault without one gets the default: 12pt margins and text); `kinds/<kind>.typ` applies to notes whose header says `kind: "<kind>"`. The kinds are the files (`Vault::kinds`); a kind is optional, and a note whose kind has no file gets a sidebar warning and only the common preamble. Edited in the settings view ("Preambles"), saved when typing pauses (always, there's no Mod+S there) and when the editor closes.
+  - Names reach a note through hidden `#import "<preamble>": *` lines the engine compiles before the note's text (`note_prefix`, `Engine::set_prefix`): whole lines, so the engine translates positions by a line count at its API boundary (diagnostics, jumps, completion, signature help); a diagnostic inside the prefix maps to the note's start. Notes that use preamble names don't compile outside the app; accepted.
+  - Styles reach a note through the preamble's `template(body)` function, which the wrapper main applies with `#show:` (common, then the kind) inside the theme's defaults; the preview's page width and height are applied after them, so a preamble can't break the fit to the pane. Set rules inside an imported module never reach the importer, so a preamble's top level holds definitions only (imports, `let`): `preamble_warnings` flags top-level set/show rules, content and relative paths, since exporting a note inlines its preambles and those would then behave differently.
+  - Compiled once: Typst's `comemo` memoizes module evaluation, and every note compiles in the one long-lived engine, so a preamble (and its packages) is evaluated once per change and reused by every note and edit; only each note's layout reruns.
+  - "New note of kind" (Mod+Shift+N) asks for a kind and uses its default folder (`kindFolders` setting) if it has one, else where Mod+N would go; "Change kind" sets or clears it (`set_kind`). Renaming a kind rewrites the `kind` of its notes; deleting one leaves them with a warning. Errors in a preamble show in every affected preview, labelled with the preamble.
+- **Citations** (`citations.rs`, `src-tauri/src/zotero.rs`, `src/state/citations.ts`): `@citationKey` (Typst's own reference syntax, so `@key[p. 7]` and side-by-side grouping come free; `#cite(<key>, ...)` also works), with Better BibTeX citation keys from the user's Zotero library. Better BibTeX is required: it provides the keys, the picker and the export.
+  - `.sliver/references.bib` holds BibLaTeX entries only for keys the vault cites (the index keeps each note's keys from the syntax tree; a reference to a label defined in the same note is a cross-reference, not a citation). It's fetched with Better BibTeX's JSON-RPC `item.export` (an unknown key fails a whole export, so each one named is dropped and the rest retried) and merged in (`merge_references`, dropping the machine-specific `file` field). Refreshed in the background on vault open (all cited keys, pruning uncited entries), after each save that cites a key without an entry, after picking, and by "Refresh references from Zotero". Zotero being closed only means nothing new is fetched; previews use the vault's copy. HTTP is `ureq`, off the async runtime, with the vault unlocked meanwhile.
+  - The preview never fails over a citation: the wrapper gets the known keys from the generated `/.sliver/citations.typ` (`citation_library`), and `show ref`/`show cite` rules draw a reference that is neither a label nor a known key as red `@key` (Typst only errors when it draws the reference itself). Known citations become `sliver-cite:<key>` links (`link(..., it)` keeps grouping), but Typst also links a citation's text to its bibliography entry, which SVG can't express (anchors without an href), and a group links only to its first key. So the preview finds what's under the pointer by position instead: the run of touching link areas on the line, and the engine's `citation_marks` (where each cite starts; Typst puts the others of a merged group at its end; cross-references are marks without a key). A click on several asks which to open. `references.bib` is checked to parse before use; if it doesn't, the wrapper leaves the bibliography out and the preview shows a notice. The reference list shows only when the note cites a known entry (setting `showReferences`).
+  - Style: the vault's `citationStyle` (a Typst style name or a `.sliver/styles/*.csl` path), then a kind template's `set bibliography(style: ...)`, then the note's `citation-style` header field (read in the wrapper with `query(<note>)`, so it applies while typing). A header naming an unknown style shows a notice and keeps the default, because an unknown style would fail the compile; the valid names come from the engine (`citation_styles`, Typst's own list). The wrapper records the style used as `<sliver-citation-style>` metadata.
+  - Details: hovering a citation (editor or preview) shows each entry rendered by Typst in the note's style (a throwaway main per entry, `standalone`, cached until references, style or theme change) with "Open in Zotero" (`zotero://select/library/items/<item key>`, the item looked up by citation key with Better BibTeX's `item.search`, opened through `tauri-plugin-opener`); unknown keys say whether Zotero is reachable. Mod-click in the editor and a click in the preview open the item in Zotero. "Insert citation from Zotero" (Mod+Shift+C) opens Better BibTeX's picker (`cayw?format=json`), saves the picks' entries, refocuses the window and inserts `@key`, `@key[p. 7]`, or `#cite(label("key"), form: "year")` when the author is suppressed. `@` completion comes from Typst itself once the bibliography is in the document.
+- **New notes (Mod+N)** go where the vault's settings say, as in Obsidian: `newNoteLocation` is the vault root, the current note's folder, or `newNoteFolder` (picked by fuzzy search, Ark `Combobox`). A missing folder falls back to the root. A note landing in the Zettelkasten asks for its address first (new top-level, or next note / aside of a chosen note).
+- **Theme:** the per-vault `theme` setting ("system" by default, "light", "dark") sets `data-theme` on `<html>` (dark colours live under `:root[data-theme="dark"]`) and the native window theme (`src/state/theme.ts`). Previews have their own `previewTheme` ("app", "light", "dark"; `isPreviewDark`), which picks the `theme.typ` the worker gets and the page colour (`--paper` under `.preview[data-preview-theme]`); the pane around the page and the diagnostics stay in the app theme. Before a vault loads it follows the system, so a vault set otherwise can flash once at startup; accepted.
+- **Preview theming** (light/dark): `/.sliver/theme.typ` (`theme_library`, `theme.rs`) names the theme's colours (`ink`, `paper`, `muted`, `accent`, `error`, `warning`, `rule`, plus `light` and `untheme`). The vault writes the light version to disk on open, so notes that import it (`#import "/.sliver/theme.typ": accent`) still compile outside the app with the vault as root and export light; the worker gets the current theme's version, and a theme change recompiles the visible preview (others when shown). The preview wrapper applies it as defaults (page fill, text, lines, tables, links in `accent`, broken wikilinks in `error`). Opt-outs: `theme: false` in a note's header (shown as on light paper; the wrapper reads it with `query(<note>)`, so no Rust round trip) and `#untheme[...]` for one element. The palettes in `theme.rs` mirror the CSS colour tokens; keep them in sync.
+- **Preview page:** the wrapper sets `width: page-width, height: auto` (`page-width` from the note's own generated `/.sliver/page/<id>.typ`, `page_path`, since previews side by side differ in width), so a note is one page as wide as its preview: never `width: auto`, which never wraps text. The width is capped by the `maxPreviewWidth` setting (560 px by default, about 75 characters a line) and snapped to 6 pt steps; a newly opened note starts at the last width set. A resize recompiles only that note, through `livePreview`'s collapsing (latest width wins), while CSS stretches the old page; with bands, a drag recompiles live without stalling. Previews off screen that went stale (theme, preambles) recompile when shown (`visibleNotes`). Page setup stays out of note files so a future export can pick its own page.
+- **Window geometry** (size, position, maximized) is per machine, so it never goes in `workspace.json` (a synced vault would carry one machine's monitor layout to another). `tauri-plugin-window-state` keeps it in the app config dir.
+- **macOS menu:** Tauri's default minus "Close Window", so Cmd+W reaches the webview and closes a tab. The Edit menu must stay: macOS routes copy/paste/undo through it.
+- **Dependencies:** keep them minimal.
+  - UI: Ark UI (`@ark-ui/solid`, imported from the package root): Splitter, TreeView, Menu, Dialog, Switch, Combobox (the settings folder picker). The palette is `Dialog` plus our own combobox list (Ark `Combobox` is a floating dropdown).
+  - Editor: CodeMirror 6 core packages plus `@codemirror/autocomplete` and `@replit/codemirror-vim`.
+  - Icons: Lucide (`lucide-solid`). Import each icon by path (`import Plus from "lucide-solid/icons/plus"`); use the canonical names from `dist/types/icons/`.
+  - Tauri plugins: `tauri-plugin-dialog` (native dialogs), `tauri-plugin-window-state` and `tauri-plugin-opener` (both Rust side only; no JS package or capability).
+  - HTTP to Zotero's local endpoints: `ureq` (no TLS, `json` feature).
+
+## Roadmap
+
+### M4 — Editor
+
+- [ ] Hover tooltips via `typst-ide` (`tooltip`; the engine already implements `IdeWorld`)
+
+### M5 — Panes
+
+Built (see Panes under Decisions); still to do:
+
+- [ ] Focus the pane in a direction (left/right/up/down) rather than only next/previous
+- [ ] Multiple main windows (Later) reuse this: a window is a pane tree
+
+### M6 — Commands & keybindings
+
+- [ ] Keybinding layer that users can override from the settings view, without conflicting with Vim mode (on Windows/Linux `Mod` is Ctrl, which Vim also uses)
+- [ ] Flush unsaved edits on Cmd+Q / app quit (only window close is handled now)
+- [ ] Formatting shortcuts in the editor, e.g. Mod+B for bold (`*...*`) and Mod+I for italic (`_..._`): wrap the selection, or insert an empty pair at the cursor; pressed again on wrapped text, they unwrap it. These must be commands in the registry like every other action, and must not clash with Vim mode.
+- [ ] Fill out the native menus: the macOS menu bar, and the window menu bar on Windows and Linux. Items come from the command registry (File: new note, new tab, open vault, settings; Edit: undo, copy, paste, formatting; View: toggle preview, debug view; Go: switch note, next and previous tab), with their keybindings shown as accelerators. The macOS Edit menu stays, since copy, paste and undo go through it.
+
+### M7 — Search
+
+All in memory and computed from the note files, like the rest of the index (no database). Indexing happens in `sliver-vault` (native) on open and on every write.
+
+- [ ] Full-text index: each note's text as a reader sees it, taken from the syntax tree (markup text, headings, raw; not code, the header or wikilink targets), stored with source offsets so a hit can open the editor at the right spot
+- [ ] Search view in the sidebar: results grouped by note with highlighted snippets; clicking a hit opens the note (in the focused pane) at that place. Live as you type, after a short pause
+- [ ] Query syntax: words and `"phrases"`, plus filters `tag:`, `kind:`, `folder:`, `address:` (a prefix, for a train of thought: `address:1.1`), `links:<target>` (notes linking to it), and negation (`-tag:draft`)
+- [ ] Search inside the current note (CodeMirror's search panel; Vim's `/` already works)
+- [ ] Note switcher (Mod+O) also matches tags and kinds, not only titles and addresses
+- [ ] Later, maybe: replace across the vault (with a confirmation listing the changes, like moves), and saved searches
+
+### M8 — Citations
+
+Built (see Citations under Decisions); still to do:
+
+- [ ] `@` completion over the whole Zotero library while Zotero runs (Better BibTeX `item.search`), not only the keys already in `references.bib`
+- [ ] Export: copy `references.bib` (or the cited part) next to an exported note, with the export wrapper's `bibliography` call
+
+### M9 — Peer-to-peer sync
+
+Sync a vault between the user's own desktop clients directly, with no server holding the notes. Exploring [iroh](https://docs.rs/crate/iroh/latest) (1.0, Rust, from n0): endpoints are dialled by public key, connections are QUIC and end-to-end encrypted, and they hole-punch to a direct path with a relay as fallback. Its `iroh-docs` (a multi-writer key/value replica on `iroh-blobs` + `iroh-gossip`) has an official Tauri example (`tauri-todos` in `n0-computer/iroh-examples`). It lives in the native backend, so it fits "native only". Adding it needs the usual dependency approval: it is a large dependency tree.
+
+- [ ] Spike: two clients on different networks pair and exchange a vault folder; measure connect time, direct vs relayed, binary size added
+- [ ] Pairing and trust: devices pair once (a ticket or code shown on one and entered on the other) and keep an allowlist of device keys per vault; only listed keys may connect. Decide whether n0's public relays and address lookup are acceptable (they see only encrypted traffic and endpoint ids) or a self-hosted relay is needed
+- [ ] What syncs: notes, folders, the `.zettelkasten` marker, `.sliver/` preambles, styles, `settings.json` and `references.bib`; not `workspace.json` (per device), `tmp/`, generated files (`theme.typ`), and maybe not `pkg/` (re-downloadable)
+- [ ] Conflicts: `iroh-docs` resolves an entry by last writer wins, which silently loses concurrent edits to one note. Options: keep both (a conflict copy with a sidebar warning), a three-way text merge against the last synced version, or a text CRDT per note. Files stay the source of truth either way
+- [ ] Identity across moves: notes are `<uuid>.typ` and moves change only the folder, so sync should key notes by uuid rather than by path, so that a move isn't a delete plus an add
+- [ ] Applying incoming changes: through the same path as the file watcher (M10), reindexing, regenerating `links.typ`, and reloading open notes (or flagging a conflict when one has unsaved edits)
+- [ ] Later, maybe: sharing a vault with another person (read-only or read-write tickets)
+
+### M10 - Important extras
+
+- [ ] Images and other assets in the vault
+- [ ] Drag notes onto folders or tree rows to move or file them (pointer events, like `TabBar`)
+- [ ] Detect files changed outside the app (file watcher → reindex)
+- [ ] Compile each note under a virtual path mirroring its real folder (today every note is `/notes/<id>.typ` in the worker), once assets make relative paths like `#image("...")` matter
+- [ ] Open external links from the preview (`tauri-plugin-opener` is in now)
+- [ ] Support text selection and copy in the preview
+
+### M11 — System fonts
+
+- [ ] System fonts: the backend discovers them, sends font metadata to the worker, and sends a font's bytes only when a compile needs that font
+
+### Later
+
+- Multiple main windows on the same vault, e.g. for two monitors, each with its own tabs, panes and preview. Each window is a separate webview, so its JS state and its compiler worker are its own. The backend's `Vault` stays the single owner of the files. Open questions:
+  - whether a note may be open in two windows at once (today a note is in at most one tab), and if so, how edits stay in sync;
+  - how `workspace.json` records several windows' tabs and layout;
+  - how a change made in one window reaches the others (settings, preambles, the tree after saves and moves): backend events that every window listens to, which settings would then use too.
+- Export (PDF etc.), not a priority: its own wrapper with a fixed or chosen page size and the light theme, applying the note's preamble templates. Keep page setup and theme out of note files so this stays possible. A standalone `.typ` export replaces the hidden preamble imports with the preambles' source inlined (common first), followed by their `#show: template` lines
+
+### Open questions
+
+- User-defined note properties: should extra header fields (e.g. `status: "draft"`, `source: "..."`) be indexed, so search filters, the sidebar and a properties view can use them? Today they're allowed and kept byte for byte, but ignored by the index
+- Section links `[[target#heading]]`, and exporting wikilinks as plain text or `#link`s to sections
+
+## Findings to revisit
+
+From a review (2026-11-05) of how the features interact and where time goes; not acted on yet.
+
+- **`links.typ` grows with the vault** (421 KB at 2,000 notes) and is re-sent and re-evaluated on every title, address or tag change (8.4 ms instead of 1.4 ms for the next compile, natively). A per-note links file with only the targets that note links to would keep it small.
+- **A title change refetches the whole sidebar tree** (about 440 KB at 2,000 notes); the backend could send just the changed note's summary.
+- **Each save syncs the file to disk** (`fsync`, about 5 ms); fine for autosave, but moves that rewrite links in many notes pay it per file.
+- **A WASM panic leaves the engine unusable** until restart (every later call fails). The worker could catch it, build a new `Compiler` and resend the open sources.
+- **A `kind:` typed into the header applies only after the next save**: the hidden import and wrapper come from the saved index, not the editor's text.
+- **"Change kind" writes the note twice**: the command writes the file, then the editor's `replaceText` triggers an autosave of the same text.
+- **Showing or hiding the global preview column rebuilds the pane area**, so pane previews lose their scroll position (editors are hosted outside and keep theirs).
+
+## Gotchas
+
+- Don't use a component's return value as a DOM node (`<Foo /> as HTMLElement`): in dev, hot reloading wraps it in a function. To render outside the tree, `render()` into an element you create (as `editorHosts.tsx` does).
+- Ark renders some parts as `<button>` (splitter handles, `Menu.ContextTrigger`, `TreeView.BranchTrigger`). Base button styles are scoped with `button:where(:not([data-scope]))`, and a container that must not centre its content uses `asChild` with a `div`.
+- HTML5 drag and drop is unreliable in the Tauri webview (Tauri's file-drop handling intercepts it). Use pointer events, as `TabBar` does.
+- WebKit needs `-webkit-user-select` alongside `user-select`.
+- Lucide 1.x renamed some icons (e.g. `trash-2` → `trash`, `triangle-alert` → `triangle-exclamation-point`); the old paths load but have no types.
+- Typst's SVG export draws text as glyph outlines, so you can't grep rendered SVG for text; links appear as `<a href>` over a transparent `<rect>`, and links to places in the document (a citation's text, `@heading` references) as `<a>` without an href.
+- CodeMirror tooltips render into a zero-size fixed `.tooltip-layer` in the body (`tooltips({ parent })` in `Editor.tsx`), since the panes clip their content. Not into the body directly: each editor's container carries its theme classes (so `height: 100%`), which made the body scrollable and anything scrolled into view shifted the whole app up.
+
+## Environment
+
+- Nix flake dev shell (`flake.nix`, loaded by direnv via `.envrc`) provides stable Rust (with the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` and pnpm. Run tools inside it. From a non-direnv shell, prefer `source .direnv/flake-profile-*.rc` over calling `nix develop -c` per command, since each flake evaluation after a change copies the tracked tree into `/nix/store`.
+- Git: read-only for Claude. Never commit, stage or otherwise change git state.
+- `wasm-bindgen-cli` comes from nixpkgs, and the `wasm-bindgen` crate is pinned (`=0.2.129`) to match it. After a nixpkgs update changes the CLI version, update the pin too.
+- Package manager is **pnpm** (`pnpm-lock.yaml`); don't use npm/yarn.
+
+## Commands
+
+- `pnpm install` — install JS deps
+- `pnpm tauri dev` — run the desktop app (runs `build:wasm`, starts Vite on fixed port 1420, then the Rust app)
+- `pnpm tauri build` — production bundle (runs `build:wasm` + `pnpm build` → `dist/`)
+- `pnpm build:wasm` — build `sliver-typst` with the `wasm` profile and generate bindings into `src/typst/pkg/` (gitignored). Rerun it after changing the crate; `tauri dev` doesn't watch it
+- `pnpm dev` — Vite only; needs `src/typst/pkg/` to exist already
+- `pnpm check` — everything CI-worthy: `build:wasm`, `biome check`, `tsc --noEmit`, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` (run before calling work done)
+- `pnpm format` — `biome format --write` + `cargo fmt --all`
+- `pnpm lint` — Biome lint, `tsc`, clippy; `pnpm test` — `cargo test --workspace`
+
+## Layout
+
+- `Cargo.toml` — Cargo workspace root (members `src-tauri`, `crates/sliver-typst`, `crates/sliver-vault`); shared `[workspace.package]`, the release profile and the `wasm` profile (release minus LTO, for fast rebuilds; a debug build of typst is too slow to use) live here. `Cargo.lock` and `target/` are at the root.
+- `biome.json` — Biome formatter/linter config (2-space indent; single quotes in JS/TS, double quotes for JSX attributes; also formats Markdown).
+- `src/` — SolidJS frontend. `index.tsx` mounts `App.tsx` (startup, welcome screen or workspace, plus the palette, prompt and settings dialogs) into `#root`.
+  - `components/` — `Workspace` (panes), `Sidebar`, `TabBar` (a pane's tabs, view modes, tab dragging), `NoteTab`, `editorHosts.tsx`, `Editor` (CodeMirror + Vim), `Preview` (SVG pages + diagnostics), `Palette` (also `pick()`, a generic chooser), `Prompt` (`prompt()` + `PromptHost`), `SettingsDialog`, `settingControls.tsx` (the settings rows: toggle, select, number, folder), `PreambleSettings` (the preambles section and its editor), `Welcome`, `Keys` (keybinding hints), `DebugPanel`, `scrollbars.ts`, `citationCard.ts` (a citation's details for hovers); `wikilinks.ts` (`LINK_SCHEME`, `CITE_SCHEME`).
+  - `editor/` — CodeMirror extensions: `analysis.ts` (highlighting, link and citation ranges via `analyze`), `wikilinks.ts`, `citations.ts` (marks, hover, Mod-click), `diagnostics.ts`, `sync.ts` (cursor follow), `completion.ts`, `signature.ts`, `brackets.ts`, `typst.ts` (`typstEditing`: the extensions every Typst editor shares), `vimCommands.ts`.
+  - `state/` — `layout.ts` (the pane tree and its edits), `workspace.ts` (open vault, tree, panes and tabs, one `NoteSession` per open note: live preview + autosave + editor view, preview page width), `settings.ts`, `theme.ts`, `citations.ts` (references and styles in the worker, Zotero refreshes, picking, rendering entries), `debug.ts` (debug view samples).
+  - `commands/` — `registry.ts` (commands + keybinding dispatch), `app.ts` (all app commands).
+  - `typst/` — `worker.ts` (owns the WASM `Compiler`, loads packages), `client.ts` (`TypstClient` RPC + `livePreview`), `protocol.ts` (message and result types), `instance.ts` (the shared client), `pkg/` (generated by `build:wasm`).
+  - `vault/` — `api.ts` (typed `invoke` wrappers, `autosave()`), `packages.ts` (`PackageHost` backed by `load_package`/`save_package`).
+- `crates/sliver-typst/` — `engine.rs` (`Engine` + `CompileWorld`, `add_package`/`missing_packages`), `bands.rs` (splitting pages into bands and their keys), `tar.rs` (package archive reader), `wasm.rs` (the wasm-bindgen `Compiler` wrapper). Must build both natively and for `wasm32-unknown-unknown`; native unit tests live in `engine.rs`.
+- `crates/sliver-vault/` — `address.rs` (Folgezettel addresses), `header.rs` (note header read/format/edit via `typst-syntax`), `links.rs` (wikilink scan, `link_library`, `preview_main`), `theme.rs` (`theme_library`), `citations.rs` (citation scan, `references.bib` entries and merging, `citation_library`), `preambles.rs` (preamble paths, the hidden prefix, `defines_template`, `preamble_warnings`, starters), `syntax.rs` (`analyze`: highlighting, wikilink and citation ranges for the editor), `vault.rs` (`Vault`: files and folders on disk, index, folder tree, create/read/write/rename/delete, links/backlinks, package cache, workspace file), `vault/moves.rs` (filing, re-addressing, unfiling, link rewriting). Tests use real temp dirs.
+- `src-tauri/` — Rust backend (crate `sliver`, lib `sliver_lib`, edition 2024); depends on `sliver-vault`.
+  - `src/lib.rs` — `run()` builds the Tauri app; register commands in `generate_handler![...]`.
+  - `src/commands.rs` — all commands, over a `Mutex<Option<Vault>>` (`OpenVault` state); `src/state.rs` — `state.json` (last vault); `src/zotero.rs` — Better BibTeX endpoints (picker, export, `zotero://` links); `src/menu.rs` — macOS app menu.
+  - `src/main.rs` — thin binary that calls `sliver_lib::run()`.
+  - `tauri.conf.json` — app id `com.steve.sliver`, window config, dev URL/build hooks. CSP is disabled (`null`).
+  - `capabilities/default.json` — permissions for the `main` window (`core:default`, `core:window:allow-destroy` for close-requested flushing, `dialog:default`). New plugins need their permissions added here.
+  - `gen/` — generated schemas; don't edit.
+
+## Conventions
+
+- Frontend → backend: `invoke("command_name", { args })` from `@tauri-apps/api/core`, matched by a `#[tauri::command]` fn registered in `lib.rs` (arg names are camelCase on the JS side).
+- Solid, not React: use `createSignal`/`createResource`, `class` not `className`; components run once (don't destructure props).
+- TypeScript is `strict` with `noUnusedLocals`/`noUnusedParameters`.
+- Vite ignores `src-tauri/**`, `crates/**` and `target/**` for watching; Rust changes are rebuilt by `tauri dev`.
+- Keep dependencies minimal. Before adding any new crate or npm package, give a strong justification and ask the user first; never install one unprompted.
+- Limit comments to things that wouldn't be obvious to an experienced developer.
+- Avoid emoji in code.
+- Breaking changes to the vault format are fine for now; don't write migration or compatibility code for existing vaults until asked.
+- Scrollbars are overlays: native ones are hidden app-wide, and every scroll container gets floating, auto-hiding thumbs from `components/scrollbars.ts` (`overlayScrollbar(el)`, or `ref={withOverlayScrollbar}`). Add it to any new scroll container; nothing else shows a scrollbar. Thumbs are appended to the container's parent, so give them a parent whose children are static.
+- No rounded corners in the UI. The exception is switches, which keep the usual pill shape.
