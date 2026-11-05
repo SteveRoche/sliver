@@ -21,26 +21,68 @@ interface CompileStats {
   renderMs: number;
 }
 
-/** A compile as the worker sends it: only changed pages, as UTF-8 bytes. */
+/**
+ * A compile as the worker sends it (see `Compiled` in `wasm.rs`): pages in
+ * bands, with only the bands not sent before as UTF-8 bytes.
+ */
 export interface WorkerCompile extends CompileStats {
   /** False when nothing was rendered (failed, or not asked for). */
   rendered: boolean;
-  pageCount: number;
-  /** Pages whose SVG is in `svg`; the others are unchanged since the last render. */
-  changedPages: number[];
-  /** The changed pages' SVG back to back; transferred, not copied. */
+  /** Width and height of each page in points, back to back. */
+  pageSizes: number[];
+  /** Each page's fill as SVG, drawn under its bands. */
+  backgrounds: string[];
+  /** How many bands each page has; the arrays below list every page's in turn. */
+  bandCounts: number[];
+  /** Top and height of each band in points, back to back. */
+  bandRects: number[];
+  bandKeys: string[];
+  /** The bands' SVG back to back (none for one sent before); transferred, not copied. */
   svg: Uint8Array;
-  /** Where each changed page ends in `svg`. */
+  /** Where each band's SVG ends in `svg`. */
   svgEnds: number[];
+  /** Where the anchor sent with the compile is now, if it was found again. */
+  anchor: PagePoint | null;
+}
+
+/**
+ * A horizontal band of a page: its own SVG, `height` points tall, placed
+ * `top` points from the page's top. Only bands on screen are in the DOM.
+ */
+export interface Band {
+  top: number;
+  height: number;
+  /** Equal keys render the same, wherever the band is. */
+  key: string;
+  svg: string;
+}
+
+/** A rendered page, in points. */
+export interface Page {
+  width: number;
+  height: number;
+  /** The page's fill as SVG. */
+  background: string;
+  bands: Band[];
 }
 
 /** A compile with its pages decoded. */
 export interface CompileResult extends CompileStats {
   /**
-   * One entry per page, `null` for a page unchanged since the last render;
-   * `null` overall when nothing was rendered, so the previous pages stand.
+   * The anchor sent with the compile (`from`, in the last layout) and where
+   * its text is in this one (`to`), so the preview can keep it in place.
    */
-  pages: (string | null)[] | null;
+  anchor: { from: PagePoint; to: PagePoint } | null;
+  /**
+   * The rendered pages, a band's `svg` `null` when it was sent before (in
+   * the last render, under the same key); `null` overall when nothing was
+   * rendered, so the previous pages stand.
+   */
+  pages:
+    | (Omit<Page, 'bands'> & {
+        bands: (Omit<Band, 'svg'> & { svg: string | null })[];
+      })[]
+    | null;
 }
 
 /** A place in a source file. */
@@ -122,6 +164,8 @@ export interface Calls {
       render: boolean;
       /** Replaced before compiling, saving a round trip. */
       source?: { path: string; text: string };
+      /** A point of the last layout to follow into the new one (`y` only). */
+      anchor?: PagePoint | null;
     };
     result: WorkerCompile;
   };

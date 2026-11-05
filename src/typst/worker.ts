@@ -145,10 +145,17 @@ function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
     }
     return {
       rendered: out.rendered,
-      pageCount: out.pageCount,
-      changedPages: [...out.changedPages],
+      pageSizes: [...out.pageSizes],
+      backgrounds: out.backgrounds,
+      bandCounts: [...out.bandCounts],
+      bandRects: [...out.bandRects],
+      bandKeys: out.bandKeys,
       svg: out.svg,
       svgEnds: [...out.svgEnds],
+      anchor:
+        out.anchorPage === NONE
+          ? null
+          : { page: out.anchorPage, x: 0, y: out.anchorY },
       diagnostics,
       loadingPackages,
       compileMs: out.compileMs,
@@ -156,8 +163,6 @@ function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
     };
   });
 }
-
-const decoder = new TextDecoder();
 
 /** Buffers to transfer (not copy) with the current response. */
 let transfer: Transferable[] = [];
@@ -176,7 +181,12 @@ function handle(compiler: Compiler, req: Request): unknown {
       if (req.source) compiler.setSource(req.source.path, req.source.text);
       const result = toCompile(
         compiler,
-        compiler.compile(req.main, req.render),
+        compiler.compile(
+          req.main,
+          req.render,
+          req.anchor?.page,
+          req.anchor?.y ?? 0,
+        ),
       );
       transfer = [result.svg.buffer];
       return result;
@@ -270,19 +280,16 @@ function handle(compiler: Compiler, req: Request): unknown {
     case 'standalone': {
       compiler.setSource(req.path, req.text);
       try {
-        return using(compiler.compile(req.path, req.render), out => {
-          const errors = out.diagnosticMessages.filter(
-            (_, i) => out.diagnosticSeverities[i] === 0,
-          );
-          const bytes = out.svg;
-          let start = 0;
-          const pages = [...out.svgEnds].map(end => {
-            const page = decoder.decode(bytes.subarray(start, end));
-            start = end;
-            return page;
-          });
-          return { pages: errors.length ? [] : pages, errors };
-        });
+        const errors = using(
+          compiler.compile(req.path, false, undefined, 0),
+          out =>
+            out.diagnosticMessages.filter(
+              (_, i) => out.diagnosticSeverities[i] === 0,
+            ),
+        );
+        const pages =
+          req.render && errors.length === 0 ? compiler.pageSvgs(req.path) : [];
+        return { pages, errors };
       } finally {
         compiler.removeSource(req.path);
       }

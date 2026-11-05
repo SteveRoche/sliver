@@ -2,7 +2,7 @@ import {
   createEffect,
   createSignal,
   For,
-  Index,
+  on,
   onCleanup,
   onMount,
   Show,
@@ -10,7 +10,7 @@ import {
 import { settings } from '../state/settings';
 import { isPreviewDark } from '../state/theme';
 import { resizing, setPreviewWidth } from '../state/workspace';
-import type { Diagnostic, PagePoint } from '../typst/protocol';
+import type { Diagnostic, Page, PagePoint } from '../typst/protocol';
 import type { NoteId } from '../vault/api';
 import { withOverlayScrollbar } from './scrollbars';
 import { CITE_SCHEME, LINK_SCHEME } from './wikilinks';
@@ -19,7 +19,14 @@ interface PreviewProps {
   /** The note shown; its page is compiled as wide as this preview. */
   note: NoteId;
   /** Pages of the last successful compile, kept while the source has errors. */
-  pages: string[];
+  pages: Page[];
+  /** How the latest `pages` moved the anchor `onAnchor` reported. */
+  shift?: { from: PagePoint; to: PagePoint } | null;
+  /**
+   * Hands over where the anchor is (the point at the top of the visible
+   * area, in the shown layout) for compiles to follow; `undefined` on unmount.
+   */
+  onAnchor?: (get: (() => PagePoint | null) | undefined) => void;
   diagnostics: Diagnostic[];
   loadingPackages?: string[];
   /** Called with the note id when a `sliver://` link is clicked. */
@@ -41,13 +48,17 @@ interface PreviewProps {
   focus?: { points: PagePoint[]; seq: number };
 }
 
-/** A click on a page in points from its top left, read off the SVG's viewBox. */
+/** Points per CSS pixel on `page` as it's shown (CSS may stretch it). */
+function pointsPerPixel(page: HTMLElement) {
+  const scale = Number(page.dataset.width) / page.getBoundingClientRect().width;
+  return Number.isFinite(scale) && scale > 0 ? scale : null;
+}
+
+/** A click on a page in points from its top left. */
 function pagePoint(page: HTMLElement, event: MouseEvent) {
-  const svg = page.querySelector('svg');
-  if (!svg) return null;
-  const box = svg.getBoundingClientRect();
-  const scale = svg.viewBox.baseVal.width / box.width;
-  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const scale = pointsPerPixel(page);
+  if (!scale) return null;
+  const box = page.getBoundingClientRect();
   return {
     x: (event.clientX - box.left) * scale,
     y: (event.clientY - box.top) * scale,
@@ -59,6 +70,7 @@ function linkBox(anchor: Element) {
   const match = /translate\(([-\d.]+)[ ,]+([-\d.]+)\)/.exec(
     anchor.getAttribute('transform') ?? '',
   );
+  const band = anchor.closest<HTMLElement>('.band');
   const rect = anchor.querySelector('rect');
   const width = Number(rect?.getAttribute('width'));
   const height = Number(rect?.getAttribute('height'));
@@ -66,7 +78,8 @@ function linkBox(anchor: Element) {
     return null;
   }
   const x = Number(match[1]);
-  return { x, end: x + width, y: Number(match[2]), height };
+  const y = Number(match[2]) + Number(band?.dataset.top ?? 0);
+  return { x, end: x + width, y, height };
 }
 
 const hrefOf = (anchor: Element) =>
@@ -114,9 +127,7 @@ function citationArea(target: EventTarget | null) {
       current = next;
     }
   }
-  const index = [...(page.parentElement?.children ?? [])]
-    .filter(el => el.classList.contains('page'))
-    .indexOf(page);
+  const index = [...(page.parentElement?.children ?? [])].indexOf(page);
   return { anchor, page: index, box: { x, end, y: box.y, height: box.height } };
 }
 
@@ -134,8 +145,85 @@ function preambleName(path: string | undefined): string | null {
 /** The smallest maximum page width the settings allow. */
 export const MIN_PREVIEW_PX = 340;
 
+/** How far past the visible area bands are kept in the DOM, in viewports. */
+const BAND_MARGIN = 0.5;
+
+/** The SVG of each band element, inserted while the band is near the screen. */
+const bandSvgs = new WeakMap<HTMLElement, string>();
+
+const percent = (part: number, whole: number) =>
+  `${whole > 0 ? (part / whole) * 100 : 0}%`;
+
+/**
+ * Makes `host`'s children show `pages`: one `.page` each, sized by its
+ * aspect ratio (so CSS can stretch it while a new width compiles), with
+ * its fill and its bands as placeholders positioned in percent. A band
+ * whose key is already shown keeps its element and content.
+ */
+function reconcilePages(host: HTMLElement, pages: Page[]) {
+  while (host.children.length > pages.length) host.lastElementChild?.remove();
+  pages.forEach((page, i) => {
+    let el = host.children[i] as HTMLElement | undefined;
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'page';
+      const fill = document.createElement('div');
+      fill.className = 'page-fill';
+      el.appendChild(fill);
+      host.appendChild(el);
+    }
+    el.dataset.width = String(page.width);
+    el.style.aspectRatio = `${page.width} / ${page.height}`;
+    const fill = el.firstElementChild as HTMLElement;
+    // Our own compiler's SVG, so innerHTML is safe (as for the bands).
+    if (bandSvgs.get(fill) !== page.background) {
+      fill.innerHTML = page.background;
+      bandSvgs.set(fill, page.background);
+    }
+
+    const old = new Map<string, HTMLElement[]>();
+    for (const band of [...el.children].slice(1) as HTMLElement[]) {
+      const key = band.dataset.key ?? '';
+      old.set(key, [...(old.get(key) ?? []), band]);
+    }
+    let after: Element = fill;
+    for (const band of page.bands) {
+      let bandEl = old.get(band.key)?.shift();
+      if (!bandEl) {
+        bandEl = document.createElement('div');
+        bandEl.className = 'band';
+        bandEl.dataset.key = band.key;
+        bandSvgs.set(bandEl, band.svg);
+      }
+      bandEl.dataset.top = String(band.top);
+      bandEl.style.top = percent(band.top, page.height);
+      bandEl.style.height = percent(band.height, page.height);
+      if (after.nextElementSibling !== bandEl) after.after(bandEl);
+      after = bandEl;
+    }
+    for (const unused of old.values()) for (const band of unused) band.remove();
+  });
+}
+
+/** Puts the SVG of bands near `container`'s visible area in, and takes it out of the others. */
+function showNearBands(container: HTMLElement) {
+  const view = container.getBoundingClientRect();
+  const margin = view.height * BAND_MARGIN;
+  for (const band of container.querySelectorAll<HTMLElement>('.band')) {
+    const box = band.getBoundingClientRect();
+    const near =
+      box.bottom >= view.top - margin && box.top <= view.bottom + margin;
+    if (near && !band.firstChild) {
+      band.innerHTML = bandSvgs.get(band) ?? '';
+    } else if (!near && band.firstChild) {
+      band.textContent = '';
+    }
+  }
+}
+
 export function Preview(props: PreviewProps) {
   let container!: HTMLDivElement;
+  let pagesHost!: HTMLDivElement;
 
   // Delegated from the SVG anchors (keyboard activation also fires `click`).
   // Every anchor is intercepted: following one would navigate the webview
@@ -146,7 +234,7 @@ export function Preview(props: PreviewProps) {
       const page = (event.target as Element).closest<HTMLElement>('.page');
       const point = page && pagePoint(page, event);
       if (page && point) {
-        const index = [...container.querySelectorAll('.page')].indexOf(page);
+        const index = [...pagesHost.children].indexOf(page);
         props.onJump?.(index, point.x, point.y);
       }
       return;
@@ -216,13 +304,11 @@ export function Preview(props: PreviewProps) {
 
   /** Scrolls `point` into view if it isn't, and marks it briefly. */
   const showPoint = (point: PagePoint | undefined) => {
-    const page =
-      point && container.querySelectorAll<HTMLElement>('.page')[point.page];
-    const svg = page?.querySelector('svg');
-    if (!point || !page || !svg) return;
-    const scale = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
-    const x = point.x * scale;
-    const y = point.y * scale;
+    const page = point && (pagesHost.children[point.page] as HTMLElement);
+    const perPixel = page && pointsPerPixel(page);
+    if (!point || !page || !perPixel) return;
+    const x = point.x / perPixel;
+    const y = point.y / perPixel;
     const top = page.offsetTop + y;
     const visible =
       top > container.scrollTop + 24 &&
@@ -242,26 +328,112 @@ export function Preview(props: PreviewProps) {
     page.appendChild(marker);
   };
 
+  // Scroll anchoring: the point at the top of the visible area stays where
+  // it is on screen when the pages change size, whether CSS stretches them
+  // during a resize or a compile reflows them (`props.shift` says where its
+  // text went). Without it, the content under the view moves by however
+  // much the height above it changed, a lot near the end of a long note.
+  let anchor: { page: number; pt: number; offset: number } | null = null;
+  /** The pages' size when `anchor` was taken, to tell their resizes from scrolling. */
+  let anchoredSize = '';
+
+  const pagesSize = () => {
+    const box = pagesHost.getBoundingClientRect();
+    return `${box.width}x${box.height}`;
+  };
+
+  /** Takes the anchor from what the view shows now. */
+  const measureAnchor = () => {
+    anchoredSize = pagesSize();
+    anchor = null;
+    const top = container.getBoundingClientRect().top;
+    const pages = [...pagesHost.children] as HTMLElement[];
+    const page = pages.findIndex(el => el.getBoundingClientRect().bottom > top);
+    const el = pages[page];
+    const perPixel = el && pointsPerPixel(el);
+    if (!el || !perPixel) return;
+    const box = el.getBoundingClientRect();
+    const pt = Math.max(0, top - box.top) * perPixel;
+    anchor = { page, pt, offset: box.top + pt / perPixel - top };
+  };
+
+  /** Scrolls so the anchor is back where it was in the view. */
+  const restoreAnchor = () => {
+    const el = anchor && (pagesHost.children[anchor.page] as HTMLElement);
+    const perPixel = el && pointsPerPixel(el);
+    if (anchor && el && perPixel) {
+      const top = container.getBoundingClientRect().top;
+      const now = el.getBoundingClientRect().top + anchor.pt / perPixel;
+      container.scrollTop += now - (top + anchor.offset);
+    }
+    measureAnchor();
+  };
+
+  let frame = 0;
+  const onScroll = () => {
+    hideCard();
+    // A scroll from the pages changing size (the browser clamping it) isn't
+    // the user's: put the anchor back instead of moving it.
+    if (pagesSize() === anchoredSize) measureAnchor();
+    else restoreAnchor();
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      showNearBands(container);
+    });
+  };
+
   onMount(() => {
+    onCleanup(() => cancelAnimationFrame(frame));
+    props.onAnchor?.(() =>
+      anchor ? { page: anchor.page, x: 0, y: anchor.pt } : null,
+    );
+    onCleanup(() => props.onAnchor?.(undefined));
+    createEffect(
+      on(
+        () => props.note,
+        () => {
+          anchor = null;
+        },
+      ),
+    );
+    createEffect(() => {
+      const pages = props.pages;
+      const shift = props.shift;
+      if (anchor && shift && shift.from.page === anchor.page) {
+        anchor = {
+          ...anchor,
+          page: shift.to.page,
+          pt: anchor.pt + shift.to.y - shift.from.y,
+        };
+      }
+      reconcilePages(pagesHost, pages);
+      if (anchor) restoreAnchor();
+      else measureAnchor();
+      showNearBands(container);
+    });
     container.addEventListener('click', onClick);
     container.addEventListener('mouseover', onOver);
     container.addEventListener('mouseout', onOut);
-    container.addEventListener('scroll', hideCard);
+    container.addEventListener('scroll', onScroll, { passive: true });
     onCleanup(() => {
       container.removeEventListener('click', onClick);
       container.removeEventListener('mouseover', onOver);
       container.removeEventListener('mouseout', onOut);
-      container.removeEventListener('scroll', hideCard);
+      container.removeEventListener('scroll', onScroll);
       hideCard();
     });
 
     // Pages are compiled as wide as the pane allows. Until a compile for a
-    // new width lands, CSS stretches the old SVG to fit (`.page svg`).
+    // new width lands, CSS stretches the old page to fit (`.page`, `.band`).
     const [available, setAvailable] = createSignal(container.clientWidth);
-    const observer = new ResizeObserver(() =>
-      setAvailable(container.clientWidth),
-    );
+    const observer = new ResizeObserver(() => {
+      setAvailable(container.clientWidth);
+      if (pagesSize() !== anchoredSize) restoreAnchor();
+      onScroll();
+    });
     observer.observe(container);
+    observer.observe(pagesHost);
     onCleanup(() => observer.disconnect());
 
     createEffect(() => {
@@ -289,10 +461,7 @@ export function Preview(props: PreviewProps) {
       data-preview-theme={isPreviewDark() ? 'dark' : 'light'}
       style={{ '--max-page-width': `${settings.maxPreviewWidth}px` }}
     >
-      <Index each={props.pages}>
-        {/* SVG comes from our own compiler, so innerHTML is safe here. */}
-        {svg => <div class="page" innerHTML={svg()} />}
-      </Index>
+      <div class="pages" ref={pagesHost} />
       <Show when={props.notice}>
         {notice => <div class="loading">{notice()}</div>}
       </Show>

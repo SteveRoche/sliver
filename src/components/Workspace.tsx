@@ -170,6 +170,8 @@ function NotePreview(props: { note: NoteId; jumps?: () => boolean }) {
     <Preview
       note={props.note}
       pages={session()?.pages() ?? []}
+      shift={session()?.shift() ?? null}
+      onAnchor={get => session()?.setAnchor(get)}
       diagnostics={session()?.result()?.diagnostics ?? []}
       loadingPackages={session()?.result()?.loadingPackages ?? []}
       onOpenNote={openNote}

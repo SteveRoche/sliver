@@ -1450,10 +1450,11 @@ mod tests {
             .unwrap();
         let out = engine.compile("/.sliver/main.typ", true).unwrap();
         let messages = out.diagnostics.iter().map(|d| d.message.clone()).collect();
-        (
-            out.pages.into_iter().flatten().flatten().collect(),
-            messages,
-        )
+        let svg = match out.pages {
+            Some(_) => engine.page_svgs("/.sliver/main.typ").unwrap().concat(),
+            None => String::new(),
+        };
+        (svg, messages)
     }
 
     #[test]

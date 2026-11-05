@@ -1,5 +1,6 @@
 import type { EditorView } from '@codemirror/view';
 import {
+  batch,
   createEffect,
   createMemo,
   createRoot,
@@ -13,6 +14,7 @@ import type {
   CompileResult,
   Completions,
   Diagnostic,
+  Page,
   PagePoint,
   Position,
   Signature,
@@ -76,7 +78,14 @@ export interface NoteSession {
     explicit: boolean,
   ): Promise<Completions | null>;
   /** Pages of the last successful compile, kept while the source has errors. */
-  pages: () => string[];
+  pages: () => Page[];
+  /**
+   * How the latest pages moved the preview's anchor (see
+   * `CompileResult.anchor`); set together with `pages`.
+   */
+  shift: () => CompileResult['anchor'];
+  /** Where the preview's anchor is, sent with each compile; `undefined` to stop. */
+  setAnchor(get: (() => PagePoint | null) | undefined): void;
   dirty: () => boolean;
   edit(text: string): void;
   flush(): Promise<void>;
@@ -277,10 +286,12 @@ function createSession(id: NoteId): NoteSession {
     diagnostics: Diagnostic[];
   }>();
   let mainPath: string | undefined;
-  const [pages, setPages] = createSignal<string[]>([]);
+  const [pages, setPages] = createSignal<Page[]>([]);
   const [dirty, setDirty] = createSignal(false);
   let view: EditorView | undefined;
   let preview: LivePreview | undefined;
+  const [shift, setShift] = createSignal<CompileResult['anchor']>(null);
+  let anchor: (() => PagePoint | null) | undefined;
   let disposed = false;
 
   const saver = autosave(
@@ -320,12 +331,25 @@ function createSession(id: NoteId): NoteSession {
     if (disposed) return source;
     preview = livePreview(typst, notePath(id), main.path, {
       visible: () => visibleNotes().has(id),
+      anchor: () => anchor?.() ?? null,
       onResult: (r, compiledText, timing) => {
         setResult(r);
         if (r.pages) {
-          // Unchanged pages come back as null: keep what's shown.
-          const shown = pages();
-          setPages(r.pages.map((page, i) => page ?? shown[i] ?? ''));
+          // Bands sent before come back without SVG: take it from what's shown.
+          const shown = new Map(
+            pages().flatMap(page => page.bands.map(b => [b.key, b.svg])),
+          );
+          const next = r.pages.map(page => ({
+            ...page,
+            bands: page.bands.map(b => ({
+              ...b,
+              svg: b.svg ?? shown.get(b.key) ?? '',
+            })),
+          }));
+          batch(() => {
+            setShift(r.anchor);
+            setPages(next);
+          });
         } else if (!visibleNotes().has(id)) {
           stalePreviews.add(id);
         }
@@ -338,6 +362,7 @@ function createSession(id: NoteId): NoteSession {
       onError: error =>
         setResult({
           pages: null,
+          anchor: null,
           diagnostics: [
             { severity: 'error', message: error.message, hints: [] },
           ],
@@ -363,6 +388,10 @@ function createSession(id: NoteId): NoteSession {
     result,
     compiled,
     pages,
+    shift,
+    setAnchor: get => {
+      anchor = get;
+    },
     dirty,
     async jumpFromClick(page, x, y) {
       if (!mainPath || !view) return;

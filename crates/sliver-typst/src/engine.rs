@@ -8,20 +8,22 @@ use typst::foundations::{
 };
 use typst::introspection::PagedPosition;
 use typst::introspection::{Introspector, MetadataElem};
-use typst::layout::{Abs, Point};
+use typst::layout::{Abs, Frame, FrameItem, Point, Transform};
 use typst::model::{CiteElem, CslSource, RefElem};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{
     DiagSpan, FileId, LinkedNode, RootedPath, Side, Source, SyntaxKind, VirtualPath, VirtualRoot,
     ast,
 };
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, TextItem};
 use typst::utils::LazyHash;
 use typst::utils::PicoStr;
 use typst::{Library, LibraryExt, World, WorldExt};
 use typst_ide::{CompletionKind, IdeWorld, Jump};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
+
+use crate::bands;
 
 /// Long-lived compiler state shared by every open tab: the file map, fonts and
 /// the standard library. Each `compile` call picks one file as the main file.
@@ -40,9 +42,9 @@ pub struct Engine {
     /// Hidden whole lines compiled before a file's own text (a note's preamble
     /// imports). Positions crossing the API are in the file's own text.
     prefixes: HashMap<FileId, String>,
-    /// Hashes of each main file's last rendered pages, so unchanged pages
-    /// aren't rendered (or sent) again.
-    rendered: HashMap<FileId, Vec<u128>>,
+    /// Keys of each main file's last rendered bands, so bands the frontend
+    /// already has aren't rendered (or sent) again.
+    rendered: HashMap<FileId, HashSet<u64>>,
 }
 
 #[derive(Debug)]
@@ -69,11 +71,13 @@ impl std::error::Error for InvalidPackage {}
 
 #[derive(Debug, Clone)]
 pub struct CompileOutput {
-    /// One entry per page when the document was rendered: its SVG, or `None`
-    /// when the page is unchanged since this main file's last render. `None`
-    /// when nothing was rendered (the compile failed, or no render was asked
-    /// for), so the previous pages still stand.
-    pub pages: Option<Vec<Option<String>>>,
+    /// The rendered pages, in bands (see `bands.rs`). `None` when nothing
+    /// was rendered (the compile failed, or no render was asked for), so the
+    /// previous pages still stand.
+    pub pages: Option<Vec<RenderedPage>>,
+    /// Where the anchor given to `compile_anchored` is in the new layout;
+    /// `None` without one, or when its text wasn't found again.
+    pub anchor: Option<PagePoint>,
     pub diagnostics: Vec<Diagnostic>,
     /// Packages the document imports that aren't loaded yet, as
     /// `@namespace/name:version`. Load them with `add_package` and recompile.
@@ -82,6 +86,30 @@ pub struct CompileOutput {
     pub compile_ms: f64,
     /// Time spent rendering pages to SVG, in milliseconds.
     pub render_ms: f64,
+}
+
+/// A rendered page, in points.
+#[derive(Debug, Clone)]
+pub struct RenderedPage {
+    pub width: f64,
+    pub height: f64,
+    /// An SVG of the page's fill, to draw under its bands.
+    pub background: String,
+    /// Top to bottom, covering the page.
+    pub bands: Vec<RenderedBand>,
+}
+
+/// A horizontal band of a rendered page.
+#[derive(Debug, Clone)]
+pub struct RenderedBand {
+    /// From the page's top, in points.
+    pub top: f64,
+    pub height: f64,
+    /// Identifies the band's content; equal keys render the same.
+    pub key: u64,
+    /// The band's SVG, or `None` when a band with this key was in this main
+    /// file's last render (so the frontend has it already).
+    pub svg: Option<String>,
 }
 
 /// A place in a source file, e.g. where a click in the preview came from.
@@ -301,6 +329,24 @@ impl Engine {
             .collect())
     }
 
+    /// Each page of `main`'s last successful compile as one SVG, not in
+    /// bands: for small documents shown whole, like a bibliography entry.
+    pub fn page_svgs(&self, main: &str) -> Result<Vec<String>, InvalidPath> {
+        let main = file_id(main)?;
+        let opts = SvgOptions::default();
+        Ok(self
+            .documents
+            .get(&main)
+            .map(|document| {
+                document
+                    .pages()
+                    .iter()
+                    .map(|page| typst_svg::svg(page, &opts))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// The text of the metadata labelled `label` in `main`'s last successful
     /// compile, if it is a string.
     pub fn metadata_text(&self, main: &str, label: &str) -> Result<Option<String>, InvalidPath> {
@@ -378,11 +424,30 @@ impl Engine {
         Ok(marks)
     }
 
-    /// Compiles `main`. With `render`, pages that changed since its last
-    /// render are rendered to SVG; without, only diagnostics come back (for a
-    /// preview that isn't on screen).
+    /// Compiles `main`. With `render`, its pages are rendered to SVG in
+    /// bands, except bands unchanged since its last render; without, only
+    /// diagnostics come back (for a preview that isn't on screen).
     pub fn compile(&mut self, main: &str, render: bool) -> Result<CompileOutput, InvalidPath> {
+        self.compile_anchored(main, render, None)
+    }
+
+    /// [`Self::compile`], also following `anchor` (a point of `main`'s last
+    /// layout, e.g. the top of what the preview shows) into the new layout:
+    /// the text at or below it is found again by its source span, so a
+    /// reflow (a new page width) can keep it in place on screen.
+    pub fn compile_anchored(
+        &mut self,
+        main: &str,
+        render: bool,
+        anchor: Option<PagePoint>,
+    ) -> Result<CompileOutput, InvalidPath> {
         let main = file_id(main)?;
+        let anchor = anchor.and_then(|point| {
+            let document = self.documents.get(&main)?;
+            let page = document.pages().get(point.page as usize)?;
+            let (span, y) = text_at_or_below(&page.frame, Abs::pt(point.y))?;
+            Some((point, span, y))
+        });
         let world = self.world(main);
 
         let started = now_ms();
@@ -403,18 +468,30 @@ impl Engine {
         let pages = document.as_ref().filter(|_| render).map(|document| {
             let opts = SvgOptions::default();
             let previous = self.rendered.get(&main);
-            let hashes: Vec<u128> = document.pages().iter().map(typst::utils::hash128).collect();
+            let mut keys = HashSet::new();
             let pages = document
                 .pages()
                 .iter()
-                .zip(&hashes)
-                .enumerate()
-                .map(|(i, (page, hash))| {
-                    let unchanged = previous.and_then(|p| p.get(i)) == Some(hash);
-                    (!unchanged).then(|| typst_svg::svg(page, &opts))
+                .map(|page| RenderedPage {
+                    width: page.frame.width().to_pt(),
+                    height: page.frame.height().to_pt(),
+                    background: typst_svg::svg(&bands::background(page), &opts),
+                    bands: bands::bands(page)
+                        .into_iter()
+                        .map(|band| {
+                            let known = previous.is_some_and(|p| p.contains(&band.key));
+                            keys.insert(band.key);
+                            RenderedBand {
+                                top: band.top.to_pt(),
+                                height: band.height.to_pt(),
+                                key: band.key,
+                                svg: (!known).then(|| typst_svg::svg(&band.page, &opts)),
+                            }
+                        })
+                        .collect(),
                 })
                 .collect();
-            (pages, hashes)
+            (pages, keys)
         });
         let rendered = now_ms();
 
@@ -428,9 +505,20 @@ impl Engine {
         missing_packages.sort();
         let accessed = world.accessed.into_inner().unwrap_or_default();
         self.deps.insert(main, accessed);
-        let pages = pages.map(|(pages, hashes)| {
-            self.rendered.insert(main, hashes);
+        let pages = pages.map(|(pages, keys)| {
+            self.rendered.insert(main, keys);
             pages
+        });
+        let moved = anchor.and_then(|(point, span, old_y)| {
+            let document = document.as_ref()?;
+            document.pages().iter().enumerate().find_map(|(i, page)| {
+                let y = text_with_span(&page.frame, span)?;
+                Some(PagePoint {
+                    page: i as u32,
+                    x: point.x,
+                    y: point.y + (y - old_y).to_pt(),
+                })
+            })
         });
         // A failed compile keeps the last good layout, which the preview still shows.
         if let Some(document) = document {
@@ -440,6 +528,7 @@ impl Engine {
 
         Ok(CompileOutput {
             pages,
+            anchor: moved,
             diagnostics,
             missing_packages,
             compile_ms: compiled - started,
@@ -632,6 +721,50 @@ pub struct CitationMark {
     pub page: usize,
     pub x: f64,
     pub y: f64,
+}
+
+/// A glyph's place in the source.
+type GlyphSpan = (typst::syntax::Span, u16);
+
+/// Every text item in `frame` with the page transform it's drawn under.
+fn for_each_text(frame: &Frame, ts: Transform, f: &mut impl FnMut(&TextItem, Transform)) {
+    for (pos, item) in frame.items() {
+        let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
+        match item {
+            FrameItem::Group(group) => {
+                for_each_text(&group.frame, ts.pre_concat(group.transform), f)
+            }
+            FrameItem::Text(text) => f(text, ts),
+            _ => {}
+        }
+    }
+}
+
+/// The topmost text whose baseline is at or below `y`: its first glyph with
+/// a source span, and the baseline.
+fn text_at_or_below(frame: &Frame, y: Abs) -> Option<(GlyphSpan, Abs)> {
+    let mut best: Option<(GlyphSpan, Abs)> = None;
+    for_each_text(frame, Transform::identity(), &mut |text, ts| {
+        let baseline = Point::zero().transform(ts).y;
+        if baseline < y || best.is_some_and(|(_, b)| b <= baseline) {
+            return;
+        }
+        if let Some(glyph) = text.glyphs.iter().find(|g| !g.span.0.is_detached()) {
+            best = Some((glyph.span, baseline));
+        }
+    });
+    best
+}
+
+/// The baseline of the text containing the glyph from `span`.
+fn text_with_span(frame: &Frame, span: GlyphSpan) -> Option<Abs> {
+    let mut found = None;
+    for_each_text(frame, Transform::identity(), &mut |text, ts| {
+        if found.is_none() && text.glyphs.iter().any(|g| g.span == span) {
+            found = Some(Point::zero().transform(ts).y);
+        }
+    });
+    found
 }
 
 /// Typst's built-in citation styles: each name it accepts (aliases
@@ -958,7 +1091,10 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let pages = out.pages.unwrap();
         assert_eq!(pages.len(), 2);
-        assert!(pages[0].as_ref().unwrap().starts_with("<svg"));
+        let band = &pages[0].bands[0];
+        assert!(band.svg.as_ref().unwrap().starts_with("<svg"));
+        assert!(pages[0].background.starts_with("<svg"));
+        assert_eq!(engine.page_svgs("/main.typ").unwrap().len(), 2);
     }
 
     #[test]
@@ -1025,26 +1161,180 @@ mod tests {
     }
 
     #[test]
-    fn renders_only_changed_pages() {
+    fn renders_only_changed_bands() {
         let mut engine = Engine::new();
         engine
             .set_source("/main.typ", "One\n#pagebreak()\nTwo")
             .unwrap();
         assert!(engine.compile("/main.typ", false).unwrap().pages.is_none());
+        let svgs = |pages: Vec<RenderedPage>| -> Vec<bool> {
+            pages
+                .iter()
+                .flat_map(|p| p.bands.iter().map(|b| b.svg.is_some()))
+                .collect()
+        };
         let first = engine.compile("/main.typ", true).unwrap().pages.unwrap();
-        assert!(first.iter().all(Option::is_some));
+        assert_eq!(svgs(first), [true, true]);
         engine
             .set_source("/main.typ", "One\n#pagebreak()\nTwo, changed")
             .unwrap();
         let second = engine.compile("/main.typ", true).unwrap().pages.unwrap();
-        assert!(second[0].is_none() && second[1].is_some());
+        assert_eq!(svgs(second), [false, true]);
         // Forgetting the file forgets what was rendered.
         engine.remove_source("/main.typ").unwrap();
         engine
             .set_source("/main.typ", "One\n#pagebreak()\nTwo, changed")
             .unwrap();
         let again = engine.compile("/main.typ", true).unwrap().pages.unwrap();
-        assert!(again.iter().all(Option::is_some));
+        assert_eq!(svgs(again), [true, true]);
+    }
+
+    #[test]
+    fn follows_an_anchor_through_a_reflow() {
+        let note = |width: u32| {
+            format!(
+                "#set page(width: {width}pt, height: auto, margin: 10pt)\n{}\nAnchor text here.\n",
+                "A paragraph long enough to wrap over several lines at either width, \
+                 so that a narrower page pushes everything after it further down.\n\n"
+                    .repeat(30)
+            )
+        };
+        let mut engine = Engine::new();
+        engine.set_source("/main.typ", &note(400)).unwrap();
+        engine.compile("/main.typ", false).unwrap();
+        let world = engine.world(file_id("/main.typ").unwrap());
+        let before = engine
+            .documents
+            .get(&file_id("/main.typ").unwrap())
+            .unwrap();
+        let source = world.source(world.main()).unwrap();
+        let offset = source.text().find("Anchor").unwrap();
+        let old = typst_ide::jump_from_cursor(before, &source, offset)[0]
+            .point
+            .y
+            .to_pt();
+        drop(world);
+
+        engine.set_source("/main.typ", &note(300)).unwrap();
+        let anchor = PagePoint {
+            page: 0,
+            x: 10.0,
+            y: old - 5.0,
+        };
+        let out = engine
+            .compile_anchored("/main.typ", false, Some(anchor))
+            .unwrap();
+        let moved = out.anchor.unwrap();
+        let world = engine.world(file_id("/main.typ").unwrap());
+        let after = engine
+            .documents
+            .get(&file_id("/main.typ").unwrap())
+            .unwrap();
+        let source = world.source(world.main()).unwrap();
+        let new = typst_ide::jump_from_cursor(after, &source, offset)[0]
+            .point
+            .y
+            .to_pt();
+        assert!(
+            new > old + 50.0,
+            "the narrower page should push it down: {old} -> {new}"
+        );
+        assert!(
+            (moved.y - (new - 5.0)).abs() < 1.0,
+            "{} vs {}",
+            moved.y,
+            new - 5.0
+        );
+        // Below all text there's nothing to follow.
+        let out = engine
+            .compile_anchored(
+                "/main.typ",
+                false,
+                Some(PagePoint {
+                    page: 0,
+                    y: 1e6,
+                    ..anchor
+                }),
+            )
+            .unwrap();
+        assert!(out.anchor.is_none());
+    }
+
+    #[test]
+    fn splits_tall_pages_into_stable_bands() {
+        let section = "== Section\nA paragraph of prose that wraps across a few lines of the page, \
+            with *bold* and _emphasis_ in it, like the paragraphs of a real note.\n\n\
+            - A list item\n- Another, with $x^2 + y^2$\n\n\
+            $ integral_0^1 f(x) dif x = sum_(n=1)^infinity a_n $\n\n";
+        let note = |first: &str| {
+            format!(
+                "#set page(width: 300pt, height: auto)\n{first}\n\n{}",
+                section.repeat(40)
+            )
+        };
+        let mut engine = Engine::new();
+        engine.set_source("/main.typ", &note("Start.")).unwrap();
+        let page = engine
+            .compile("/main.typ", true)
+            .unwrap()
+            .pages
+            .unwrap()
+            .remove(0);
+        assert!(page.bands.len() > 5, "{} bands", page.bands.len());
+        let mut top = 0.0;
+        for band in &page.bands {
+            assert!((band.top - top).abs() < 1e-6);
+            assert!(band.svg.is_some());
+            top += band.height;
+        }
+        assert!((top - page.height).abs() < 1e-6);
+
+        // A longer first paragraph moves everything after it down, but the
+        // bands after the first one are cut in the same places.
+        engine
+            .set_source(
+                "/main.typ",
+                &note("Start, now with a much longer first paragraph that takes up a second line."),
+            )
+            .unwrap();
+        let edited = engine
+            .compile("/main.typ", true)
+            .unwrap()
+            .pages
+            .unwrap()
+            .remove(0);
+        let resent = edited.bands.iter().filter(|b| b.svg.is_some()).count();
+        assert!(
+            resent <= 2,
+            "{resent} of {} bands resent",
+            edited.bands.len()
+        );
+
+        // A change near the end leaves the bands before it alone.
+        engine
+            .set_source(
+                "/main.typ",
+                &format!(
+                    "{}\nThe end.",
+                    note(
+                        "Start, now with a much longer first paragraph that takes up a second line."
+                    )
+                ),
+            )
+            .unwrap();
+        let appended = engine
+            .compile("/main.typ", true)
+            .unwrap()
+            .pages
+            .unwrap()
+            .remove(0);
+        let resent = appended.bands.iter().filter(|b| b.svg.is_some()).count();
+        assert_eq!(
+            resent,
+            1,
+            "{resent} of {} bands resent",
+            appended.bands.len()
+        );
     }
 
     #[test]

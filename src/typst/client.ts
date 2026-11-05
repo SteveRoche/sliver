@@ -68,17 +68,45 @@ export class TypstClient {
     render: boolean,
     /** A source file to replace first, in the same message. */
     source?: { path: string; text: string },
+    /** A point of the last layout to follow into the new one. */
+    anchor?: PagePoint | null,
   ): Promise<CompileResult> {
-    const raw = await this.call('compile', { main, render, source });
-    const { rendered, pageCount, changedPages, svg, svgEnds, ...stats } = raw;
-    if (!rendered) return { ...stats, pages: null };
-    const pages: (string | null)[] = new Array(pageCount).fill(null);
+    const raw = await this.call('compile', { main, render, source, anchor });
+    const moved =
+      anchor && raw.anchor ? { from: anchor, to: raw.anchor } : null;
+    const {
+      anchor: _,
+      rendered,
+      pageSizes,
+      backgrounds,
+      bandCounts,
+      bandRects,
+      bandKeys,
+      svg,
+      svgEnds,
+      ...stats
+    } = raw;
+    if (!rendered) return { ...stats, anchor: moved, pages: null };
+    let band = 0;
     let start = 0;
-    changedPages.forEach((page, i) => {
-      pages[page] = decoder.decode(svg.subarray(start, svgEnds[i]));
-      start = svgEnds[i];
-    });
-    return { ...stats, pages };
+    const pages = bandCounts.map((count, page) => ({
+      width: pageSizes[2 * page],
+      height: pageSizes[2 * page + 1],
+      background: backgrounds[page],
+      bands: Array.from({ length: count }, () => {
+        const end = svgEnds[band];
+        const out = {
+          top: bandRects[2 * band],
+          height: bandRects[2 * band + 1],
+          key: bandKeys[band],
+          svg: end > start ? decoder.decode(svg.subarray(start, end)) : null,
+        };
+        start = end;
+        band++;
+        return out;
+      }),
+    }));
+    return { ...stats, anchor: moved, pages };
   }
 
   /** Main files whose last compile read `path`, i.e. those a change to it affects. */
@@ -213,6 +241,11 @@ export interface LivePreviewOptions {
    * pause and without rendering pages (diagnostics still come back).
    */
   visible: () => boolean;
+  /**
+   * The point of the shown layout to keep in place across a compile (the
+   * top of what the preview shows), if any.
+   */
+  anchor?: () => PagePoint | null;
   /** `text` is the source the result was compiled from. */
   onResult: (
     result: CompileResult,
@@ -257,10 +290,12 @@ export function livePreview(
         queued = undefined;
         const source =
           next === sent ? undefined : { path: sourcePath, text: next };
+        const visible = options.visible();
         const result = await client.compile(
           mainPath,
-          options.visible(),
+          visible,
           source,
+          visible ? options.anchor?.() : null,
         );
         sent = next;
         options.onResult(result, next, {

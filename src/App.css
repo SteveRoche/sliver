@@ -730,6 +730,14 @@ button.primary {
   --paper: #232323;
 }
 
+.pages {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Sized by its aspect ratio (set inline), so CSS stretches it to the width. */
 .page {
   position: relative;
   flex: none;
@@ -739,10 +747,29 @@ button.primary {
   background: var(--paper);
 }
 
-.page svg {
+/* The page's fill and its bands, positioned in percent of the page. */
+.page-fill,
+.band {
+  position: absolute;
+  right: 0;
+  left: 0;
+}
+
+.page-fill {
+  top: 0;
+  bottom: 0;
+}
+
+.page-fill svg,
+.band svg {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+}
+
+/* A glyph reaching past its font's ascender may overhang its band. */
+.band svg {
+  overflow: visible;
 }
 
 .page a {

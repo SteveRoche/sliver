@@ -3,3 +3,4 @@ dist
 /target
 /src/typst/pkg
 .direnv
+cloc-history.png

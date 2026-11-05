@@ -4,7 +4,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::{Engine, Position, Severity};
+use crate::{Engine, PagePoint, Position, Severity};
 
 /// Marks a missing number in the flat arrays below.
 const NONE: u32 = u32::MAX;
@@ -21,16 +21,33 @@ pub struct Compiled {
     /// Whether pages were rendered; if not (failed, or not asked for), the
     /// previous pages still stand.
     pub rendered: bool,
-    #[wasm_bindgen(js_name = pageCount)]
-    pub page_count: u32,
-    /// Pages whose SVG is in `svg`; the others are unchanged.
-    #[wasm_bindgen(js_name = changedPages)]
-    pub changed_pages: Vec<u32>,
-    /// The changed pages' SVG as UTF-8, back to back.
+    /// Width and height of each page in points, back to back.
+    #[wasm_bindgen(js_name = pageSizes)]
+    pub page_sizes: Vec<f64>,
+    /// Each page's background (its fill) as SVG.
+    pub backgrounds: Vec<String>,
+    /// How many bands each page has; the bands of all pages follow each
+    /// other in the arrays below.
+    #[wasm_bindgen(js_name = bandCounts)]
+    pub band_counts: Vec<u32>,
+    /// Each band's top and height in points, back to back.
+    #[wasm_bindgen(js_name = bandRects)]
+    pub band_rects: Vec<f64>,
+    /// Each band's key (hex); equal keys render the same.
+    #[wasm_bindgen(js_name = bandKeys)]
+    pub band_keys: Vec<String>,
+    /// The bands' SVG as UTF-8, back to back. A band sent before (same key
+    /// in the last render) has none: it ends where the previous one does.
     pub svg: Vec<u8>,
-    /// Where each changed page's SVG ends in `svg`.
+    /// Where each band's SVG ends in `svg`.
     #[wasm_bindgen(js_name = svgEnds)]
     pub svg_ends: Vec<u32>,
+    /// Where the anchor passed to `compile` is now (see
+    /// [`crate::Engine::compile_anchored`]): page, or `NONE`, and y.
+    #[wasm_bindgen(js_name = anchorPage)]
+    pub anchor_page: u32,
+    #[wasm_bindgen(js_name = anchorY)]
+    pub anchor_y: f64,
     /// 0 for an error, 1 for a warning.
     #[wasm_bindgen(js_name = diagnosticSeverities)]
     pub diagnostic_severities: Vec<u8>,
@@ -162,6 +179,12 @@ impl Compiler {
         self.0.has_package(spec)
     }
 
+    /// See [`crate::Engine::page_svgs`].
+    #[wasm_bindgen(js_name = pageSvgs)]
+    pub fn page_svgs(&self, main: &str) -> Result<Vec<String>, JsError> {
+        Ok(self.0.page_svgs(main)?)
+    }
+
     /// The string metadata labelled `label` in `main`'s last good compile.
     #[wasm_bindgen(js_name = metadataText)]
     pub fn metadata_text(&self, main: &str, label: &str) -> Result<Option<String>, JsError> {
@@ -184,14 +207,32 @@ impl Compiler {
         Ok(marks)
     }
 
-    pub fn compile(&mut self, main: &str, render: bool) -> Result<Compiled, JsError> {
-        let out = self.0.compile(main, render)?;
+    /// Compiles `main`, following the point (`anchorPage`, `anchorY`) of its
+    /// last layout into the new one when given.
+    pub fn compile(
+        &mut self,
+        main: &str,
+        render: bool,
+        anchor_page: Option<u32>,
+        anchor_y: f64,
+    ) -> Result<Compiled, JsError> {
+        let anchor = anchor_page.map(|page| PagePoint {
+            page,
+            x: 0.0,
+            y: anchor_y,
+        });
+        let out = self.0.compile_anchored(main, render, anchor)?;
         let mut compiled = Compiled {
             rendered: out.pages.is_some(),
-            page_count: 0,
-            changed_pages: Vec::new(),
+            page_sizes: Vec::new(),
+            backgrounds: Vec::new(),
+            band_counts: Vec::new(),
+            band_rects: Vec::new(),
+            band_keys: Vec::new(),
             svg: Vec::new(),
             svg_ends: Vec::new(),
+            anchor_page: out.anchor.map_or(NONE, |a| a.page),
+            anchor_y: out.anchor.map_or(0.0, |a| a.y),
             diagnostic_severities: Vec::new(),
             diagnostic_messages: Vec::new(),
             diagnostic_paths: Vec::new(),
@@ -202,14 +243,17 @@ impl Compiler {
             compile_ms: out.compile_ms,
             render_ms: out.render_ms,
         };
-        if let Some(pages) = out.pages {
-            compiled.page_count = pages.len() as u32;
-            for (i, page) in pages.into_iter().enumerate() {
-                if let Some(svg) = page {
-                    compiled.changed_pages.push(i as u32);
+        for page in out.pages.into_iter().flatten() {
+            compiled.page_sizes.extend([page.width, page.height]);
+            compiled.backgrounds.push(page.background);
+            compiled.band_counts.push(page.bands.len() as u32);
+            for band in page.bands {
+                compiled.band_rects.extend([band.top, band.height]);
+                compiled.band_keys.push(format!("{:x}", band.key));
+                if let Some(svg) = band.svg {
                     compiled.svg.extend_from_slice(svg.as_bytes());
-                    compiled.svg_ends.push(compiled.svg.len() as u32);
                 }
+                compiled.svg_ends.push(compiled.svg.len() as u32);
             }
         }
         for d in out.diagnostics {
