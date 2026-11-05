@@ -442,10 +442,23 @@ impl Engine {
         anchor: Option<PagePoint>,
     ) -> Result<CompileOutput, InvalidPath> {
         let main = file_id(main)?;
+        // The topmost text at or below the anchor: its first glyph's span.
         let anchor = anchor.and_then(|point| {
-            let document = self.documents.get(&main)?;
-            let page = document.pages().get(point.page as usize)?;
-            let (span, y) = text_at_or_below(&page.frame, Abs::pt(point.y))?;
+            let page = self
+                .documents
+                .get(&main)?
+                .pages()
+                .get(point.page as usize)?;
+            let (y, span) = texts(&page.frame)
+                .into_iter()
+                .filter(|(y, _)| y.to_pt() >= point.y)
+                .filter_map(|(y, text)| {
+                    Some((
+                        y,
+                        text.glyphs.iter().find(|g| !g.span.0.is_detached())?.span,
+                    ))
+                })
+                .min_by(|a, b| a.0.to_pt().total_cmp(&b.0.to_pt()))?;
             Some((point, span, y))
         });
         let world = self.world(main);
@@ -512,7 +525,9 @@ impl Engine {
         let moved = anchor.and_then(|(point, span, old_y)| {
             let document = document.as_ref()?;
             document.pages().iter().enumerate().find_map(|(i, page)| {
-                let y = text_with_span(&page.frame, span)?;
+                let (y, _) = texts(&page.frame)
+                    .into_iter()
+                    .find(|(_, text)| text.glyphs.iter().any(|g| g.span == span))?;
                 Some(PagePoint {
                     page: i as u32,
                     x: point.x,
@@ -723,48 +738,21 @@ pub struct CitationMark {
     pub y: f64,
 }
 
-/// A glyph's place in the source.
-type GlyphSpan = (typst::syntax::Span, u16);
-
-/// Every text item in `frame` with the page transform it's drawn under.
-fn for_each_text(frame: &Frame, ts: Transform, f: &mut impl FnMut(&TextItem, Transform)) {
-    for (pos, item) in frame.items() {
-        let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
-        match item {
-            FrameItem::Group(group) => {
-                for_each_text(&group.frame, ts.pre_concat(group.transform), f)
+/// Every text item in `frame` with its baseline's y on the page.
+fn texts(frame: &Frame) -> Vec<(Abs, &TextItem)> {
+    fn walk<'a>(frame: &'a Frame, ts: Transform, out: &mut Vec<(Abs, &'a TextItem)>) {
+        for (pos, item) in frame.items() {
+            let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
+            match item {
+                FrameItem::Group(group) => walk(&group.frame, ts.pre_concat(group.transform), out),
+                FrameItem::Text(text) => out.push((Point::zero().transform(ts).y, text)),
+                _ => {}
             }
-            FrameItem::Text(text) => f(text, ts),
-            _ => {}
         }
     }
-}
-
-/// The topmost text whose baseline is at or below `y`: its first glyph with
-/// a source span, and the baseline.
-fn text_at_or_below(frame: &Frame, y: Abs) -> Option<(GlyphSpan, Abs)> {
-    let mut best: Option<(GlyphSpan, Abs)> = None;
-    for_each_text(frame, Transform::identity(), &mut |text, ts| {
-        let baseline = Point::zero().transform(ts).y;
-        if baseline < y || best.is_some_and(|(_, b)| b <= baseline) {
-            return;
-        }
-        if let Some(glyph) = text.glyphs.iter().find(|g| !g.span.0.is_detached()) {
-            best = Some((glyph.span, baseline));
-        }
-    });
-    best
-}
-
-/// The baseline of the text containing the glyph from `span`.
-fn text_with_span(frame: &Frame, span: GlyphSpan) -> Option<Abs> {
-    let mut found = None;
-    for_each_text(frame, Transform::identity(), &mut |text, ts| {
-        if found.is_none() && text.glyphs.iter().any(|g| g.span == span) {
-            found = Some(Point::zero().transform(ts).y);
-        }
-    });
-    found
+    let mut out = Vec::new();
+    walk(frame, Transform::identity(), &mut out);
+    out
 }
 
 /// Typst's built-in citation styles: each name it accepts (aliases

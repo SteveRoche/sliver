@@ -59,19 +59,14 @@ pub fn bands(page: &Page) -> Vec<Band> {
             Band {
                 top,
                 height,
-                key: {
-                    let mut hasher = DefaultHasher::new();
-                    hash_point(size.to_point(), &mut hasher);
-                    hash_frame(&frame, &mut hasher);
-                    hasher.finish()
-                },
+                key: hash(|state| {
+                    hash_point(size.to_point(), state);
+                    hash_frame(&frame, state);
+                }),
                 page: Page {
                     frame,
-                    bleed: page.bleed,
                     fill: Smart::Custom(None),
-                    numbering: None,
-                    supplement: page.supplement.clone(),
-                    number: page.number,
+                    ..background(page)
                 },
             }
         })
@@ -82,12 +77,15 @@ pub fn bands(page: &Page) -> Vec<Band> {
 pub fn background(page: &Page) -> Page {
     Page {
         frame: Frame::hard(page.frame.size()),
-        bleed: page.bleed,
-        fill: page.fill.clone(),
         numbering: None,
-        supplement: page.supplement.clone(),
-        number: page.number,
+        ..page.clone()
     }
+}
+
+fn hash(f: impl FnOnce(&mut DefaultHasher)) -> u64 {
+    let mut state = DefaultHasher::new();
+    f(&mut state);
+    state.finish()
 }
 
 /// Groups whose items can go to different bands: plain containers. A
@@ -152,25 +150,22 @@ fn cuts(frame: &Frame) -> Vec<Abs> {
     if frame.height().to_pt() <= MIN_HEIGHT {
         return Vec::new();
     }
-    let mut leaves_ = Vec::new();
-    leaves(frame, Point::zero(), &mut leaves_);
-    leaves_.sort_by(|a, b| a.0.to_pt().total_cmp(&b.0.to_pt()));
+    let mut items = Vec::new();
+    leaves(frame, Point::zero(), &mut items);
+    items.sort_by(|a, b| a.0.to_pt().total_cmp(&b.0.to_pt()));
 
     let mut cuts = Vec::new();
     let mut start = Abs::zero();
     let mut bottom = -Abs::inf();
-    for (top, leaf_bottom, item) in leaves_ {
+    for (top, leaf_bottom, item) in items {
         if top > bottom && bottom > start {
             let cut = (bottom + top) / 2.0;
             let height = (cut - start).to_pt();
             let end = frame.height().to_pt() - cut.to_pt();
             if height >= MIN_HEIGHT
                 && end >= MIN_HEIGHT / 4.0
-                && (height >= MAX_HEIGHT || {
-                    let mut hasher = DefaultHasher::new();
-                    hash_item(item, &mut hasher);
-                    hasher.finish().is_multiple_of(CUT_EVERY)
-                })
+                && (height >= MAX_HEIGHT
+                    || hash(|state| hash_item(item, state)).is_multiple_of(CUT_EVERY))
             {
                 cuts.push(cut);
                 start = cut;

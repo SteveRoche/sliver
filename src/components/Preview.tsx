@@ -2,7 +2,6 @@ import {
   createEffect,
   createSignal,
   For,
-  on,
   onCleanup,
   onMount,
   Show,
@@ -181,14 +180,11 @@ function reconcilePages(host: HTMLElement, pages: Page[]) {
       bandSvgs.set(fill, page.background);
     }
 
-    const old = new Map<string, HTMLElement[]>();
-    for (const band of [...el.children].slice(1) as HTMLElement[]) {
-      const key = band.dataset.key ?? '';
-      old.set(key, [...(old.get(key) ?? []), band]);
-    }
+    const old = [...el.children].slice(1) as HTMLElement[];
     let after: Element = fill;
     for (const band of page.bands) {
-      let bandEl = old.get(band.key)?.shift();
+      const reused = old.findIndex(b => b.dataset.key === band.key);
+      let bandEl = reused < 0 ? undefined : old.splice(reused, 1)[0];
       if (!bandEl) {
         bandEl = document.createElement('div');
         bandEl.className = 'band';
@@ -201,7 +197,7 @@ function reconcilePages(host: HTMLElement, pages: Page[]) {
       if (after.nextElementSibling !== bandEl) after.after(bandEl);
       after = bandEl;
     }
-    for (const unused of old.values()) for (const band of unused) band.remove();
+    for (const unused of old) unused.remove();
   });
 }
 
@@ -240,8 +236,7 @@ export function Preview(props: PreviewProps) {
       return;
     }
     event.preventDefault();
-    const href =
-      anchor.getAttribute('href') ?? anchor.getAttribute('xlink:href') ?? '';
+    const href = hrefOf(anchor) ?? '';
     if (href.startsWith(LINK_SCHEME)) {
       props.onOpenNote?.(href.slice(LINK_SCHEME.length));
     } else {
@@ -357,7 +352,7 @@ export function Preview(props: PreviewProps) {
     anchor = { page, pt, offset: box.top + pt / perPixel - top };
   };
 
-  /** Scrolls so the anchor is back where it was in the view. */
+  /** Scrolls so the anchor is back where it was in the view, if there is one. */
   const restoreAnchor = () => {
     const el = anchor && (pagesHost.children[anchor.page] as HTMLElement);
     const perPixel = el && pointsPerPixel(el);
@@ -389,17 +384,15 @@ export function Preview(props: PreviewProps) {
       anchor ? { page: anchor.page, x: 0, y: anchor.pt } : null,
     );
     onCleanup(() => props.onAnchor?.(undefined));
-    createEffect(
-      on(
-        () => props.note,
-        () => {
-          anchor = null;
-        },
-      ),
-    );
+    let shownNote = props.note;
     createEffect(() => {
       const pages = props.pages;
       const shift = props.shift;
+      // Another note's anchor means nothing here.
+      if (props.note !== shownNote) {
+        shownNote = props.note;
+        anchor = null;
+      }
       if (anchor && shift && shift.from.page === anchor.page) {
         anchor = {
           ...anchor,
@@ -408,8 +401,7 @@ export function Preview(props: PreviewProps) {
         };
       }
       reconcilePages(pagesHost, pages);
-      if (anchor) restoreAnchor();
-      else measureAnchor();
+      restoreAnchor();
       showNearBands(container);
     });
     container.addEventListener('click', onClick);
@@ -429,7 +421,6 @@ export function Preview(props: PreviewProps) {
     const [available, setAvailable] = createSignal(container.clientWidth);
     const observer = new ResizeObserver(() => {
       setAvailable(container.clientWidth);
-      if (pagesSize() !== anchoredSize) restoreAnchor();
       onScroll();
     });
     observer.observe(container);
