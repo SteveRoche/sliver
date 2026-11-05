@@ -63,7 +63,7 @@ const FOLDER_PREFIX = 'folder:';
 const folderId = (path: string) => FOLDER_PREFIX + path;
 
 function noteNodes(notes: TreeNode[], depth: number): Node[] {
-  return notes.map((note) => ({
+  return notes.map(note => ({
     id: note.id,
     kind: 'note',
     note,
@@ -108,8 +108,8 @@ export function Sidebar() {
   const nodes = createMemo(() => folderContents(tree(), 0));
   const collection = createMemo(() =>
     createTreeCollection<Node>({
-      nodeToValue: (node) => node.id,
-      nodeToString: (node) =>
+      nodeToValue: node => node.id,
+      nodeToString: node =>
         node.kind === 'folder' ? node.folder.name : noteLabel(node.note),
       rootNode: {
         id: 'root',
@@ -127,10 +127,10 @@ export function Sidebar() {
     const folded = new Set(foldedNotes());
     const collapsed = new Set(collapsedFolders());
     return [
-      ...noteBranchIds(nodes()).filter((id) => !folded.has(id)),
+      ...noteBranchIds(nodes()).filter(id => !folded.has(id)),
       ...[tree(), ...allSubfolders(tree())]
-        .filter((f) => !collapsed.has(f.path))
-        .map((f) => folderId(f.path)),
+        .filter(f => !collapsed.has(f.path))
+        .map(f => folderId(f.path)),
     ];
   });
 
@@ -142,8 +142,8 @@ export function Sidebar() {
       if (id.startsWith(FOLDER_PREFIX)) {
         setFolderCollapsed(id.slice(FOLDER_PREFIX.length), !isOpen.has(id));
       } else {
-        setFoldedNotes((list) =>
-          isOpen.has(id) ? list.filter((n) => n !== id) : [...list, id],
+        setFoldedNotes(list =>
+          isOpen.has(id) ? list.filter(n => n !== id) : [...list, id],
         );
       }
     }
@@ -159,14 +159,14 @@ export function Sidebar() {
 
   const targetNote = () => noteById(menuTarget() ?? '');
   const targetFolder = () =>
-    allSubfolders(tree()).find((f) => f.path === menuFolder());
+    allSubfolders(tree()).find(f => f.path === menuFolder());
   const isEmpty = () =>
     tree().folders.length === 0 && tree().notes.length === 0;
 
   return (
     <aside
       class="sidebar"
-      ref={(aside) =>
+      ref={aside =>
         onMount(() => {
           const tree = aside.querySelector<HTMLElement>('.sidebar-tree');
           if (tree) onCleanup(overlayScrollbar(tree));
@@ -197,8 +197,8 @@ export function Sidebar() {
         </div>
       </div>
       <Menu.Root
-        onSelect={(details) => runCommand(details.value)}
-        onOpenChange={(details) => {
+        onSelect={details => runCommand(details.value)}
+        onOpenChange={details => {
           if (!details.open) {
             queueMicrotask(() => {
               setMenuTarget(null);
@@ -211,19 +211,19 @@ export function Sidebar() {
         <Menu.ContextTrigger
           class="sidebar-tree"
           onContextMenu={onContextMenu}
-          asChild={(triggerProps) => <div {...triggerProps()} />}
+          asChild={triggerProps => <div {...triggerProps()} />}
         >
           <TreeView.Root
             collection={collection()}
             selectionMode="single"
             selectedValue={activeNote() ? [activeNote() as string] : []}
-            onSelectionChange={(details) => {
+            onSelectionChange={details => {
               const id = details.selectedValue[0];
               if (id && !id.startsWith(FOLDER_PREFIX)) openNote(id);
             }}
             expandOnClick={false}
             expandedValue={expanded()}
-            onExpandedChange={(details) =>
+            onExpandedChange={details =>
               onExpandedChange(details.expandedValue)
             }
           >
@@ -255,7 +255,7 @@ export function Sidebar() {
                 }
               >
                 <Match when={targetNote()}>
-                  {(note) => (
+                  {note => (
                     <NoteMenu
                       addressed={!!note().address && inZettelkasten(note().id)}
                       filed={inZettelkasten(note().id)}
@@ -263,7 +263,7 @@ export function Sidebar() {
                   )}
                 </Match>
                 <Match when={targetFolder()}>
-                  {(folder) => <FolderMenu folder={folder()} />}
+                  {folder => <FolderMenu folder={folder()} />}
                 </Match>
               </Switch>
             </Menu.Content>
@@ -275,7 +275,7 @@ export function Sidebar() {
 }
 
 function allSubfolders(folder: FolderNode): FolderNode[] {
-  return folder.folders.flatMap((f) => [f, ...allSubfolders(f)]);
+  return folder.folders.flatMap(f => [f, ...allSubfolders(f)]);
 }
 
 function NoteMenu(props: { addressed: boolean; filed: boolean }) {
@@ -344,7 +344,7 @@ function FolderMenu(props: { folder: FolderNode }) {
 function Warning(props: { message: string | null; label: string }) {
   return (
     <Show when={props.message}>
-      {(message) => (
+      {message => (
         <span class="note-warning" title={message()}>
           <TriangleAlert size={12} aria-label={props.label} />
         </span>
@@ -361,7 +361,7 @@ function NodeView(props: { node: Node; indexPath: number[] }) {
     <TreeView.NodeProvider node={props.node} indexPath={props.indexPath}>
       <Switch>
         <Match when={props.node.kind === 'folder' && props.node}>
-          {(node) => (
+          {node => (
             <FolderView
               node={node() as Extract<Node, { kind: 'folder' }>}
               indexPath={props.indexPath}
@@ -370,7 +370,7 @@ function NodeView(props: { node: Node; indexPath: number[] }) {
           )}
         </Match>
         <Match when={props.node.kind === 'note' && props.node}>
-          {(node) => (
+          {node => (
             <NoteView
               node={node() as Extract<Node, { kind: 'note' }>}
               indexPath={props.indexPath}
@@ -411,7 +411,7 @@ function FolderView(props: {
         {/* The whole row folds: a folder has nothing to open. */}
         <TreeView.BranchTrigger class="folder-toggle">
           <TreeView.NodeContext>
-            {(node) => (
+            {node => (
               <span class="folder-icon">
                 <Switch>
                   <Match when={folder().kind === 'zettelkasten'}>
@@ -468,7 +468,7 @@ function NoteView(props: {
         </TreeView.Item>
       }
     >
-      {(children) => (
+      {children => (
         <TreeView.Branch>
           <TreeView.BranchControl
             class="tree-item"
@@ -478,7 +478,7 @@ function NoteView(props: {
             {/* Only the address folds; the rest of the row opens the note.
                 Branches always have an address: only addressed notes have next notes. */}
             <TreeView.NodeContext>
-              {(node) => (
+              {node => (
                 <TreeView.BranchTrigger
                   class="note-address fold-toggle"
                   title={node().expanded ? 'Fold' : 'Unfold'}

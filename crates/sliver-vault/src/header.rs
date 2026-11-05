@@ -299,7 +299,7 @@ mod tests {
                 "#metadata((title: \"T\", tags: (\"a\",))) <note>\nBody",
             )
             .unwrap();
-        let out = engine.compile("/n.typ").unwrap();
+        let out = engine.compile("/n.typ", true).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
     }
     #[test]

@@ -92,7 +92,7 @@ async function chooseAddress(id: NoteId | null): Promise<Placement | null> {
   const subtreeOf = id && noteById(id)?.address;
   const filed = id !== null && inZettelkasten(id);
   const targets = allNotes().filter(
-    (n) =>
+    n =>
       n.address &&
       inZettelkasten(n.id) &&
       // A note can't be filed after or beside itself or the notes after it.
@@ -100,7 +100,7 @@ async function chooseAddress(id: NoteId | null): Promise<Placement | null> {
   );
   const target = await pick<NoteId | null>('File after or beside...', [
     { label: 'New top-level address', value: null },
-    ...targets.map((n) => ({ label: noteLabel(n), value: n.id })),
+    ...targets.map(n => ({ label: noteLabel(n), value: n.id })),
   ]);
   if (!target) return null;
   if (target.value === null) return { kind: 'top' };
@@ -153,9 +153,9 @@ const folderLabel = (path: string) => (path === '' ? 'Vault root' : path);
 async function moveNoteToFolder(id: NoteId) {
   const note = noteById(id);
   const zk = zettelkasten()?.path;
-  const choices = ['', ...allFolders().map((f) => f.path)]
-    .filter((path) => path !== zk && path !== note?.folder)
-    .map((path) => ({ label: folderLabel(path), value: path }));
+  const choices = ['', ...allFolders().map(f => f.path)]
+    .filter(path => path !== zk && path !== note?.folder)
+    .map(path => ({ label: folderLabel(path), value: path }));
   const choice = await pick('Move to folder...', choices);
   if (!choice) return;
   if (note?.address && inZettelkasten(id)) {
@@ -170,7 +170,7 @@ async function moveNoteToFolder(id: NoteId) {
 
 /** A folder that's gone (deleted or renamed outside the app) falls back to the root. */
 const existingFolder = (path: string) =>
-  path === '' || allFolders().some((f) => f.path === path) ? path : '';
+  path === '' || allFolders().some(f => f.path === path) ? path : '';
 
 /** Mod+N: a note where the vault's settings say new notes go. */
 async function newNoteDefault(kind?: string) {
@@ -188,7 +188,7 @@ async function newNoteDefault(kind?: string) {
 async function newNoteOfKind() {
   const choice = await pick(
     'New note of kind...',
-    kinds().map((kind) => ({ label: kind, value: kind })),
+    kinds().map(kind => ({ label: kind, value: kind })),
   );
   if (!choice) return;
   const kind = choice.value;
@@ -201,7 +201,7 @@ async function changeKind(id: NoteId) {
   const current = noteById(id)?.kind ?? null;
   const choice = await pick<string | null>('Change note kind...', [
     { label: 'No kind', value: null },
-    ...kinds().map((kind) => ({ label: kind, value: kind })),
+    ...kinds().map(kind => ({ label: kind, value: kind })),
   ]);
   if (!choice || choice.value === current) return;
   await setNoteKind(id, choice.value);
@@ -245,7 +245,7 @@ async function removeFolder(path: string) {
   const verb =
     settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
   const count = allNotes().filter(
-    (n) => n.folder === path || n.folder.startsWith(`${path}/`),
+    n => n.folder === path || n.folder.startsWith(`${path}/`),
   ).length;
   const ok = await ask(
     `${verb}: the folder "${path}" with ${count} note(s) and everything else in it?`,
@@ -280,13 +280,13 @@ function onNote(
       id: `${idPrefix}.next`,
       title: 'New next note after current note',
       enabled: enabled(true),
-      run: withTarget((of) => newNote({ kind: 'next', of }, 'New next note')),
+      run: withTarget(of => newNote({ kind: 'next', of }, 'New next note')),
     },
     {
       id: `${idPrefix}.aside`,
       title: 'New aside to current note',
       enabled: enabled(true),
-      run: withTarget((of) => newNote({ kind: 'aside', of }, 'New aside')),
+      run: withTarget(of => newNote({ kind: 'aside', of }, 'New aside')),
     },
     {
       id: `${idPrefix}.moveToAddress`,

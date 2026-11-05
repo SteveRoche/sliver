@@ -12,15 +12,35 @@ export interface Diagnostic {
   range?: { start: Position; end: Position };
 }
 
-export interface CompileResult {
-  /** One SVG per page; empty when compilation failed. */
-  pages: string[];
+interface CompileStats {
   diagnostics: Diagnostic[];
   /** Packages being fetched; their "not found" errors are left out. */
   loadingPackages: string[];
   /** Compile (parse, evaluate, layout) and SVG render times in the worker. */
   compileMs: number;
   renderMs: number;
+}
+
+/** A compile as the worker sends it: only changed pages, as UTF-8 bytes. */
+export interface WorkerCompile extends CompileStats {
+  /** False when nothing was rendered (failed, or not asked for). */
+  rendered: boolean;
+  pageCount: number;
+  /** Pages whose SVG is in `svg`; the others are unchanged since the last render. */
+  changedPages: number[];
+  /** The changed pages' SVG back to back; transferred, not copied. */
+  svg: Uint8Array;
+  /** Where each changed page ends in `svg`. */
+  svgEnds: number[];
+}
+
+/** A compile with its pages decoded. */
+export interface CompileResult extends CompileStats {
+  /**
+   * One entry per page, `null` for a page unchanged since the last render;
+   * `null` overall when nothing was rendered, so the previous pages stand.
+   */
+  pages: (string | null)[] | null;
 }
 
 /** A place in a source file. */
@@ -86,7 +106,17 @@ export interface Calls {
   setSource: { args: { path: string; text: string }; result: undefined };
   setPrefix: { args: { path: string; prefix: string }; result: undefined };
   removeSource: { args: { path: string }; result: undefined };
-  compile: { args: { main: string }; result: CompileResult };
+  /** Main files whose last compile read `path`. */
+  affectedMains: { args: { path: string }; result: string[] };
+  compile: {
+    args: {
+      main: string;
+      render: boolean;
+      /** Replaced before compiling, saving a round trip. */
+      source?: { path: string; text: string };
+    };
+    result: WorkerCompile;
+  };
   complete: {
     args: {
       main: string;

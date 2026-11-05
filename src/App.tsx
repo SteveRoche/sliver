@@ -19,7 +19,7 @@ function App() {
     onCleanup(installKeybindings());
     // Unsaved edits are written before the window goes away.
     const unlisten = getCurrentWindow().onCloseRequested(() => flushAll());
-    onCleanup(() => void unlisten.then((f) => f()));
+    onCleanup(() => void unlisten.then(f => f()));
 
     try {
       const last = await vault.last();

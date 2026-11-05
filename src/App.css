@@ -175,10 +175,6 @@ button.primary {
   color: var(--muted);
 }
 
-.pane-message[hidden] {
-  display: none;
-}
-
 .pane-message.empty {
   display: grid;
   place-content: center;
@@ -199,36 +195,6 @@ button.primary {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-}
-
-.resize-trigger {
-  position: relative;
-  /* Ark sets an inline `flex: 0 0 auto`, so the width must be explicit. */
-  width: 1px;
-  padding: 0;
-  border: none;
-  background: var(--border);
-  cursor: col-resize;
-  outline: none;
-}
-
-.preview-divider {
-  background: var(--muted);
-}
-
-/* A 7px invisible grab area centred on the 1px line. */
-.resize-trigger::after {
-  content: "";
-  position: absolute;
-  inset: 0 -3px;
-  z-index: 1;
-}
-
-/* Muted rather than the accent, which is too bright for a hairline. Ark
-   keeps `data-focus` after a drag, so only keyboard focus counts. */
-.resize-trigger:hover,
-:root[data-input="keyboard"] .resize-trigger:focus {
-  background: var(--muted);
 }
 
 /* --- sidebar --- */
@@ -274,11 +240,8 @@ button.primary {
 }
 
 .icon-button:hover {
-  color: var(--fg);
-}
-
-.icon-button:hover {
   background: var(--hover);
+  color: var(--fg);
 }
 
 /* Never scrolls sideways: rows truncate instead, so text stays anchored left. */
@@ -572,20 +535,27 @@ button.primary {
   overflow: hidden;
 }
 
+/* Every resize handle: our `Divider`s, and Ark's splitter trigger beside
+   the sidebar (a <button> with an inline `flex: 0 0 auto`, hence the
+   explicit width). */
 .divider {
   position: relative;
   flex: 0 0 1px;
   align-self: stretch;
   margin: 0;
+  padding: 0;
   border: none;
   background: var(--border);
+  outline: none;
 }
 
 .divider-row {
+  width: 1px;
   cursor: col-resize;
 }
 
 .divider-column {
+  height: 1px;
   cursor: row-resize;
 }
 
@@ -609,8 +579,16 @@ button.primary {
   flex-basis: 4px;
 }
 
+/* Muted rather than the accent, which is too bright for a hairline. Ark
+   keeps `data-focus` after a drag, so only keyboard focus counts. */
 .divider:hover,
-.divider.dragging {
+.divider.dragging,
+:root[data-input="keyboard"] .divider:focus {
+  background: var(--muted);
+}
+
+/* Between an editor and its preview: visible, but lighter than a pane's edge. */
+.preview-divider {
   background: var(--muted);
 }
 
@@ -693,11 +671,6 @@ button.primary {
 
 .drop-bottom {
   inset: 50% 0 0 0;
-}
-
-/* Wraps each note's editor (`editorHosts`); takes no box of its own. */
-.editor-host {
-  display: contents;
 }
 
 .note-tab {

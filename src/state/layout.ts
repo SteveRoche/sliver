@@ -43,7 +43,7 @@ export type LayoutNode = Pane | Split;
 export type DropZone = 'left' | 'right' | 'top' | 'bottom' | 'center';
 
 let nextId = 0;
-export const newId = (prefix: string) => `${prefix}-${nextId++}`;
+const newId = (prefix: string) => `${prefix}-${nextId++}`;
 
 export const newPane = (tabs: Tab[] = [], active: string | null = null) =>
   ({
@@ -61,13 +61,13 @@ export function panes(node: LayoutNode): Pane[] {
 }
 
 export const findPane = (root: LayoutNode, id: string) =>
-  panes(root).find((p) => p.id === id);
+  panes(root).find(p => p.id === id);
 
 export const paneOfTab = (root: LayoutNode, key: string) =>
-  panes(root).find((p) => p.tabs.some((t) => t.key === key));
+  panes(root).find(p => p.tabs.some(t => t.key === key));
 
 export const paneNote = (pane: Pane): NoteId | null =>
-  pane.tabs.find((t) => t.key === pane.active)?.note ?? null;
+  pane.tabs.find(t => t.key === pane.active)?.note ?? null;
 
 /** The split holding `id` and its index there; none for the root. */
 function parentOf(
@@ -75,7 +75,7 @@ function parentOf(
   id: string,
 ): { parent: Split; index: number } | undefined {
   if (node.kind === 'pane') return undefined;
-  const index = node.children.findIndex((c) => c.id === id);
+  const index = node.children.findIndex(c => c.id === id);
   if (index >= 0) return { parent: node, index };
   for (const child of node.children) {
     const found = parentOf(child, id);
@@ -142,7 +142,7 @@ export function removePane(state: { root: LayoutNode }, id: string) {
     grand.parent.sizes.splice(
       grand.index,
       1,
-      ...only.sizes.map((s) => (s / total) * weight),
+      ...only.sizes.map(s => (s / total) * weight),
     );
   } else {
     grand.parent.children[grand.index] = only;
@@ -169,8 +169,8 @@ export function save(node: LayoutNode): SavedNode {
   if (node.kind === 'pane') {
     return {
       kind: 'pane',
-      tabs: node.tabs.map((t) => t.note),
-      active: node.tabs.findIndex((t) => t.key === node.active),
+      tabs: node.tabs.map(t => t.note),
+      active: node.tabs.findIndex(t => t.key === node.active),
       mode: node.mode,
       sizes: [...node.sizes],
     };
@@ -195,12 +195,12 @@ export function restore(
   const build = (node: SavedNode): LayoutNode | null => {
     if (node.kind === 'pane') {
       const tabs = node.tabs
-        .filter((id) => id === null || keep(id))
-        .map((note) => ({ key: newTabKey(), note }));
+        .filter(id => id === null || keep(id))
+        .map(note => ({ key: newTabKey(), note }));
       if (tabs.length === 0) return null;
       const wanted = node.tabs[node.active];
       const active =
-        tabs.find((t) => t.note === wanted && wanted !== undefined) ?? tabs[0];
+        tabs.find(t => t.note === wanted && wanted !== undefined) ?? tabs[0];
       return {
         ...newPane(tabs, active.key),
         mode: ['edit', 'read', 'source'].includes(node.mode)

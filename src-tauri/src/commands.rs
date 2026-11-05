@@ -188,15 +188,6 @@ pub async fn backlinks(open: State<'_, OpenVault>, id: Uuid) -> CommandResult<Ve
     with_vault(&open, |vault| vault.backlinks(id))
 }
 
-/// Resolves a wikilink target (address or uuid) to a note id.
-#[tauri::command]
-pub async fn resolve_link(
-    open: State<'_, OpenVault>,
-    target: String,
-) -> CommandResult<Option<Uuid>> {
-    with_vault(&open, |vault| Ok(vault.resolve(&target)))
-}
-
 #[derive(serde::Serialize)]
 pub struct SourceFile {
     path: String,

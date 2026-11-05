@@ -33,7 +33,7 @@ function toSquiggles(
     const l = doc.line(line + 1);
     return Math.min(l.from + column, l.to);
   };
-  return diagnostics.flatMap((diagnostic) => {
+  return diagnostics.flatMap(diagnostic => {
     if (!diagnostic.range) return [];
     const { start, end } = diagnostic.range;
     const from = offset(start.line, start.column);
@@ -63,7 +63,7 @@ const squiggleField = StateField.define<{
         return {
           squiggles,
           decorations: Decoration.set(
-            squiggles.map((s) =>
+            squiggles.map(s =>
               Decoration.mark({
                 class: `cm-squiggle cm-squiggle-${s.diagnostic.severity}`,
               }).range(s.from, s.to),
@@ -76,31 +76,31 @@ const squiggleField = StateField.define<{
     if (!tr.docChanged) return value;
     return {
       squiggles: value.squiggles
-        .map((s) => ({
+        .map(s => ({
           ...s,
           from: tr.changes.mapPos(s.from, 1),
           to: tr.changes.mapPos(s.to, -1),
         }))
-        .filter((s) => s.from < s.to),
+        .filter(s => s.from < s.to),
       decorations: value.decorations.map(tr.changes),
     };
   },
-  provide: (field) =>
-    EditorView.decorations.from(field, (value) => value.decorations),
+  provide: field =>
+    EditorView.decorations.from(field, value => value.decorations),
 });
 
 const tooltip = hoverTooltip((view, pos, side) => {
   const found = view.state
     .field(squiggleField)
     .squiggles.filter(
-      (s) =>
+      s =>
         (s.from < pos || (s.from === pos && side > 0)) &&
         (pos < s.to || (pos === s.to && side < 0)),
     );
   if (found.length === 0) return null;
   return {
-    pos: Math.min(...found.map((s) => s.from)),
-    end: Math.max(...found.map((s) => s.to)),
+    pos: Math.min(...found.map(s => s.from)),
+    end: Math.max(...found.map(s => s.to)),
     above: true,
     create() {
       const dom = document.createElement('div');

@@ -24,7 +24,7 @@ export function registerCommands(list: Command[]): () => void {
 }
 
 export function availableCommands(): Command[] {
-  return [...commands.values()].filter((c) => c.enabled?.() ?? true);
+  return [...commands.values()].filter(c => c.enabled?.() ?? true);
 }
 
 export function runCommand(id: string) {
@@ -80,12 +80,22 @@ export function keybindingKeys(keybinding: string): string[] {
     : { Mod: 'Ctrl', Alt: 'Alt' };
   return keybinding
     .split('+')
-    .map((p) => names[p] ?? (p.length === 1 ? p.toUpperCase() : p));
+    .map(p => names[p] ?? (p.length === 1 ? p.toUpperCase() : p));
 }
+
+/**
+ * Whether a modal dialog (settings, the palette, a prompt) is open: app
+ * keybindings then stay off, so they can't act on the panes behind it.
+ */
+const dialogOpen = () =>
+  document.querySelector(
+    '[data-scope="dialog"][data-part="content"][data-state="open"]',
+  ) !== null;
 
 /** Dispatches keybindings before the editor sees the key. */
 export function installKeybindings(): () => void {
   const onKeyDown = (event: KeyboardEvent) => {
+    if (dialogOpen()) return;
     for (const command of commands.values()) {
       if (!command.keybinding || !(command.enabled?.() ?? true)) continue;
       if (!matches(event, parse(command.keybinding))) continue;

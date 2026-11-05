@@ -127,9 +127,6 @@ export const vault = {
   applyMove: (id: NoteId, placement: Placement) =>
     invoke<NoteId[]>('apply_move', { id, placement }),
   backlinks: (id: NoteId) => invoke<NoteSummary[]>('backlinks', { id }),
-  /** Resolves a wikilink target (address or uuid) to a note id. */
-  resolveLink: (target: string) =>
-    invoke<NoteId | null>('resolve_link', { target }),
   /** `/.sliver/links.typ`: the link table and `wikilinks` show rule. */
   linkLibrary: (showAddresses: boolean) =>
     invoke<SourceFile>('link_library', { showAddresses }),

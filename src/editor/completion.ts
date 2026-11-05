@@ -48,7 +48,7 @@ function wikilinkSource(options: CompletionOptions) {
     const closed = ctx.state.sliceDoc(ctx.pos, ctx.pos + 2) === ']]';
     return {
       from: open.from + 2,
-      options: options.notes().map((note) => ({
+      options: options.notes().map(note => ({
         label: note.label,
         type: 'wikilink',
         apply: closed ? note.target : `${note.target}]]`,
@@ -87,7 +87,7 @@ const iconColumn = {
     if (!kind || !(kind in ICONS)) return null;
     let template = iconTemplates.get(kind);
     if (!template) {
-      template = createRoot((dispose) => {
+      template = createRoot(dispose => {
         const node = ICONS[kind]({ size: 14 }) as Element;
         dispose();
         return node;

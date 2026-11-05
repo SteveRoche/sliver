@@ -11,7 +11,7 @@ export function installInputModality() {
   window.addEventListener('pointerdown', () => set('pointer'), true);
   window.addEventListener(
     'keydown',
-    (event) => {
+    event => {
       if (!['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) {
         set('keyboard');
       }

@@ -20,7 +20,7 @@ export function prompt(options: {
   confirm?: string;
 }): Promise<string | null> {
   request()?.resolve(null);
-  return new Promise((resolve) =>
+  return new Promise(resolve =>
     setRequest({
       initial: '',
       confirm: 'OK',
@@ -42,7 +42,7 @@ export function PromptHost() {
   return (
     <Dialog.Root
       open={request() !== null}
-      onOpenChange={(details) => !details.open && finish(null)}
+      onOpenChange={details => !details.open && finish(null)}
       initialFocusEl={() => input ?? null}
       lazyMount
       unmountOnExit
@@ -52,9 +52,9 @@ export function PromptHost() {
         <Dialog.Positioner class="dialog-positioner">
           <Dialog.Content class="dialog">
             <Show when={request()}>
-              {(req) => (
+              {req => (
                 <form
-                  onSubmit={(event) => {
+                  onSubmit={event => {
                     event.preventDefault();
                     finish(input?.value ?? '');
                   }}
@@ -65,7 +65,7 @@ export function PromptHost() {
                   <label class="field">
                     <span>{req().label}</span>
                     <input
-                      ref={(el) => {
+                      ref={el => {
                         input = el;
                         queueMicrotask(() => el.select());
                       }}

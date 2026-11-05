@@ -1,11 +1,8 @@
 import type { EditorView } from '@codemirror/view';
 import { createEffect, createResource, Match, on, Switch } from 'solid-js';
-import { syntax } from '../editor/analysis';
-import { typstBrackets } from '../editor/brackets';
-import { completion } from '../editor/completion';
-import { diagnostics, setDiagnostics } from '../editor/diagnostics';
-import { signatureHelp } from '../editor/signature';
+import { setDiagnostics } from '../editor/diagnostics';
 import { followCursor } from '../editor/sync';
+import { typstEditing } from '../editor/typst';
 import { setVimActions } from '../editor/vimCommands';
 import { refreshWikilinks, wikilinks } from '../editor/wikilinks';
 import { settings } from '../state/settings';
@@ -26,26 +23,27 @@ import type { NoteId } from '../vault/api';
 import { Editor } from './Editor';
 
 const links = wikilinks({
-  title: (target) => {
+  title: target => {
     const id = resolveTarget(target);
     return id ? (noteById(id)?.title ?? 'Untitled') : null;
   },
-  open: (target) => {
+  open: target => {
     const id = resolveTarget(target);
     if (id) openNote(id);
   },
 });
 
 const linkCandidates = () =>
-  allNotes().map((note) => ({
+  allNotes().map(note => ({
     label: noteLabel(note),
     // Addresses read better in the source; unaddressed notes only have their uuid.
     target: note.address ?? note.id,
   }));
 
 /**
- * The editor for one open tab. Inactive tabs stay mounted (hidden) so each
- * keeps its own cursor, selection and undo history.
+ * The editor for one open note, rendered into its `.note-tab` element by
+ * `editorHosts`. Hidden editors stay mounted, so each keeps its own cursor,
+ * selection and undo history.
  */
 export function NoteTab(props: { id: NoteId; hidden: boolean }) {
   const session = sessionFor(props.id);
@@ -54,22 +52,19 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
 
   const follow = followCursor(
     () => settings.previewFollowsCursor && !props.hidden,
-    (position) =>
+    position =>
       void session
         ?.locate(position)
-        .then((points) => setPreviewFocus({ note: props.id, points })),
+        .then(points => setPreviewFocus({ note: props.id, points })),
   );
 
-  const complete = completion({
+  const editing = typstEditing({
     notes: linkCandidates,
-    typst: async (text, position, explicit) =>
+    complete: async (text, position, explicit) =>
       (await session?.complete(text, position, explicit)) ?? null,
-  });
-
-  const signatures = signatureHelp(
-    async (text, position) =>
+    signature: async (text, position) =>
       (await session?.signature(text, position)) ?? null,
-  );
+  });
 
   const attach = (v: EditorView | undefined) => {
     view = v;
@@ -99,32 +94,22 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
   );
 
   return (
-    <div class="note-tab" hidden={props.hidden}>
-      <Switch>
-        <Match when={text.error}>
-          <p class="pane-message">Could not open note: {String(text.error)}</p>
-        </Match>
-        <Match when={text() !== undefined && session}>
-          {(s) => (
-            <Editor
-              initialDoc={text() ?? ''}
-              onChange={(next) => s().edit(next)}
-              onView={attach}
-              extensions={[
-                syntax(),
-                links,
-                diagnostics(),
-                follow,
-                complete,
-                signatures,
-                typstBrackets(),
-              ]}
-              vim={settings.vim}
-              lineNumbers={settings.lineNumbers}
-            />
-          )}
-        </Match>
-      </Switch>
-    </div>
+    <Switch>
+      <Match when={text.error}>
+        <p class="pane-message">Could not open note: {String(text.error)}</p>
+      </Match>
+      <Match when={text() !== undefined && session}>
+        {s => (
+          <Editor
+            initialDoc={text() ?? ''}
+            onChange={next => s().edit(next)}
+            onView={attach}
+            extensions={[editing, links, follow]}
+            vim={settings.vim}
+            lineNumbers={settings.lineNumbers}
+          />
+        )}
+      </Match>
+    </Switch>
   );
 }

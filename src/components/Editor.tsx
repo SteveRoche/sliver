@@ -21,7 +21,7 @@ import { overlayScrollbar } from './scrollbars';
 interface EditorProps {
   initialDoc: string;
   onChange: (text: string) => void;
-  extensions?: Extension[];
+  extensions?: Extension;
   vim?: boolean;
   lineNumbers?: boolean;
   onView?: (view: EditorView | undefined) => void;
@@ -177,7 +177,7 @@ export function Editor(props: EditorProps) {
           history(),
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           EditorView.lineWrapping,
-          EditorView.updateListener.of((update) => {
+          EditorView.updateListener.of(update => {
             if (update.docChanged) props.onChange(update.state.doc.toString());
           }),
           theme,

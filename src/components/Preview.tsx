@@ -11,12 +11,13 @@ import { settings } from '../state/settings';
 import { isPreviewDark } from '../state/theme';
 import { setPreviewWidth } from '../state/workspace';
 import type { Diagnostic, PagePoint } from '../typst/protocol';
+import type { NoteId } from '../vault/api';
 import { withOverlayScrollbar } from './scrollbars';
 import { LINK_SCHEME } from './wikilinks';
 
 interface PreviewProps {
   /** The note shown; its page is compiled as wide as this preview. */
-  note: string;
+  note: NoteId;
   /** Pages of the last successful compile, kept while the source has errors. */
   pages: string[];
   diagnostics: Diagnostic[];
@@ -139,7 +140,7 @@ export function Preview(props: PreviewProps) {
   return (
     <div
       class="preview"
-      ref={(el) => {
+      ref={el => {
         container = el;
         withOverlayScrollbar(el);
       }}
@@ -148,7 +149,7 @@ export function Preview(props: PreviewProps) {
     >
       <Index each={props.pages}>
         {/* SVG comes from our own compiler, so innerHTML is safe here. */}
-        {(svg) => <div class="page" innerHTML={svg()} />}
+        {svg => <div class="page" innerHTML={svg()} />}
       </Index>
       <Show when={(props.loadingPackages ?? []).length > 0}>
         <div class="loading">
@@ -158,13 +159,13 @@ export function Preview(props: PreviewProps) {
       <Show when={props.diagnostics.length > 0}>
         <ul class="diagnostics">
           <For each={props.diagnostics}>
-            {(d) => (
+            {d => (
               <li class={d.severity}>
                 <Show when={preambleName(d.path)}>
-                  {(name) => <span class="location">In {name()}</span>}
+                  {name => <span class="location">In {name()}</span>}
                 </Show>
                 <Show when={d.range}>
-                  {(range) => (
+                  {range => (
                     <span class="location">
                       {range().start.line + 1}:{range().start.column + 1}
                     </span>
@@ -172,7 +173,7 @@ export function Preview(props: PreviewProps) {
                 </Show>
                 {d.message}
                 <For each={d.hints}>
-                  {(hint) => <div class="hint">hint: {hint}</div>}
+                  {hint => <div class="hint">hint: {hint}</div>}
                 </For>
               </li>
             )}

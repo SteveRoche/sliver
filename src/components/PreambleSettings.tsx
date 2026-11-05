@@ -13,13 +13,10 @@ import {
   Show,
   untrack,
 } from 'solid-js';
-import { syntax } from '../editor/analysis';
-import { typstBrackets } from '../editor/brackets';
-import { completion } from '../editor/completion';
-import { diagnostics, setDiagnostics } from '../editor/diagnostics';
-import { signatureHelp } from '../editor/signature';
+import { setDiagnostics } from '../editor/diagnostics';
+import { typstEditing } from '../editor/typst';
 import { setVimActions } from '../editor/vimCommands';
-import { settings, updateSettings } from '../state/settings';
+import { setKindFolder, settings } from '../state/settings';
 import {
   allFolders,
   allNotes,
@@ -36,6 +33,7 @@ import {
 import type { Diagnostic, Position } from '../typst/protocol';
 import type { PreambleWarning } from '../vault/api';
 import { Editor } from './Editor';
+import { SelectSetting } from './settingControls';
 
 /** Zero-based line and UTF-16 column of `offset` in `text`. */
 function positionAt(text: string, offset: number): Position {
@@ -111,31 +109,24 @@ function PreambleEditor(props: {
       <div class="preamble-editor">
         <Editor
           initialDoc={props.initial}
-          onChange={(text) => {
+          onChange={text => {
             pending = text;
             clearTimeout(timer);
             timer = setTimeout(save, settings.autosaveDelay);
           }}
-          onView={(v) => {
+          onView={v => {
             view = v;
             if (v) {
               setVimActions(v, { save: () => void save() });
               showDiagnostics();
             }
           }}
-          extensions={[
-            syntax(),
-            diagnostics(),
-            completion({
-              notes: () => [],
-              typst: (text, position, explicit) =>
-                completePreamble(props.path, text, position, explicit),
-            }),
-            signatureHelp((text, position) =>
+          extensions={typstEditing({
+            complete: (text, position, explicit) =>
+              completePreamble(props.path, text, position, explicit),
+            signature: (text, position) =>
               preambleSignature(props.path, text, position),
-            ),
-            typstBrackets(),
-          ]}
+          })}
           vim={settings.vim}
           lineNumbers={settings.lineNumbers}
         />
@@ -149,6 +140,9 @@ function PreambleEditor(props: {
 
 /** Saves the open editor's pending text, e.g. before its kind is renamed. */
 let flushEditor: (() => Promise<void>) | undefined;
+
+/** The folder setting's "none": no folder path can be this. */
+const NO_FOLDER = '\u0000';
 
 type NameForm = { mode: 'new' } | { mode: 'rename'; kind: string };
 
@@ -165,7 +159,7 @@ export function PreambleSettings() {
     if (kind !== null && !kinds().includes(kind)) setSelected(null);
   });
 
-  const current = () => preambles().find((p) => p.kind === selected());
+  const current = () => preambles().find(p => p.kind === selected());
   // Keyed by path, so saving (which replaces the preamble object) doesn't
   // remount the editor.
   const currentPath = createMemo(() => current()?.path);
@@ -191,7 +185,7 @@ export function PreambleSettings() {
   };
 
   const remove = async (kind: string) => {
-    const count = allNotes().filter((n) => n.kind === kind).length;
+    const count = allNotes().filter(n => n.kind === kind).length;
     const verb =
       settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
     const ok = await ask(
@@ -201,13 +195,6 @@ export function PreambleSettings() {
     if (!ok) return;
     await flushEditor?.();
     await deleteKind(kind);
-  };
-
-  const setKindFolder = (kind: string, folder: string | null) => {
-    const { [kind]: _, ...rest } = settings.kindFolders;
-    updateSettings({
-      kindFolders: folder === null ? rest : { ...rest, [kind]: folder },
-    });
   };
 
   return (
@@ -225,18 +212,18 @@ export function PreambleSettings() {
           class="setting-select"
           aria-label="Preamble"
           value={selected() ?? ''}
-          onChange={(e) => setSelected(e.currentTarget.value || null)}
+          onChange={e => setSelected(e.currentTarget.value || null)}
         >
           <option value="">Common (every note)</option>
           <For each={kinds()}>
-            {(kind) => <option value={kind}>Kind: {kind}</option>}
+            {kind => <option value={kind}>Kind: {kind}</option>}
           </For>
         </select>
         <button type="button" onClick={() => openForm({ mode: 'new' })}>
           <Plus size={14} /> New kind
         </button>
         <Show when={selected()}>
-          {(kind) => (
+          {kind => (
             <>
               <button
                 type="button"
@@ -256,10 +243,10 @@ export function PreambleSettings() {
         </Show>
       </div>
       <Show when={form()}>
-        {(f) => (
+        {f => (
           <form
             class="preamble-toolbar"
-            onSubmit={(e) => {
+            onSubmit={e => {
               e.preventDefault();
               void submitName(nameInput?.value.trim() ?? '');
             }}
@@ -284,35 +271,25 @@ export function PreambleSettings() {
         )}
       </Show>
       <Show when={selected()}>
-        {(kind) => (
-          <div class="setting">
-            <label class="setting-text" for="setting-kind-folder">
-              <span class="setting-name">Default folder</span>
-              <span class="setting-description">
-                Where "New note of kind" puts notes of this kind. Without one,
-                they go where Mod+N puts notes.
-              </span>
-            </label>
-            <select
-              id="setting-kind-folder"
-              class="setting-select"
-              value={settings.kindFolders[kind()] ?? '\u0000'}
-              onChange={(e) => {
-                const value = e.currentTarget.value;
-                setKindFolder(kind(), value === '\u0000' ? null : value);
-              }}
-            >
-              <option value={'\u0000'}>No default folder</option>
-              <option value="">Vault root</option>
-              <For each={allFolders()}>
-                {(folder) => <option value={folder.path}>{folder.path}</option>}
-              </For>
-            </select>
-          </div>
+        {kind => (
+          <SelectSetting
+            id="setting-kind-folder"
+            name="Default folder"
+            description='Where "New note of kind" puts notes of this kind. Without one, they go where Mod+N puts notes.'
+            value={settings.kindFolders[kind()] ?? NO_FOLDER}
+            options={[
+              { value: NO_FOLDER, label: 'No default folder' },
+              { value: '', label: 'Vault root' },
+              ...allFolders().map(f => ({ value: f.path, label: f.path })),
+            ]}
+            onChange={value =>
+              setKindFolder(kind(), value === NO_FOLDER ? null : value)
+            }
+          />
         )}
       </Show>
       <Show when={currentPath()} keyed>
-        {(path) => {
+        {path => {
           const preamble = untrack(current);
           return (
             <PreambleEditor

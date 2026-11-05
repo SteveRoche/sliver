@@ -141,8 +141,9 @@ pub fn preamble_warnings(text: &str) -> Vec<PreambleWarning> {
 /// The node holding the path of an import, an include or a call like `image(...)`.
 fn path_argument<'a>(node: &LinkedNode<'a>) -> Option<LinkedNode<'a>> {
     match node.kind() {
-        SyntaxKind::ModuleImport => node.children().find(|c| c.kind() == SyntaxKind::Str),
-        SyntaxKind::ModuleInclude => node.children().find(|c| c.kind() == SyntaxKind::Str),
+        SyntaxKind::ModuleImport | SyntaxKind::ModuleInclude => {
+            node.children().find(|c| c.kind() == SyntaxKind::Str)
+        }
         SyntaxKind::FuncCall => {
             let call = node.cast::<ast::FuncCall>()?;
             let ast::Expr::Ident(callee) = call.callee() else {

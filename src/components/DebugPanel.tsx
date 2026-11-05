@@ -13,10 +13,10 @@ const fmt = (ms: number | undefined) =>
  */
 export function DebugPanel() {
   const samples = createMemo(() =>
-    compiles().filter((s) => s.note === activeNote()),
+    compiles().filter(s => s.note === activeNote()),
   );
   const latest = () => samples()[samples().length - 1];
-  const worst = () => Math.max(0, ...samples().map((s) => s.totalMs));
+  const worst = () => Math.max(0, ...samples().map(s => s.totalMs));
   const scale = () => Math.max(16, worst());
 
   return (
@@ -30,7 +30,7 @@ export function DebugPanel() {
         </div>
         <div class="debug-bars" title="Edit → preview, last 60 compiles">
           <For each={samples()}>
-            {(s) => (
+            {s => (
               <span
                 class="debug-bar"
                 classList={{ slow: s.totalMs > 50 }}

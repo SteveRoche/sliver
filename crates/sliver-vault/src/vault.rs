@@ -1319,9 +1319,12 @@ mod tests {
         engine
             .set_source("/.sliver/main.typ", &preview.main)
             .unwrap();
-        let out = engine.compile("/.sliver/main.typ").unwrap();
+        let out = engine.compile("/.sliver/main.typ", true).unwrap();
         let messages = out.diagnostics.iter().map(|d| d.message.clone()).collect();
-        (out.pages.concat(), messages)
+        (
+            out.pages.into_iter().flatten().flatten().collect(),
+            messages,
+        )
     }
 
     #[test]

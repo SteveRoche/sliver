@@ -49,6 +49,7 @@ import {
 import {
   loadSettings,
   resetSettings,
+  setKindFolder,
   settings,
   updateSettings,
 } from './settings';
@@ -166,9 +167,9 @@ export const focusedTabs = () => focusedPane().tabs;
 export const activeNote = () => paneNote(focusedPane());
 
 /** Every open tab, in every pane. */
-export const allTabs = () => panes(layout.root).flatMap((p) => p.tabs);
+export const allTabs = () => panes(layout.root).flatMap(p => p.tabs);
 
-export const tabOf = (note: NoteId) => allTabs().find((t) => t.note === note);
+export const tabOf = (note: NoteId) => allTabs().find(t => t.note === note);
 
 /** The note the global preview shows. */
 export const globalPreviewNote = (): NoteId | null => {
@@ -178,7 +179,7 @@ export const globalPreviewNote = (): NoteId | null => {
   const shown =
     pane.mode !== 'read'
       ? pane
-      : panes(layout.root).find((p) => p.mode !== 'read');
+      : panes(layout.root).find(p => p.mode !== 'read');
   return shown ? paneNote(shown) : null;
 };
 
@@ -263,6 +264,8 @@ export function resolveTarget(target: string): NoteId | undefined {
 export const sessionFor = (id: NoteId) => sessions.get(id);
 
 const notePath = (id: NoteId) => `/notes/${id}.typ`;
+/** Must match `sliver_vault::preview_main_path`. */
+const previewMainPath = (id: NoteId) => `/.sliver/view/${id}.typ`;
 
 function createSession(id: NoteId): NoteSession {
   const [result, setResult] = createSignal<CompileResult>();
@@ -279,7 +282,7 @@ function createSession(id: NoteId): NoteSession {
 
   const saver = autosave(
     id,
-    (summary) => {
+    summary => {
       if (!saver.hasPending()) setDirty(false);
       const kindChanged = noteById(id)?.kind !== summary.kind;
       if (metadataChanged(summary)) void refreshTree();
@@ -287,7 +290,7 @@ function createSession(id: NoteId): NoteSession {
         void reloadMain().then(() => preview?.refresh());
       }
     },
-    (error) => console.error(`could not save ${id}:`, error),
+    error => console.error(`could not save ${id}:`, error),
     {
       enabled: () => settings.autosave,
       delayMs: () => settings.autosaveDelay,
@@ -299,27 +302,35 @@ function createSession(id: NoteId): NoteSession {
       vault.previewMain(id),
       vault.readNote(id),
     ]);
+    // Checked after each step: a closed tab has already removed its files.
+    if (disposed) return source;
     await typst.setPrefix(notePath(id), main.prefix);
+    if (disposed) return source;
     await typst.setSource(main.path, main.text);
+    if (disposed) return source;
     await sendPageWidth(id);
     mainPath = main.path;
     if (disposed) return source;
-    preview = livePreview(
-      typst,
-      notePath(id),
-      main.path,
-      (r, compiledText, timing) => {
+    preview = livePreview(typst, notePath(id), main.path, {
+      visible: () => visibleNotes().has(id),
+      onResult: (r, compiledText, timing) => {
         setResult(r);
-        if (r.pages.length > 0) setPages(r.pages);
+        if (r.pages) {
+          // Unchanged pages come back as null: keep what's shown.
+          const shown = pages();
+          setPages(r.pages.map((page, i) => page ?? shown[i] ?? ''));
+        } else if (!visibleNotes().has(id)) {
+          stalePreviews.add(id);
+        }
         setCompiled({
           text: compiledText,
-          diagnostics: r.diagnostics.filter((d) => d.path === notePath(id)),
+          diagnostics: r.diagnostics.filter(d => d.path === notePath(id)),
         });
         recordCompile({ note: id, ...timing });
       },
-      (error) =>
+      onError: error =>
         setResult({
-          pages: [],
+          pages: null,
           diagnostics: [
             { severity: 'error', message: error.message, hints: [] },
           ],
@@ -327,7 +338,7 @@ function createSession(id: NoteId): NoteSession {
           compileMs: 0,
           renderMs: 0,
         }),
-    );
+    });
     preview.update(source);
     return source;
   })();
@@ -412,7 +423,13 @@ function createSession(id: NoteId): NoteSession {
       if (discard) saver.cancel();
       else void saver.flush();
       preview?.dispose();
+      // Everything the worker holds for this note: its text, its wrapper
+      // (with the last layout and rendered page hashes) and its page width.
       void typst.removeSource(notePath(id));
+      void typst.removeSource(previewMainPath(id));
+      void typst.removeSource(pagePath(id));
+      pageWidths.delete(id);
+      stalePreviews.delete(id);
     },
   };
 }
@@ -460,7 +477,7 @@ async function closeVault() {
   setVaultRoot(null);
 }
 
-export async function refreshTree() {
+async function refreshTree() {
   setTree(await vault.tree());
   await loadLinks();
 }
@@ -473,7 +490,7 @@ export async function refreshLinks() {
 async function loadLinks() {
   const library = await vault.linkLibrary(settings.linkDisplay === 'address');
   await typst.setSource(library.path, library.text);
-  for (const session of sessions.values()) session.refresh();
+  invalidatePreviews();
 }
 
 // --- preview page ---
@@ -528,17 +545,21 @@ async function sendTheme() {
 }
 
 /** Recompiles the previews on screen now and the others when they're shown. */
-function invalidatePreviews() {
+/**
+ * Recompiles the previews on screen now and the others when they're shown;
+ * only `only`'s when given.
+ */
+function invalidatePreviews(only?: Iterable<NoteSession>) {
   const visible = visibleNotes();
-  for (const [id, session] of sessions) {
-    if (visible.has(id)) session.refresh();
-    else stalePreviews.add(id);
+  for (const session of only ?? sessions.values()) {
+    if (visible.has(session.id)) session.refresh();
+    else stalePreviews.add(session.id);
   }
 }
 
 createRoot(() =>
   createEffect(
-    on(isPreviewDark, () => void sendTheme().then(invalidatePreviews), {
+    on(isPreviewDark, () => void sendTheme().then(() => invalidatePreviews()), {
       defer: true,
     }),
   ),
@@ -558,7 +579,7 @@ export async function saveNote(id: NoteId) {
 }
 
 export async function flushAll() {
-  await Promise.all([...sessions.values()].map((s) => s.flush()));
+  await Promise.all([...sessions.values()].map(s => s.flush()));
 }
 
 // --- panes and tabs ---
@@ -590,10 +611,10 @@ export function openNote(id: NoteId) {
   }
   sessions.set(id, createSession(id));
   const target = focusedPane();
-  update((state) => {
+  update(state => {
     const pane = findPane(state.root, target.id);
     if (!pane) return;
-    const current = pane.tabs.find((t) => t.key === pane.active);
+    const current = pane.tabs.find(t => t.key === pane.active);
     if (current && current.note === null) {
       current.note = id;
     } else {
@@ -607,7 +628,7 @@ export function openNote(id: NoteId) {
 export function newTab() {
   const key = newTabKey();
   const target = focusedPane().id;
-  update((state) => {
+  update(state => {
     const pane = findPane(state.root, target);
     if (!pane) return;
     pane.tabs.push({ key, note: null });
@@ -619,7 +640,7 @@ export function newTab() {
 function detachTab(state: { root: LayoutNode }, key: string): Tab | undefined {
   const pane = paneOfTab(state.root, key);
   if (!pane) return undefined;
-  const position = pane.tabs.findIndex((t) => t.key === key);
+  const position = pane.tabs.findIndex(t => t.key === key);
   const [tab] = pane.tabs.splice(position, 1);
   if (pane.active === key) {
     pane.active =
@@ -634,32 +655,27 @@ function detachTab(state: { root: LayoutNode }, key: string): Tab | undefined {
 /** After the tree changed: a focused pane that's gone hands focus on. */
 function settleFocus(prefer?: string) {
   const all = panes(layout.root);
-  if (prefer && all.some((p) => p.id === prefer)) setFocusedId(prefer);
-  else if (!all.some((p) => p.id === focusedId())) setFocusedId(all[0].id);
+  if (prefer && all.some(p => p.id === prefer)) setFocusedId(prefer);
+  else if (!all.some(p => p.id === focusedId())) setFocusedId(all[0].id);
 }
 
 export async function closeTab(key: string, discard = false) {
   const pane = paneOfTab(layout.root, key);
-  const tab = pane?.tabs.find((t) => t.key === key);
+  const tab = pane?.tabs.find(t => t.key === key);
   if (!pane || !tab) return;
   const id = tab.note;
   const session = id ? sessions.get(id) : undefined;
   if (session && !discard) await session.flush();
   session?.dispose(discard);
-  if (id) {
-    sessions.delete(id);
-    stalePreviews.delete(id);
-    pageWidths.delete(id);
-    void typst.removeSource(pagePath(id));
-  }
-  update((state) => void detachTab(state, key));
+  if (id) sessions.delete(id);
+  update(state => void detachTab(state, key));
   settleFocus();
 }
 
 export function activateTab(key: string) {
   const pane = paneOfTab(layout.root, key);
   if (!pane) return;
-  update((state) => {
+  update(state => {
     const found = findPane(state.root, pane.id);
     if (found) found.active = key;
   });
@@ -670,14 +686,14 @@ export function activateTab(key: string) {
 export function cycleTab(delta: number) {
   const tabs = focusedTabs();
   if (tabs.length < 2) return;
-  const current = tabs.findIndex((t) => t.key === active());
+  const current = tabs.findIndex(t => t.key === active());
   activateTab(tabs[(current + delta + tabs.length) % tabs.length].key);
 }
 
 /** Reorders pane `paneId`'s tabs; `to` is the position without the moved tab. */
 export function moveTab(paneId: string, from: number, to: number) {
   if (from === to || from < 0 || to < 0) return;
-  update((state) => {
+  update(state => {
     const pane = findPane(state.root, paneId);
     if (!pane) return;
     const [moved] = pane.tabs.splice(from, 1);
@@ -704,7 +720,7 @@ export function dropTab(
     return;
   }
   let focus = targetId;
-  update((state) => {
+  update(state => {
     const tab = detachTab(state, key);
     if (!tab) return;
     if (zone === 'center') {
@@ -736,12 +752,12 @@ export async function closePane() {
 /** Focuses the pane after (`1`) or before (`-1`) the focused one. */
 export function cyclePane(delta: number) {
   const all = panes(layout.root);
-  const at = all.findIndex((p) => p.id === focusedPane().id);
+  const at = all.findIndex(p => p.id === focusedPane().id);
   focusPane(all[(at + delta + all.length) % all.length].id);
 }
 
 export function setPaneMode(paneId: string, mode: ViewMode) {
-  update((state) => {
+  update(state => {
     const pane = findPane(state.root, paneId);
     if (pane) pane.mode = mode;
   });
@@ -774,7 +790,7 @@ export function setPreviewLayout(value: PreviewLayout) {
 }
 
 export function setSplitSizes(splitId: string, sizes: number[]) {
-  update((state) => {
+  update(state => {
     const walk = (node: LayoutNode) => {
       if (node.kind !== 'split') return;
       if (node.id === splitId) node.sizes = sizes;
@@ -785,7 +801,7 @@ export function setSplitSizes(splitId: string, sizes: number[]) {
 }
 
 export function setPaneSplitSizes(paneId: string, sizes: number[]) {
-  update((state) => {
+  update(state => {
     const pane = findPane(state.root, paneId);
     if (pane) pane.sizes = sizes;
   });
@@ -797,8 +813,8 @@ export function setGlobalSizes(sizes: number[]) {
 }
 
 export function setFolderCollapsed(path: string, collapsed: boolean) {
-  setCollapsedFolders((list) =>
-    collapsed ? [...new Set([...list, path])] : list.filter((p) => p !== path),
+  setCollapsedFolders(list =>
+    collapsed ? [...new Set([...list, path])] : list.filter(p => p !== path),
   );
   persistWorkspace();
 }
@@ -815,7 +831,7 @@ function persistWorkspace() {
     if (!vaultRoot()) return;
     const file: WorkspaceFile = {
       layout: save(layout.root),
-      focused: panes(layout.root).findIndex((p) => p.id === focusedId()),
+      focused: panes(layout.root).findIndex(p => p.id === focusedId()),
       sizes: paneSizes(),
       collapsedFolders: collapsedFolders(),
       previewLayout: previewLayout(),
@@ -824,14 +840,14 @@ function persistWorkspace() {
     };
     vault
       .saveWorkspace(JSON.stringify(file))
-      .catch((error) => console.warn('could not save workspace:', error));
+      .catch(error => console.warn('could not save workspace:', error));
   }, 300);
 }
 
 async function restoreWorkspace() {
   // The fresh pane `closeVault` left, until a saved layout replaces it;
   // only now are this vault's settings loaded.
-  update((state) => {
+  update(state => {
     if (state.root.kind === 'pane') state.root.mode = settings.defaultViewMode;
   });
   const json = await vault.loadWorkspace().catch(() => null);
@@ -849,7 +865,7 @@ async function restoreWorkspace() {
     const seen = new Set<NoteId>();
     const root = restore(
       file.layout,
-      (id) => {
+      id => {
         if (!noteById(id) || seen.has(id)) return false;
         seen.add(id);
         return true;
@@ -935,8 +951,8 @@ export async function renameFolder(path: string, name: string) {
   if (target === path || target.startsWith(`${path}/`)) {
     updateSettings({ newNoteFolder: renamed + target.slice(path.length) });
   }
-  setCollapsedFolders((list) =>
-    list.map((p) =>
+  setCollapsedFolders(list =>
+    list.map(p =>
       p === path || p.startsWith(`${path}/`)
         ? renamed + p.slice(path.length)
         : p,
@@ -955,7 +971,7 @@ export async function deleteFolder(path: string) {
     }
   }
   await vault.deleteFolder(path, settings.deleteMode);
-  setCollapsedFolders((list) => list.filter((p) => !inside(p)));
+  setCollapsedFolders(list => list.filter(p => !inside(p)));
   persistWorkspace();
   await refreshTree();
 }
@@ -974,13 +990,13 @@ export { preambles };
 
 /** Kinds of notes, in name order. */
 export const kinds = () =>
-  preambles().flatMap((p) => (p.kind === null ? [] : [p.kind]));
+  preambles().flatMap(p => (p.kind === null ? [] : [p.kind]));
 
 /** Rereads the preambles and hands the ones that exist to the compiler. */
 async function loadPreambles() {
   const list = await vault.listPreambles();
   const gone = preambles().filter(
-    (old) => !list.some((p) => p.path === old.path && p.exists),
+    old => !list.some(p => p.path === old.path && p.exists),
   );
   for (const preamble of gone) await typst.removeSource(preamble.path);
   for (const preamble of list) {
@@ -994,9 +1010,10 @@ async function loadPreambles() {
  * `template`, so every open note refetches its own; then the visible
  * preview recompiles and the rest when shown.
  */
-async function reloadMains() {
-  await Promise.all([...sessions.values()].map((s) => s.reloadMain()));
-  invalidatePreviews();
+async function reloadMains(only?: NoteSession[]) {
+  const affected = only ?? [...sessions.values()];
+  await Promise.all(affected.map(s => s.reloadMain()));
+  invalidatePreviews(affected);
 }
 
 /** Saves a preamble (`kind` null: the common one) and recompiles with it. */
@@ -1005,16 +1022,24 @@ export async function savePreamble(
   text: string,
 ): Promise<PreambleWarning[]> {
   const warnings = await vault.savePreamble(kind, text);
-  const preamble = preambles().find((p) => p.kind === kind);
-  if (preamble) {
-    await typst.setSource(preamble.path, text);
-    setPreambles((list) =>
-      list.map((p) =>
-        p.kind === kind ? { ...p, text, exists: true, warnings } : p,
-      ),
+  const preamble = preambles().find(p => p.kind === kind);
+  if (!preamble) return warnings;
+  await typst.setSource(preamble.path, text);
+  setPreambles(list =>
+    list.map(p =>
+      p.kind === kind ? { ...p, text, exists: true, warnings } : p,
+    ),
+  );
+  if (!preamble.exists) {
+    // A new file: no note imports it yet, every wrapper may need it now.
+    await reloadMains();
+  } else {
+    // Only the notes whose last compile read it.
+    const mains = new Set(await typst.affectedMains(preamble.path));
+    await reloadMains(
+      [...sessions.values()].filter(s => mains.has(s.mainPath() ?? '')),
     );
   }
-  await reloadMains();
   return warnings;
 }
 
@@ -1031,8 +1056,8 @@ export async function renameKind(from: string, to: string) {
   const changed = await vault.renameKind(from, to);
   const folder = settings.kindFolders[from];
   if (folder !== undefined) {
-    const { [from]: _, ...rest } = settings.kindFolders;
-    updateSettings({ kindFolders: { ...rest, [to]: folder } });
+    setKindFolder(from, null);
+    setKindFolder(to, folder);
   }
   await loadPreambles();
   await reloadChanged(changed);
@@ -1042,10 +1067,7 @@ export async function renameKind(from: string, to: string) {
 /** Deletes a kind's preamble; its notes keep the kind and get a warning. */
 export async function deleteKind(name: string) {
   await vault.deleteKind(name, settings.deleteMode);
-  if (name in settings.kindFolders) {
-    const { [name]: _, ...rest } = settings.kindFolders;
-    updateSettings({ kindFolders: rest });
-  }
+  setKindFolder(name, null);
   await loadPreambles();
   await refreshTree();
   await reloadMains();
@@ -1062,9 +1084,15 @@ export async function setNoteKind(id: NoteId, kind: string | null) {
   invalidatePreviews();
 }
 
+/** The focused pane's note's session, which preamble analysis runs as part of. */
+const activeSession = () => {
+  const id = activeNote();
+  return id ? sessions.get(id) : undefined;
+};
+
 /**
  * Typst completions (or signature help) in a preamble's editor, analysed as
- * part of the visible note's preview; none while no note is open.
+ * part of the focused note's preview; none while no note is open.
  */
 export async function completePreamble(
   path: string,
@@ -1072,8 +1100,7 @@ export async function completePreamble(
   position: Position,
   explicit: boolean,
 ): Promise<Completions | null> {
-  const id = activeNote();
-  const main = id ? sessions.get(id)?.mainPath() : undefined;
+  const main = activeSession()?.mainPath();
   return main ? typst.complete(main, path, text, position, explicit) : null;
 }
 
@@ -1082,18 +1109,16 @@ export async function preambleSignature(
   text: string,
   position: Position,
 ): Promise<Signature | null> {
-  const id = activeNote();
-  const main = id ? sessions.get(id)?.mainPath() : undefined;
+  const main = activeSession()?.mainPath();
   return main ? typst.signature(main, path, text, position) : null;
 }
 
-/** The visible note's latest compile diagnostics located in `path`. */
+/** The focused note's latest compile diagnostics located in `path`. */
 export function diagnosticsIn(path: string): Diagnostic[] {
-  const id = activeNote();
-  const result = id ? sessions.get(id)?.result() : undefined;
-  return result?.diagnostics.filter((d) => d.path === path) ?? [];
+  const result = activeSession()?.result();
+  return result?.diagnostics.filter(d => d.path === path) ?? [];
 }
 
 /** Whether note `id`'s editor is on screen: its pane's active tab, not in reading mode. */
 export const isEditorShown = (id: NoteId) =>
-  panes(layout.root).some((p) => paneNote(p) === id && p.mode !== 'read');
+  panes(layout.root).some(p => paneNote(p) === id && p.mode !== 'read');

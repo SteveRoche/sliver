@@ -62,7 +62,7 @@ function decorations(
   const { selection } = view.state;
   const ranges = linksAt(view.state).map((link: LinkRange) => {
     const editing = selection.ranges.some(
-      (r) => r.from <= link.to && r.to >= link.from,
+      r => r.from <= link.to && r.to >= link.from,
     );
     if (editing) return sourceMark.range(link.from, link.to);
     const title = options.title(link.target);
@@ -77,7 +77,7 @@ function decorations(
 }
 
 function linkAt(view: EditorView, pos: number): LinkRange | undefined {
-  return linksAt(view.state).find((l) => l.from <= pos && pos <= l.to);
+  return linksAt(view.state).find(l => l.from <= pos && pos <= l.to);
 }
 
 export function wikilinks(options: WikilinkOptions): Extension {
@@ -95,15 +95,15 @@ export function wikilinks(options: WikilinkOptions): Extension {
           update.selectionSet ||
           update.startState.field(syntaxField) !==
             update.state.field(syntaxField) ||
-          update.transactions.some((tr) =>
-            tr.effects.some((e) => e.is(refreshWikilinks)),
+          update.transactions.some(tr =>
+            tr.effects.some(e => e.is(refreshWikilinks)),
           )
         ) {
           this.decorations = decorations(update.view, options);
         }
       }
     },
-    { decorations: (plugin) => plugin.decorations },
+    { decorations: plugin => plugin.decorations },
   );
 
   const clicks = EditorView.domEventHandlers({

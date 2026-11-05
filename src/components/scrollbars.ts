@@ -135,7 +135,7 @@ export function overlayScrollbar(el: HTMLElement): () => void {
   const watch = (node: Element) => resizes.observe(node);
   watch(el);
   for (const child of el.children) watch(child);
-  const mutations = new MutationObserver((records) => {
+  const mutations = new MutationObserver(records => {
     for (const record of records) {
       for (const node of record.addedNodes) {
         if (node instanceof Element) watch(node);

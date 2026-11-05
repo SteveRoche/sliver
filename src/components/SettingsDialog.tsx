@@ -1,4 +1,4 @@
-import { Combobox, createListCollection, Dialog, Switch } from '@ark-ui/solid';
+import { Dialog } from '@ark-ui/solid';
 import { ask } from '@tauri-apps/plugin-dialog';
 import Eye from 'lucide-solid/icons/eye';
 import FileCode from 'lucide-solid/icons/file-code';
@@ -10,11 +10,9 @@ import X from 'lucide-solid/icons/x';
 import {
   type Component,
   createEffect,
-  createMemo,
   createRoot,
   createSignal,
   For,
-  type JSX,
   Match,
   onCleanup,
   Switch as Pick,
@@ -27,12 +25,18 @@ import {
   settings,
   updateSettings,
 } from '../state/settings';
-import { allFolders, refreshLinks } from '../state/workspace';
+import { refreshLinks } from '../state/workspace';
 import { handleEditorEscape } from './Editor';
-import { fuzzyScore } from './Palette';
 import { PreambleSettings } from './PreambleSettings';
 import { MIN_PREVIEW_PX } from './Preview';
 import { withOverlayScrollbar } from './scrollbars';
+import {
+  FolderSetting,
+  NumberSetting,
+  SectionBody,
+  SelectSetting,
+  ToggleSetting,
+} from './settingControls';
 
 type SectionId = 'appearance' | 'editor' | 'preview' | 'notes' | 'preambles';
 
@@ -74,204 +78,11 @@ export const openSettings = (at?: SectionId) => {
   setOpen(true);
 };
 
-function SettingText(props: { name: string; description?: string }) {
-  return (
-    <>
-      <span class="setting-name">{props.name}</span>
-      {props.description && (
-        <span class="setting-description">{props.description}</span>
-      )}
-    </>
-  );
-}
-
-function ToggleSetting(props: {
-  name: string;
-  description?: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <Switch.Root
-      class="setting"
-      checked={props.checked}
-      onCheckedChange={(details) => props.onChange(details.checked)}
-    >
-      <Switch.Label class="setting-text">
-        <SettingText name={props.name} description={props.description} />
-      </Switch.Label>
-      <Switch.Control class="switch">
-        <Switch.Thumb class="switch-thumb" />
-      </Switch.Control>
-      <Switch.HiddenInput />
-    </Switch.Root>
-  );
-}
-
-function SelectSetting<T extends string>(props: {
-  id: string;
-  name: string;
-  description?: string;
-  value: T;
-  options: { value: T; label: string }[];
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div class="setting">
-      <label class="setting-text" for={props.id}>
-        <SettingText name={props.name} description={props.description} />
-      </label>
-      <select
-        id={props.id}
-        class="setting-select"
-        value={props.value}
-        onChange={(e) => props.onChange(e.currentTarget.value as T)}
-      >
-        <For each={props.options}>
-          {(option) => <option value={option.value}>{option.label}</option>}
-        </For>
-      </select>
-    </div>
-  );
-}
-
-function NumberSetting(props: {
-  id: string;
-  name: string;
-  description?: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  unit: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <div class="setting">
-      <label class="setting-text" for={props.id}>
-        <SettingText name={props.name} description={props.description} />
-      </label>
-      <span class="setting-number">
-        <input
-          id={props.id}
-          type="number"
-          class="setting-select"
-          value={props.value}
-          min={props.min}
-          max={props.max}
-          step={props.step}
-          onChange={(e) => {
-            const value = e.currentTarget.valueAsNumber;
-            if (Number.isNaN(value)) {
-              e.currentTarget.value = String(props.value);
-              return;
-            }
-            const clamped = Math.min(props.max, Math.max(props.min, value));
-            e.currentTarget.value = String(clamped);
-            props.onChange(clamped);
-          }}
-        />
-        {props.unit}
-      </span>
-    </div>
-  );
-}
-
-/** Picks a folder by fuzzy search over every folder in the vault. */
-function FolderSetting(props: {
-  id: string;
-  name: string;
-  description?: string;
-  value: string;
-  onChange: (path: string) => void;
-}) {
-  const [query, setQuery] = createSignal('');
-  const collection = createMemo(() => {
-    const folders = allFolders().map((f) => ({
-      label: f.path,
-      value: f.path,
-      zettelkasten: f.kind === 'zettelkasten',
-    }));
-    const q = query().trim();
-    const items = q
-      ? folders
-          .map((f) => ({ f, score: fuzzyScore(q, f.label) }))
-          .filter((e) => e.score !== null)
-          .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-          .map((e) => e.f)
-      : folders;
-    return createListCollection({ items });
-  });
-
-  return (
-    <div class="setting">
-      <label class="setting-text" for={props.id}>
-        <SettingText name={props.name} description={props.description} />
-      </label>
-      <Combobox.Root
-        class="folder-combobox"
-        collection={collection()}
-        ids={{ input: props.id }}
-        defaultValue={props.value ? [props.value] : []}
-        defaultInputValue={props.value}
-        placeholder="Search folders..."
-        openOnClick
-        inputBehavior="autohighlight"
-        onOpenChange={(details) => {
-          if (details.open) setQuery('');
-        }}
-        onInputValueChange={(details) => {
-          if (details.reason === 'input-change') setQuery(details.inputValue);
-        }}
-        onValueChange={(details) => {
-          const path = details.value[0];
-          if (path !== undefined) props.onChange(path);
-        }}
-      >
-        <Combobox.Control>
-          <Combobox.Input class="setting-select combobox-input" />
-        </Combobox.Control>
-        <Portal>
-          <Combobox.Positioner>
-            <Combobox.Content
-              class="combobox-content"
-              ref={withOverlayScrollbar}
-            >
-              <For each={collection().items}>
-                {(item) => (
-                  <Combobox.Item item={item} class="combobox-item">
-                    <Combobox.ItemText>{item.label}</Combobox.ItemText>
-                    <Show when={item.zettelkasten}>
-                      <span class="combobox-tag">Zettelkasten</span>
-                    </Show>
-                  </Combobox.Item>
-                )}
-              </For>
-              <Show when={collection().items.length === 0}>
-                <div class="combobox-empty">No folders match</div>
-              </Show>
-            </Combobox.Content>
-          </Combobox.Positioner>
-        </Portal>
-      </Combobox.Root>
-    </div>
-  );
-}
-
-function SectionBody(props: { title: string; children: JSX.Element }) {
-  return (
-    <section class="settings-section">
-      <h3 class="settings-section-title">{props.title}</h3>
-      {props.children}
-    </section>
-  );
-}
-
 export function SettingsDialog() {
   return (
     <Dialog.Root
       open={open()}
-      onOpenChange={(details) => setOpen(details.open)}
+      onOpenChange={details => setOpen(details.open)}
       closeOnEscape={false}
       lazyMount
       unmountOnExit
@@ -283,7 +94,7 @@ export function SettingsDialog() {
             <nav class="settings-nav" aria-label="Settings sections">
               <Dialog.Title class="settings-heading">Settings</Dialog.Title>
               <For each={SECTIONS}>
-                {(item) => (
+                {item => (
                   <button
                     type="button"
                     class="settings-nav-item"
@@ -342,7 +153,7 @@ export function SettingsDialog() {
                         { value: 'light', label: 'Light' },
                         { value: 'dark', label: 'Dark' },
                       ]}
-                      onChange={(theme) => updateSettings({ theme })}
+                      onChange={theme => updateSettings({ theme })}
                     />
                     <SelectSetting<Settings['previewTheme']>
                       id="setting-preview-theme"
@@ -354,7 +165,7 @@ export function SettingsDialog() {
                         { value: 'light', label: 'Light' },
                         { value: 'dark', label: 'Dark' },
                       ]}
-                      onChange={(previewTheme) =>
+                      onChange={previewTheme =>
                         updateSettings({ previewTheme })
                       }
                     />
@@ -366,13 +177,13 @@ export function SettingsDialog() {
                       name="Vim key bindings"
                       description="Edit notes with Vim motions and commands."
                       checked={settings.vim}
-                      onChange={(vim) => updateSettings({ vim })}
+                      onChange={vim => updateSettings({ vim })}
                     />
                     <ToggleSetting
                       name="Autosave"
                       description="Save notes while you type. When off, notes save on Mod+S and when their tab or the window closes."
                       checked={settings.autosave}
-                      onChange={(autosave) => updateSettings({ autosave })}
+                      onChange={autosave => updateSettings({ autosave })}
                     />
                     <Show when={settings.autosave}>
                       <NumberSetting
@@ -384,7 +195,7 @@ export function SettingsDialog() {
                         max={10000}
                         step={100}
                         unit="ms"
-                        onChange={(autosaveDelay) =>
+                        onChange={autosaveDelay =>
                           updateSettings({ autosaveDelay })
                         }
                       />
@@ -393,9 +204,7 @@ export function SettingsDialog() {
                       name="Line numbers"
                       description="Show line numbers beside the text."
                       checked={settings.lineNumbers}
-                      onChange={(lineNumbers) =>
-                        updateSettings({ lineNumbers })
-                      }
+                      onChange={lineNumbers => updateSettings({ lineNumbers })}
                     />
                   </SectionBody>
                 </Match>
@@ -410,7 +219,7 @@ export function SettingsDialog() {
                         { value: 'title', label: 'Note title' },
                         { value: 'address', label: 'Zettelkasten address' },
                       ]}
-                      onChange={(linkDisplay) => {
+                      onChange={linkDisplay => {
                         updateSettings({ linkDisplay });
                         void refreshLinks();
                       }}
@@ -425,7 +234,7 @@ export function SettingsDialog() {
                         { value: 'source', label: 'Editor only' },
                         { value: 'read', label: 'Reading view' },
                       ]}
-                      onChange={(defaultViewMode) =>
+                      onChange={defaultViewMode =>
                         updateSettings({ defaultViewMode })
                       }
                     />
@@ -433,7 +242,7 @@ export function SettingsDialog() {
                       name="Follow the cursor"
                       description="Scroll the preview to where the editor's cursor rests. Clicking the preview always jumps to the source."
                       checked={settings.previewFollowsCursor}
-                      onChange={(previewFollowsCursor) =>
+                      onChange={previewFollowsCursor =>
                         updateSettings({ previewFollowsCursor })
                       }
                     />
@@ -446,7 +255,7 @@ export function SettingsDialog() {
                       max={2000}
                       step={20}
                       unit="px"
-                      onChange={(maxPreviewWidth) =>
+                      onChange={maxPreviewWidth =>
                         updateSettings({ maxPreviewWidth })
                       }
                     />
@@ -470,7 +279,7 @@ export function SettingsDialog() {
                           label: 'In the folder specified below',
                         },
                       ]}
-                      onChange={(newNoteLocation) =>
+                      onChange={newNoteLocation =>
                         updateSettings({ newNoteLocation })
                       }
                     />
@@ -479,7 +288,7 @@ export function SettingsDialog() {
                         id="setting-new-note-folder"
                         name="Folder to create new notes in"
                         value={settings.newNoteFolder}
-                        onChange={(newNoteFolder) =>
+                        onChange={newNoteFolder =>
                           updateSettings({ newNoteFolder })
                         }
                       />
@@ -493,7 +302,7 @@ export function SettingsDialog() {
                         { value: 'trash', label: 'Move to system trash' },
                         { value: 'permanent', label: 'Delete permanently' },
                       ]}
-                      onChange={(deleteMode) => updateSettings({ deleteMode })}
+                      onChange={deleteMode => updateSettings({ deleteMode })}
                     />
                   </SectionBody>
                 </Match>

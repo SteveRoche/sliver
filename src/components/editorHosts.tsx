@@ -15,14 +15,17 @@ const hosts = new Map<NoteId, { el: HTMLElement; dispose: () => void }>();
 export function editorElement(id: NoteId): HTMLElement {
   let host = hosts.get(id);
   if (!host) {
-    // A wrapper to render into: what a component returns isn't always a
-    // single node (in dev, hot reloading wraps it).
+    // Rendered into an element made here: what a component returns isn't
+    // always a single node (in dev, hot reloading wraps it).
     const el = document.createElement('div');
-    el.className = 'editor-host';
-    const dispose = render(
-      () => <NoteTab id={id} hidden={!isEditorShown(id)} />,
-      el,
-    );
+    el.className = 'note-tab';
+    const dispose = render(() => {
+      const hidden = () => !isEditorShown(id);
+      createEffect(() => {
+        el.hidden = hidden();
+      });
+      return <NoteTab id={id} hidden={hidden()} />;
+    }, el);
     host = { el, dispose };
     hosts.set(id, host);
   }
@@ -32,7 +35,7 @@ export function editorElement(id: NoteId): HTMLElement {
 // Editors of notes no longer in any tab are destroyed.
 createRoot(() =>
   createEffect(() => {
-    const open = new Set(allTabs().flatMap((t) => (t.note ? [t.note] : [])));
+    const open = new Set(allTabs().flatMap(t => (t.note ? [t.note] : [])));
     for (const [id, host] of hosts) {
       if (open.has(id)) continue;
       host.dispose();

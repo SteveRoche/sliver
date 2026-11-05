@@ -1,15 +1,17 @@
-import init, {
-  type CompileOutput,
-  Compiler,
-  Severity,
-} from './pkg/sliver_typst.js';
+import init, { type Compiled, Compiler } from './pkg/sliver_typst.js';
 import type {
-  CompileResult,
+  CompletionItem,
+  Completions,
+  Diagnostic,
   FromWorker,
   HostReply,
   HostRequest,
+  PagePoint,
   Request,
   Response,
+  Signature,
+  SourceLocation,
+  WorkerCompile,
 } from './protocol';
 
 // The DOM lib types `self` as Window; this file only runs as a module worker.
@@ -31,7 +33,7 @@ function host(request: {
   spec: string;
 }): Promise<ArrayBuffer | null> {
   const hostId = nextHostId++;
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     hostReplies.set(hostId, resolve);
     post({ hostId, ...request } satisfies HostRequest);
   });
@@ -73,7 +75,7 @@ function ensurePackages(compiler: Compiler, specs: string[]) {
     const task = loadPackage(compiler, spec)
       .then(
         () => post({ event: 'packagesLoaded', specs: [spec] }),
-        (error) => {
+        error => {
           failedAt.set(spec, Date.now());
           console.warn(`could not load ${spec}:`, error);
         },
@@ -83,36 +85,76 @@ function ensurePackages(compiler: Compiler, specs: string[]) {
   }
 }
 
-// wasm-bindgen objects can't cross postMessage, so copy out the fields.
-// Each getter clones on the Rust side, so read each one once.
-function toResult(compiler: Compiler, out: CompileOutput): CompileResult {
-  const missing = out.missingPackages;
-  ensurePackages(compiler, missing);
-  const loadingPackages = missing.filter((spec) => loading.has(spec));
-  const result: CompileResult = {
-    pages: out.pages,
-    loadingPackages,
-    compileMs: out.compileMs,
-    renderMs: out.renderMs,
-    diagnostics: out.diagnostics
-      .map((d) => {
-        const range = d.range;
-        return {
-          severity: d.severity === Severity.Error ? 'error' : 'warning',
-          message: d.message,
-          hints: d.hints,
-          path: d.path,
-          range: range && {
-            start: { line: range.start.line, column: range.start.column },
-            end: { line: range.end.line, column: range.end.column },
-          },
-        } as const;
-      })
-      .filter((d) => !loadingPackages.some((spec) => d.message.includes(spec))),
-  };
-  out.free();
-  return result;
+/** Matches `NONE` in `wasm.rs`: a missing number. */
+const NONE = 0xffffffff;
+// Parameter flag bits, as in `wasm.rs`.
+const PARAM_NAMED = 1;
+const PARAM_POSITIONAL = 2;
+const PARAM_REQUIRED = 4;
+const PARAM_VARIADIC = 8;
+
+/**
+ * Calls `read` on a wasm result, then frees it whatever happens. Results are
+ * one object of flat arrays (see `wasm.rs`), so this is the only `free()`;
+ * each getter copies, so `read` takes each field once.
+ */
+function using<T extends { free(): void }, R>(value: T, read: (v: T) => R): R {
+  try {
+    return read(value);
+  } finally {
+    value.free();
+  }
 }
+
+function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
+  return using(out, out => {
+    const missing = out.missingPackages;
+    ensurePackages(compiler, missing);
+    const loadingPackages = missing.filter(spec => loading.has(spec));
+    const severities = out.diagnosticSeverities;
+    const messages = out.diagnosticMessages;
+    const paths = out.diagnosticPaths;
+    const ranges = out.diagnosticRanges;
+    const hints = out.diagnosticHints;
+    const hintCounts = out.diagnosticHintCounts;
+    const diagnostics: Diagnostic[] = [];
+    let hint = 0;
+    for (let i = 0; i < messages.length; i++) {
+      const own = hints.slice(hint, hint + hintCounts[i]);
+      hint += hintCounts[i];
+      // "Not found" errors of packages being fetched are left out.
+      if (loadingPackages.some(spec => messages[i].includes(spec))) continue;
+      const r = ranges.subarray(4 * i, 4 * i + 4);
+      diagnostics.push({
+        severity: severities[i] === 0 ? 'error' : 'warning',
+        message: messages[i],
+        hints: own,
+        path: paths[i] || undefined,
+        range:
+          r[0] === NONE
+            ? undefined
+            : {
+                start: { line: r[0], column: r[1] },
+                end: { line: r[2], column: r[3] },
+              },
+      });
+    }
+    return {
+      rendered: out.rendered,
+      pageCount: out.pageCount,
+      changedPages: [...out.changedPages],
+      svg: out.svg,
+      svgEnds: [...out.svgEnds],
+      diagnostics,
+      loadingPackages,
+      compileMs: out.compileMs,
+      renderMs: out.renderMs,
+    };
+  });
+}
+
+/** Buffers to transfer (not copy) with the current response. */
+let transfer: Transferable[] = [];
 
 function handle(compiler: Compiler, req: Request): unknown {
   switch (req.kind) {
@@ -122,8 +164,17 @@ function handle(compiler: Compiler, req: Request): unknown {
       return compiler.setPrefix(req.path, req.prefix);
     case 'removeSource':
       return compiler.removeSource(req.path);
-    case 'compile':
-      return toResult(compiler, compiler.compile(req.main));
+    case 'affectedMains':
+      return compiler.affectedMains(req.path);
+    case 'compile': {
+      if (req.source) compiler.setSource(req.source.path, req.source.text);
+      const result = toCompile(
+        compiler,
+        compiler.compile(req.main, req.render),
+      );
+      transfer = [result.svg.buffer];
+      return result;
+    }
     case 'complete': {
       const found = compiler.complete(
         req.main,
@@ -134,22 +185,21 @@ function handle(compiler: Compiler, req: Request): unknown {
         req.explicit,
       );
       if (!found) return null;
-      const from = found.from;
-      const completions = {
-        from: { line: from.line, column: from.column },
-        items: found.items.map((item) => {
-          const plain = {
-            kind: item.kind,
-            label: item.label,
-            apply: item.apply,
-            detail: item.detail,
-          };
-          item.free();
-          return plain;
-        }),
-      };
-      found.free();
-      return completions;
+      return using(found, found => {
+        const kinds = found.kinds;
+        const labels = found.labels;
+        const applies = found.applies;
+        const details = found.details;
+        return {
+          from: { line: found.fromLine, column: found.fromColumn },
+          items: labels.map((label, i) => ({
+            kind: kinds[i] as CompletionItem['kind'],
+            label,
+            apply: applies[i],
+            detail: details[i] || undefined,
+          })),
+        } satisfies Completions;
+      });
     }
     case 'signature': {
       const found = compiler.signature(
@@ -160,52 +210,55 @@ function handle(compiler: Compiler, req: Request): unknown {
         req.position.column,
       );
       if (!found) return null;
-      const signature = {
-        name: found.name,
-        docs: found.docs,
-        active: found.active,
-        params: found.params.map((p) => {
-          const plain = {
-            name: p.name,
-            types: p.types,
-            docs: p.docs,
-            named: p.named,
-            positional: p.positional,
-            required: p.required,
-            variadic: p.variadic,
-            default: p.default,
-          };
-          p.free();
-          return plain;
-        }),
-      };
-      found.free();
-      return signature;
+      return using(found, found => {
+        const names = found.paramNames;
+        const types = found.paramTypes;
+        const docs = found.paramDocs;
+        const defaults = found.paramDefaults;
+        const flags = found.paramFlags;
+        const active = found.active;
+        return {
+          name: found.name,
+          docs: found.docs || undefined,
+          active: active < 0 ? undefined : active,
+          params: names.map((name, i) => ({
+            name,
+            types: types[i],
+            docs: docs[i] || undefined,
+            default: defaults[i] || undefined,
+            named: (flags[i] & PARAM_NAMED) !== 0,
+            positional: (flags[i] & PARAM_POSITIONAL) !== 0,
+            required: (flags[i] & PARAM_REQUIRED) !== 0,
+            variadic: (flags[i] & PARAM_VARIADIC) !== 0,
+          })),
+        } satisfies Signature;
+      });
     }
     case 'jumpFromClick': {
       const found = compiler.jumpFromClick(req.main, req.page, req.x, req.y);
       if (!found) return null;
-      const position = found.position;
-      const location = {
-        path: found.path,
-        position: { line: position.line, column: position.column },
-      };
-      found.free();
-      return location;
+      return using(
+        found,
+        found =>
+          ({
+            path: found.path,
+            position: { line: found.line, column: found.column },
+          }) satisfies SourceLocation,
+      );
     }
-    case 'jumpFromCursor':
-      return compiler
-        .jumpFromCursor(
-          req.main,
-          req.path,
-          req.position.line,
-          req.position.column,
-        )
-        .map((point) => {
-          const plain = { page: point.page, x: point.x, y: point.y };
-          point.free();
-          return plain;
-        });
+    case 'jumpFromCursor': {
+      const flat = compiler.jumpFromCursor(
+        req.main,
+        req.path,
+        req.position.line,
+        req.position.column,
+      );
+      const points: PagePoint[] = [];
+      for (let i = 0; i + 2 < flat.length; i += 3) {
+        points.push({ page: flat[i], x: flat[i + 1], y: flat[i + 2] });
+      }
+      return points;
+    }
   }
 }
 
@@ -217,6 +270,7 @@ scope.onmessage = async (event: MessageEvent<Request | HostReply>) => {
     return;
   }
   let response: Response;
+  transfer = [];
   try {
     response = {
       id: message.id,
@@ -226,5 +280,5 @@ scope.onmessage = async (event: MessageEvent<Request | HostReply>) => {
   } catch (error) {
     response = { id: message.id, ok: false, error: String(error) };
   }
-  post(response);
+  post(response, transfer);
 };

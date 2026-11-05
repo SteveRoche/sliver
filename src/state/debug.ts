@@ -16,14 +16,14 @@ const [analyses, setAnalyses] = createSignal<number[]>([]);
 
 export { analyses, compiles, debugVisible };
 
-export const toggleDebug = () => setDebugVisible((v) => !v);
+export const toggleDebug = () => setDebugVisible(v => !v);
 
 export function recordCompile(sample: Sample) {
   if (!debugVisible()) return;
-  setCompiles((list) => [...list.slice(1 - KEEP), sample]);
+  setCompiles(list => [...list.slice(1 - KEEP), sample]);
 }
 
 export function recordAnalysis(ms: number) {
   if (!debugVisible()) return;
-  setAnalyses((list) => [...list.slice(1 - KEEP), ms]);
+  setAnalyses(list => [...list.slice(1 - KEEP), ms]);
 }

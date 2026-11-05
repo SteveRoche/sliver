@@ -48,7 +48,7 @@ export const syntaxField = StateField.define<SyntaxState>({
     return {
       highlights: value.highlights.map(tr.changes),
       links: value.links
-        .map((link) => {
+        .map(link => {
           const whole = map(link.from, link.to);
           const target = map(link.targetFrom, link.targetTo);
           return {
@@ -59,11 +59,11 @@ export const syntaxField = StateField.define<SyntaxState>({
             targetTo: target.to,
           };
         })
-        .filter((link) => link.from < link.to),
-      raw: value.raw.map((r) => map(r.from, r.to)),
+        .filter(link => link.from < link.to),
+      raw: value.raw.map(r => map(r.from, r.to)),
     };
   },
-  provide: (field) => EditorView.decorations.from(field, (s) => s.highlights),
+  provide: field => EditorView.decorations.from(field, s => s.highlights),
 });
 
 const marks = new Map<string, Decoration>();
@@ -95,7 +95,7 @@ function fromAnalysis(analysis: Analysis): SyntaxState {
 export const linksAt = (state: EditorState) => state.field(syntaxField).links;
 
 export const inRaw = (state: EditorState, pos: number) =>
-  state.field(syntaxField).raw.some((r) => r.from < pos && pos < r.to);
+  state.field(syntaxField).raw.some(r => r.from < pos && pos < r.to);
 
 const analyzer = ViewPlugin.fromClass(
   class {

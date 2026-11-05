@@ -18,9 +18,6 @@ use typst_ide::{CompletionKind, IdeWorld, Jump};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::wasm_bindgen;
-
 /// Long-lived compiler state shared by every open tab: the file map, fonts and
 /// the standard library. Each `compile` call picks one file as the main file.
 pub struct Engine {
@@ -38,6 +35,9 @@ pub struct Engine {
     /// Hidden whole lines compiled before a file's own text (a note's preamble
     /// imports). Positions crossing the API are in the file's own text.
     prefixes: HashMap<FileId, String>,
+    /// Hashes of each main file's last rendered pages, so unchanged pages
+    /// aren't rendered (or sent) again.
+    rendered: HashMap<FileId, Vec<u128>>,
 }
 
 #[derive(Debug)]
@@ -62,26 +62,24 @@ impl fmt::Display for InvalidPackage {
 
 impl std::error::Error for InvalidPackage {}
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone)]
 pub struct CompileOutput {
-    /// One SVG per page. Empty when compilation failed.
-    pub pages: Vec<String>,
+    /// One entry per page when the document was rendered: its SVG, or `None`
+    /// when the page is unchanged since this main file's last render. `None`
+    /// when nothing was rendered (the compile failed, or no render was asked
+    /// for), so the previous pages still stand.
+    pub pages: Option<Vec<Option<String>>>,
     pub diagnostics: Vec<Diagnostic>,
     /// Packages the document imports that aren't loaded yet, as
     /// `@namespace/name:version`. Load them with `add_package` and recompile.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = missingPackages))]
     pub missing_packages: Vec<String>,
     /// Time spent compiling (parse, evaluate, layout), in milliseconds.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = compileMs))]
     pub compile_ms: f64,
     /// Time spent rendering pages to SVG, in milliseconds.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderMs))]
     pub render_ms: f64,
 }
 
 /// A place in a source file, e.g. where a click in the preview came from.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceLocation {
     pub path: String,
@@ -89,14 +87,12 @@ pub struct SourceLocation {
 }
 
 /// Completions at a cursor: they replace the text from `from` to the cursor.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Completions {
     pub from: Position,
     pub items: Vec<CompletionItem>,
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionItem {
     /// `syntax`, `func`, `type`, `param`, `constant`, `path`, `package`,
@@ -109,7 +105,6 @@ pub struct CompletionItem {
 }
 
 /// A point on a rendered page, in points from its top left.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PagePoint {
     /// Zero-based.
@@ -118,7 +113,6 @@ pub struct PagePoint {
     pub y: f64,
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,
@@ -128,14 +122,12 @@ pub struct Diagnostic {
     pub range: Option<TextRange>,
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
     Warning,
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextRange {
     pub start: Position,
@@ -143,7 +135,6 @@ pub struct TextRange {
 }
 
 /// Zero-based; `column` counts UTF-16 code units to match JS strings and CodeMirror.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
     pub line: u32,
@@ -171,6 +162,7 @@ impl Engine {
             deps: HashMap::new(),
             documents: HashMap::new(),
             prefixes: HashMap::new(),
+            rendered: HashMap::new(),
         }
     }
 
@@ -259,6 +251,7 @@ impl Engine {
         self.prefixes.remove(&id);
         self.deps.remove(&id);
         self.documents.remove(&id);
+        self.rendered.remove(&id);
         Ok(())
     }
 
@@ -303,7 +296,10 @@ impl Engine {
             .collect())
     }
 
-    pub fn compile(&mut self, main: &str) -> Result<CompileOutput, InvalidPath> {
+    /// Compiles `main`. With `render`, pages that changed since its last
+    /// render are rendered to SVG; without, only diagnostics come back (for a
+    /// preview that isn't on screen).
+    pub fn compile(&mut self, main: &str, render: bool) -> Result<CompileOutput, InvalidPath> {
         let main = file_id(main)?;
         let world = self.world(main);
 
@@ -315,21 +311,29 @@ impl Engine {
             .iter()
             .map(|d| convert_diagnostic(&world, d))
             .collect();
-        let (pages, document) = match warned.output {
-            Ok(document) => {
-                let opts = SvgOptions::default();
-                let pages = document
-                    .pages()
-                    .iter()
-                    .map(|page| typst_svg::svg(page, &opts))
-                    .collect();
-                (pages, Some(document))
-            }
+        let document = match warned.output {
+            Ok(document) => Some(document),
             Err(errors) => {
                 diagnostics.extend(errors.iter().map(|d| convert_diagnostic(&world, d)));
-                (Vec::new(), None)
+                None
             }
         };
+        let pages = document.as_ref().filter(|_| render).map(|document| {
+            let opts = SvgOptions::default();
+            let previous = self.rendered.get(&main);
+            let hashes: Vec<u128> = document.pages().iter().map(typst::utils::hash128).collect();
+            let pages = document
+                .pages()
+                .iter()
+                .zip(&hashes)
+                .enumerate()
+                .map(|(i, (page, hash))| {
+                    let unchanged = previous.and_then(|p| p.get(i)) == Some(hash);
+                    (!unchanged).then(|| typst_svg::svg(page, &opts))
+                })
+                .collect();
+            (pages, hashes)
+        });
         let rendered = now_ms();
 
         let mut missing_packages: Vec<String> = world
@@ -342,6 +346,10 @@ impl Engine {
         missing_packages.sort();
         let accessed = world.accessed.into_inner().unwrap_or_default();
         self.deps.insert(main, accessed);
+        let pages = pages.map(|(pages, hashes)| {
+            self.rendered.insert(main, hashes);
+            pages
+        });
         // A failed compile keeps the last good layout, which the preview still shows.
         if let Some(document) = document {
             self.documents.insert(main, document);
@@ -511,7 +519,6 @@ impl Engine {
 }
 
 /// A function's signature, for signature help.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signature {
     pub name: String,
@@ -522,7 +529,6 @@ pub struct Signature {
     pub active: Option<u32>,
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamDoc {
     pub name: String,
@@ -688,6 +694,7 @@ fn signature_at(world: &CompileWorld, source: &Source, cursor: usize) -> Option<
 /// Milliseconds from an arbitrary start, for timing compiles.
 #[cfg(target_arch = "wasm32")]
 fn now_ms() -> f64 {
+    use wasm_bindgen::prelude::wasm_bindgen;
     #[wasm_bindgen]
     extern "C" {
         #[wasm_bindgen(js_namespace = performance, js_name = now)]
@@ -843,10 +850,11 @@ mod tests {
         engine
             .set_source("/main.typ", "= Hello\n#pagebreak()\nWorld")
             .unwrap();
-        let out = engine.compile("/main.typ").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        assert_eq!(out.pages.len(), 2);
-        assert!(out.pages[0].starts_with("<svg"));
+        let pages = out.pages.unwrap();
+        assert_eq!(pages.len(), 2);
+        assert!(pages[0].as_ref().unwrap().starts_with("<svg"));
     }
 
     #[test]
@@ -856,8 +864,8 @@ mod tests {
         engine
             .set_source("/main.typ", "ok\n\u{1D400} #nope")
             .unwrap();
-        let out = engine.compile("/main.typ").unwrap();
-        assert!(out.pages.is_empty());
+        let out = engine.compile("/main.typ", true).unwrap();
+        assert!(out.pages.is_none());
         let diag = &out.diagnostics[0];
         assert_eq!(diag.severity, Severity::Error);
         assert_eq!(diag.path.as_deref(), Some("/main.typ"));
@@ -867,10 +875,33 @@ mod tests {
     }
 
     #[test]
+    fn renders_only_changed_pages() {
+        let mut engine = Engine::new();
+        engine
+            .set_source("/main.typ", "One\n#pagebreak()\nTwo")
+            .unwrap();
+        assert!(engine.compile("/main.typ", false).unwrap().pages.is_none());
+        let first = engine.compile("/main.typ", true).unwrap().pages.unwrap();
+        assert!(first.iter().all(Option::is_some));
+        engine
+            .set_source("/main.typ", "One\n#pagebreak()\nTwo, changed")
+            .unwrap();
+        let second = engine.compile("/main.typ", true).unwrap().pages.unwrap();
+        assert!(second[0].is_none() && second[1].is_some());
+        // Forgetting the file forgets what was rendered.
+        engine.remove_source("/main.typ").unwrap();
+        engine
+            .set_source("/main.typ", "One\n#pagebreak()\nTwo, changed")
+            .unwrap();
+        let again = engine.compile("/main.typ", true).unwrap().pages.unwrap();
+        assert!(again.iter().all(Option::is_some));
+    }
+
+    #[test]
     fn missing_main_is_a_diagnostic() {
         let mut engine = Engine::new();
-        let out = engine.compile("/absent.typ").unwrap();
-        assert!(out.pages.is_empty());
+        let out = engine.compile("/absent.typ", true).unwrap();
+        assert!(out.pages.is_none());
         assert_eq!(out.diagnostics.len(), 1);
     }
 
@@ -882,8 +913,8 @@ mod tests {
             .set_source("/a.typ", "#import \"lib.typ\": x\n#x")
             .unwrap();
         engine.set_source("/b.typ", "standalone").unwrap();
-        engine.compile("/a.typ").unwrap();
-        engine.compile("/b.typ").unwrap();
+        engine.compile("/a.typ", true).unwrap();
+        engine.compile("/b.typ", true).unwrap();
 
         assert_eq!(engine.affected_mains("/lib.typ").unwrap(), vec!["/a.typ"]);
         let mut for_b = engine.affected_mains("/b.typ").unwrap();
@@ -895,10 +926,10 @@ mod tests {
     fn recompiles_after_edit() {
         let mut engine = Engine::new();
         engine.set_source("/main.typ", "#nope").unwrap();
-        assert!(engine.compile("/main.typ").unwrap().pages.is_empty());
+        assert!(engine.compile("/main.typ", true).unwrap().pages.is_none());
         engine.set_source("/main.typ", "fixed").unwrap();
-        let out = engine.compile("/main.typ").unwrap();
-        assert_eq!(out.pages.len(), 1);
+        let out = engine.compile("/main.typ", true).unwrap();
+        assert_eq!(out.pages.unwrap().len(), 1);
         assert!(out.diagnostics.is_empty());
     }
     #[test]
@@ -910,8 +941,8 @@ mod tests {
                 "#import \"@preview/demo:0.1.0\": hello\n#hello",
             )
             .unwrap();
-        let out = engine.compile("/main.typ").unwrap();
-        assert!(out.pages.is_empty());
+        let out = engine.compile("/main.typ", true).unwrap();
+        assert!(out.pages.is_none());
         assert_eq!(out.missing_packages, vec!["@preview/demo:0.1.0"]);
 
         let tar = crate::tar::tests::archive(&[
@@ -923,10 +954,10 @@ mod tests {
         ]);
         engine.add_package("@preview/demo:0.1.0", &tar).unwrap();
         assert!(engine.has_package("@preview/demo:0.1.0"));
-        let out = engine.compile("/main.typ").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.missing_packages.is_empty());
-        assert_eq!(out.pages.len(), 1);
+        assert_eq!(out.pages.unwrap().len(), 1);
     }
 
     #[test]
@@ -938,7 +969,7 @@ mod tests {
                 "#set page(width: 200pt, height: auto, margin: 10pt)\nFirst line\n\nSecond paragraph",
             )
             .unwrap();
-        let out = engine.compile("/main.typ").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(out.compile_ms >= 0.0 && out.render_ms >= 0.0);
 
@@ -1014,7 +1045,7 @@ mod tests {
         engine
             .set_prefix("/main.typ", "#import \"/lib.typ\": *")
             .unwrap();
-        let out = engine.compile("/main.typ").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
         // `shout` comes from the prefix; the error is on the text's own line 1.
         assert_eq!(out.diagnostics.len(), 1, "{:?}", out.diagnostics);
         let range = out.diagnostics[0].range.unwrap();
@@ -1032,7 +1063,7 @@ mod tests {
                 "#set page(width: 200pt, height: auto, margin: 10pt)\n#shout[hi] there",
             )
             .unwrap();
-        let out = engine.compile("/main.typ").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let points = engine
             .jump_from_cursor(
@@ -1064,7 +1095,7 @@ mod tests {
         assert!(found.items.iter().any(|c| c.label == "shout"));
 
         engine.set_prefix("/main.typ", "").unwrap();
-        let out = engine.compile("/main.typ").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
         assert_eq!(out.diagnostics.len(), 1, "unknown variable: shout");
     }
 

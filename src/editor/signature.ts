@@ -89,7 +89,7 @@ const signatureField = StateField.define<Tooltip | null>({
     if (!value || !tr.docChanged) return value;
     return { ...value, pos: tr.changes.mapPos(value.pos) };
   },
-  provide: (field) => showTooltip.from(field),
+  provide: field => showTooltip.from(field),
 });
 
 /**

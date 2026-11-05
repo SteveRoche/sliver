@@ -1,6 +1,6 @@
 import { Splitter, useSplitter } from '@ark-ui/solid';
 import { createEffect, For, type JSX, Show } from 'solid-js';
-import type { LayoutNode, Split } from '../state/layout';
+import { type LayoutNode, paneNote, type Split } from '../state/layout';
 import {
   focusedPane,
   focusPane,
@@ -128,7 +128,7 @@ function Weighted<T>(props: {
 function LayoutView(props: { node: LayoutNode }) {
   return (
     <Show when={props.node} keyed>
-      {(node) =>
+      {node =>
         node.kind === 'split' ? (
           <SplitView node={node} />
         ) : (
@@ -146,9 +146,9 @@ function SplitView(props: { node: Split }) {
       class="split"
       items={props.node.children}
       sizes={props.node.sizes}
-      onResize={(sizes) => setSplitSizes(props.node.id, sizes)}
+      onResize={sizes => setSplitSizes(props.node.id, sizes)}
     >
-      {(child) => <LayoutView node={child} />}
+      {child => <LayoutView node={child} />}
     </Weighted>
   );
 }
@@ -176,13 +176,10 @@ function NotePreview(props: { note: NoteId; jumps?: () => boolean }) {
   );
 }
 
-const activeNoteOf = (pane: Pane) =>
-  pane.tabs.find((t) => t.key === pane.active)?.note ?? null;
-
 /** One pane: its tab bar over its active note's editor and/or preview. */
 function PaneView(props: { pane: Pane }) {
   let slot!: HTMLDivElement;
-  const note = () => activeNoteOf(props.pane);
+  const note = () => paneNote(props.pane);
   const focused = () => focusedPane().id === props.pane.id;
   const showEditor = () => props.pane.mode !== 'read';
   const showPreview = () =>
@@ -247,7 +244,7 @@ function PaneView(props: { pane: Pane }) {
             }}
           >
             <Show when={note()} keyed>
-              {(id) => (
+              {id => (
                 <NotePreview
                   note={id}
                   jumps={() => props.pane.mode !== 'read'}
@@ -257,7 +254,7 @@ function PaneView(props: { pane: Pane }) {
           </div>
         </Show>
         <Show when={drop()}>
-          {(zone) => <div class={`drop-overlay drop-${zone()}`} />}
+          {zone => <div class={`drop-overlay drop-${zone()}`} />}
         </Show>
       </div>
     </div>
@@ -271,13 +268,11 @@ function GlobalPreview() {
     <div class="global-preview">
       <div class="preview-header">
         <Show when={note()}>
-          {(id) => (
-            <span class="preview-title">{noteLabel(noteById(id()))}</span>
-          )}
+          {id => <span class="preview-title">{noteLabel(noteById(id()))}</span>}
         </Show>
       </div>
       <Show when={note()} keyed>
-        {(id) => <NotePreview note={id} />}
+        {id => <NotePreview note={id} />}
       </Show>
     </div>
   );
@@ -290,7 +285,7 @@ export function Workspace() {
       { id: 'main', minSize: 30 },
     ],
     defaultSize: paneSizes(),
-    onResizeEnd: (details) => setSizes(details.size),
+    onResizeEnd: details => setSizes(details.size),
   });
 
   return (
@@ -300,7 +295,7 @@ export function Workspace() {
       </Splitter.Panel>
       <Splitter.ResizeTrigger
         id="sidebar:main"
-        class="resize-trigger"
+        class="divider divider-row"
         aria-label="Resize sidebar"
       />
       <Splitter.Panel id="main" class="pane main-area">
@@ -321,7 +316,7 @@ export function Workspace() {
             sizes={globalSizes()}
             onResize={setGlobalSizes}
           >
-            {(item) =>
+            {item =>
               item === 'panes' ? (
                 <LayoutView node={layout.root} />
               ) : (

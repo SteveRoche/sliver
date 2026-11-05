@@ -24,6 +24,6 @@ const run = (cm: CodeMirror, action: keyof VimActions) => {
 };
 
 CodeMirror.commands.save = (cm: CodeMirror) => run(cm, 'save');
-Vim.defineEx('quit', 'q', (cm) => run(cm as unknown as CodeMirror, 'quit'));
-Vim.defineEx('wq', 'wq', (cm) => run(cm as unknown as CodeMirror, 'quit'));
-Vim.defineEx('xit', 'x', (cm) => run(cm as unknown as CodeMirror, 'quit'));
+Vim.defineEx('quit', 'q', cm => run(cm as unknown as CodeMirror, 'quit'));
+Vim.defineEx('wq', 'wq', cm => run(cm as unknown as CodeMirror, 'quit'));
+Vim.defineEx('xit', 'x', cm => run(cm as unknown as CodeMirror, 'quit'));

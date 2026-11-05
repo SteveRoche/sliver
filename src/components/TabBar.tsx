@@ -68,14 +68,14 @@ function targetAt(x: number, y: number) {
   if (!paneEl || !pane) return null;
   const bar = el?.closest('.tab-bar');
   if (bar) {
-    const centers = [...bar.querySelectorAll('.tab')].map((t) => {
+    const centers = [...bar.querySelectorAll('.tab')].map(t => {
       const r = t.getBoundingClientRect();
       return r.left + r.width / 2;
     });
     return {
       pane,
       zone: 'center' as const,
-      index: centers.filter((c) => x > c).length,
+      index: centers.filter(c => x > c).length,
     };
   }
   const body = paneEl.querySelector('.pane-body')?.getBoundingClientRect();
@@ -126,14 +126,14 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
     event.preventDefault();
 
     const elements = [...list.querySelectorAll<HTMLElement>('.tab')];
-    const rects = elements.map((el) => el.getBoundingClientRect());
+    const rects = elements.map(el => el.getBoundingClientRect());
     const own = rects[from];
     const ownCenter = own.left + own.width / 2;
     // Midpoints of the other tabs at rest, measured once: shifted tabs
     // would otherwise feed back into the calculation.
     const otherCenters = rects
       .filter((_, i) => i !== from)
-      .map((r) => r.left + r.width / 2);
+      .map(r => r.left + r.width / 2);
     const barRect = bar.getBoundingClientRect();
     const startX = event.clientX;
     const startY = event.clientY;
@@ -150,7 +150,7 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
         move.clientX < barRect.left ||
         move.clientX > barRect.right;
       const center = ownCenter + dx;
-      const to = otherCenters.filter((c) => center > c).length;
+      const to = otherCenters.filter(c => center > c).length;
       setDrag({
         from,
         to,
@@ -231,12 +231,12 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
                     : undefined,
                 }}
                 title={tabLabel(tab)}
-                onPointerDown={(e) => startDrag(e, index(), tab)}
+                onPointerDown={e => startDrag(e, index(), tab)}
                 onClick={() => activateTab(tab.key)}
-                onKeyDown={(e) => {
+                onKeyDown={e => {
                   if (e.key === 'Enter' || e.key === ' ') activateTab(tab.key);
                 }}
-                onAuxClick={(e) => {
+                onAuxClick={e => {
                   if (e.button === 1) {
                     e.preventDefault();
                     void closeTab(tab.key);
@@ -248,7 +248,7 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
                   type="button"
                   class="tab-close"
                   aria-label="Close tab"
-                  onClick={(e) => {
+                  onClick={e => {
                     e.stopPropagation();
                     void closeTab(tab.key);
                   }}
@@ -265,10 +265,10 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
         <For
           each={MODES.filter(
             // With one shared preview, a pane has no preview of its own to hide.
-            (m) => previewLayout() === 'pane' || m.mode !== 'source',
+            m => previewLayout() === 'pane' || m.mode !== 'source',
           )}
         >
-          {(item) => (
+          {item => (
             <button
               type="button"
               class="icon-button pane-mode"
@@ -289,7 +289,7 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
         </For>
       </div>
       <Show when={drag()?.detached ? drag() : null}>
-        {(d) => (
+        {d => (
           <div
             class="tab-ghost"
             style={{ left: `${d().x + 12}px`, top: `${d().y + 8}px` }}

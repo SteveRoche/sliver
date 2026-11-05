@@ -15,6 +15,8 @@ import type {
 type Args<K extends keyof Calls> = Calls[K]['args'];
 type Result<K extends keyof Calls> = Calls[K]['result'];
 
+const decoder = new TextDecoder();
+
 /** Talks to the Typst compiler running in a Web Worker. */
 export class TypstClient {
   private worker = new Worker(new URL('./worker.ts', import.meta.url), {
@@ -59,8 +61,28 @@ export class TypstClient {
     return this.call('removeSource', { path });
   }
 
-  compile(main: string): Promise<CompileResult> {
-    return this.call('compile', { main });
+  /** Compiles `main`; with `render`, also renders its changed pages. */
+  async compile(
+    main: string,
+    render: boolean,
+    /** A source file to replace first, in the same message. */
+    source?: { path: string; text: string },
+  ): Promise<CompileResult> {
+    const raw = await this.call('compile', { main, render, source });
+    const { rendered, pageCount, changedPages, svg, svgEnds, ...stats } = raw;
+    if (!rendered) return { ...stats, pages: null };
+    const pages: (string | null)[] = new Array(pageCount).fill(null);
+    let start = 0;
+    changedPages.forEach((page, i) => {
+      pages[page] = decoder.decode(svg.subarray(start, svgEnds[i]));
+      start = svgEnds[i];
+    });
+    return { ...stats, pages };
+  }
+
+  /** Main files whose last compile read `path`, i.e. those a change to it affects. */
+  affectedMains(path: string): Promise<string[]> {
+    return this.call('affectedMains', { path });
   }
 
   /**
@@ -116,7 +138,7 @@ export class TypstClient {
     if (request.op === 'savePackage') {
       await this.packages
         .save(request.spec, request.data)
-        .catch((error) =>
+        .catch(error =>
           console.warn(`could not cache ${request.spec}:`, error),
         );
       return;
@@ -157,6 +179,24 @@ export interface LivePreview {
   dispose(): void;
 }
 
+/** How long typing must pause before a note whose preview isn't shown compiles. */
+const HIDDEN_DELAY_MS = 400;
+
+export interface LivePreviewOptions {
+  /**
+   * Whether the preview is on screen. If not, edits compile only after a
+   * pause and without rendering pages (diagnostics still come back).
+   */
+  visible: () => boolean;
+  /** `text` is the source the result was compiled from. */
+  onResult: (
+    result: CompileResult,
+    text: string,
+    timing: CompileTiming,
+  ) => void;
+  onError: (error: Error) => void;
+}
+
 /**
  * Keeps at most one compile in flight; edits made meanwhile are collapsed
  * into a single follow-up compile of the latest text, so typing never queues
@@ -168,20 +208,18 @@ export function livePreview(
   client: TypstClient,
   sourcePath: string,
   mainPath: string,
-  /** `text` is the source the result was compiled from. */
-  onResult: (
-    result: CompileResult,
-    text: string,
-    timing: CompileTiming,
-  ) => void,
-  onError: (error: Error) => void,
+  options: LivePreviewOptions,
 ): LivePreview {
   let running = false;
   let queued: string | undefined;
   let queuedAt = 0;
   let latest: string | undefined;
+  /** The text the engine has for `sourcePath`, so it's only sent when it changed. */
+  let sent: string | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
   const run = async (text: string) => {
+    clearTimeout(timer);
     latest = text;
     queued = text;
     queuedAt = performance.now();
@@ -192,16 +230,22 @@ export function livePreview(
         const next = queued;
         const since = queuedAt;
         queued = undefined;
-        await client.setSource(sourcePath, next);
-        const result = await client.compile(mainPath);
-        onResult(result, next, {
+        const source =
+          next === sent ? undefined : { path: sourcePath, text: next };
+        const result = await client.compile(
+          mainPath,
+          options.visible(),
+          source,
+        );
+        sent = next;
+        options.onResult(result, next, {
           compileMs: result.compileMs,
           renderMs: result.renderMs,
           totalMs: performance.now() - since,
         });
       }
     } catch (error) {
-      onError(error as Error);
+      options.onError(error as Error);
     } finally {
       running = false;
     }
@@ -212,9 +256,15 @@ export function livePreview(
   };
   const unsubscribe = client.onPackagesLoaded(refresh);
   return {
-    update: (text) => void run(text),
+    update: text => {
+      latest = text;
+      clearTimeout(timer);
+      if (options.visible()) void run(text);
+      else timer = setTimeout(() => void run(text), HIDDEN_DELAY_MS);
+    },
     refresh,
     dispose: () => {
+      clearTimeout(timer);
       unsubscribe();
     },
   };

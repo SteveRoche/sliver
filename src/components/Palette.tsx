@@ -46,7 +46,7 @@ export function pick<T>(
   choices: Choice<T>[],
 ): Promise<{ value: T } | null> {
   request()?.cancel?.();
-  return new Promise((resolve) =>
+  return new Promise(resolve =>
     setRequest({
       placeholder,
       items: () =>
@@ -86,15 +86,15 @@ export function fuzzyScore(query: string, text: string): number | null {
 
 function itemsFor(m: PaletteMode): Item[] {
   if (m === 'notes') {
-    return allNotes().map((note) => ({
+    return allNotes().map(note => ({
       key: note.id,
       label: noteLabel(note),
       run: () => openNote(note.id),
     }));
   }
   return availableCommands()
-    .filter((c) => !c.id.startsWith('palette.'))
-    .map((command) => ({
+    .filter(c => !c.id.startsWith('palette.'))
+    .map(command => ({
       key: command.id,
       label: command.title,
       keybinding: command.keybinding,
@@ -127,12 +127,12 @@ export function Palette() {
     const q = query().trim();
     if (!q) return all;
     return all
-      .map((item) => ({ item, score: fuzzyScore(q, item.label) }))
+      .map(item => ({ item, score: fuzzyScore(q, item.label) }))
       .filter(
         (entry): entry is { item: Item; score: number } => entry.score !== null,
       )
       .sort((a, b) => b.score - a.score)
-      .map((entry) => entry.item);
+      .map(entry => entry.item);
   });
 
   const close = () => {
@@ -177,7 +177,7 @@ export function Palette() {
   return (
     <Dialog.Root
       open={request() !== null}
-      onOpenChange={(details) => !details.open && close()}
+      onOpenChange={details => !details.open && close()}
       initialFocusEl={() => input ?? null}
       lazyMount
       unmountOnExit
@@ -197,7 +197,7 @@ export function Palette() {
                 aria-activedescendant={`palette-item-${highlighted()}`}
                 placeholder={request()?.placeholder}
                 value={query()}
-                onInput={(e) => {
+                onInput={e => {
                   setQuery(e.currentTarget.value);
                   setHighlighted(0);
                 }}
@@ -205,7 +205,7 @@ export function Palette() {
               />
             </div>
             <div
-              ref={(el) => {
+              ref={el => {
                 list = el;
                 withOverlayScrollbar(el);
               }}
@@ -222,12 +222,12 @@ export function Palette() {
                     tabIndex={-1}
                     aria-selected={i() === highlighted()}
                     class="palette-item"
-                    onPointerMove={(e) => hover(e, i())}
+                    onPointerMove={e => hover(e, i())}
                     onClick={() => choose(item)}
                   >
                     <span>{item.label}</span>
                     <Show when={item.keybinding}>
-                      {(keybinding) => <Keys keybinding={keybinding()} />}
+                      {keybinding => <Keys keybinding={keybinding()} />}
                     </Show>
                     <Show when={item.detail}>
                       <span class="palette-detail">{item.detail}</span>

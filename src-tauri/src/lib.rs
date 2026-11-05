@@ -32,7 +32,6 @@ pub fn run() {
             commands::plan_move,
             commands::apply_move,
             commands::backlinks,
-            commands::resolve_link,
             commands::link_library,
             commands::preview_main,
             commands::list_preambles,
