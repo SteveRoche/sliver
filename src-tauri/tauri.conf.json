@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sliver",
+  "productName": "Sliver",
   "version": "0.1.0",
   "identifier": "com.steve.sliver",
   "build": {

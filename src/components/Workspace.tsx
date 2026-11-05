@@ -1,6 +1,5 @@
-import { Splitter } from "@ark-ui/solid";
-import { For, Show } from "solid-js";
-import { formatKeybinding } from "../commands/registry";
+import { Splitter, useSplitter } from "@ark-ui/solid";
+import { For, onCleanup, Show } from "solid-js";
 import {
   active,
   activeNote,
@@ -10,10 +9,16 @@ import {
   setSizes,
   tabs,
 } from "../state/workspace";
+import { Keys } from "./Keys";
 import { NoteTab } from "./NoteTab";
-import { Preview } from "./Preview";
+import { MIN_PREVIEW_PX, Preview } from "./Preview";
 import { Sidebar } from "./Sidebar";
 import { TabBar } from "./TabBar";
+
+let togglePreviewPane: (() => void) | undefined;
+
+/** Shows or hides (collapses) the preview pane; a no-op without a workspace. */
+export const togglePreview = () => togglePreviewPane?.();
 
 export function Workspace() {
   const session = () => {
@@ -21,17 +26,35 @@ export function Workspace() {
     return id ? sessionFor(id) : undefined;
   };
 
+  const splitter = useSplitter({
+    panels: [
+      { id: "sidebar", minSize: 12, maxSize: 40 },
+      { id: "editor", minSize: 20 },
+      // Dragged below its minimum the preview collapses rather than squishing.
+      {
+        id: "preview",
+        minSize: `${MIN_PREVIEW_PX}px`,
+        collapsible: true,
+        collapsedSize: 0,
+      },
+    ],
+    defaultSize: paneSizes(),
+    onResizeEnd: (details) => setSizes(details.size),
+    onCollapse: () => setSizes(splitter().getSizes()),
+    onExpand: () => setSizes(splitter().getSizes()),
+  });
+
+  togglePreviewPane = () => {
+    const api = splitter();
+    if (api.isPanelCollapsed("preview")) api.expandPanel("preview");
+    else api.collapsePanel("preview");
+  };
+  onCleanup(() => {
+    togglePreviewPane = undefined;
+  });
+
   return (
-    <Splitter.Root
-      class="workspace"
-      panels={[
-        { id: "sidebar", minSize: 12, maxSize: 40 },
-        { id: "editor", minSize: 20 },
-        { id: "preview", minSize: 15 },
-      ]}
-      defaultSize={paneSizes()}
-      onResizeEnd={(details) => setSizes(details.size)}
-    >
+    <Splitter.RootProvider class="workspace" value={splitter}>
       <Splitter.Panel id="sidebar" class="pane">
         <Sidebar />
       </Splitter.Panel>
@@ -61,10 +84,11 @@ export function Workspace() {
       </Splitter.Panel>
       <Splitter.ResizeTrigger
         id="editor:preview"
-        class="resize-trigger"
+        class="resize-trigger preview-divider"
         aria-label="Resize preview"
       />
       <Splitter.Panel id="preview" class="pane">
+        <div class="preview-header" />
         <Preview
           pages={session()?.pages() ?? []}
           diagnostics={session()?.result()?.diagnostics ?? []}
@@ -72,7 +96,7 @@ export function Workspace() {
           onOpenNote={openNote}
         />
       </Splitter.Panel>
-    </Splitter.Root>
+    </Splitter.RootProvider>
   );
 }
 
@@ -82,9 +106,9 @@ function EmptyTab(props: { hidden: boolean }) {
     <div class="pane-message empty" hidden={props.hidden}>
       <p>No note open.</p>
       <p>
-        <kbd>{formatKeybinding("Mod+O")}</kbd> go to note &middot;{" "}
-        <kbd>{formatKeybinding("Mod+Shift+P")}</kbd> commands &middot;{" "}
-        <kbd>{formatKeybinding("Mod+N")}</kbd> new note
+        <Keys keybinding="Mod+O" /> go to note &middot;{" "}
+        <Keys keybinding="Mod+P" /> commands &middot;{" "}
+        <Keys keybinding="Mod+N" /> new note
       </p>
     </div>
   );

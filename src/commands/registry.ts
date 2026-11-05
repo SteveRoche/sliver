@@ -71,16 +71,14 @@ function matches(event: KeyboardEvent, chord: Chord): boolean {
   );
 }
 
-export function formatKeybinding(keybinding: string): string {
-  const parts = keybinding.split("+");
-  if (!isMac) return parts.map((p) => (p === "Mod" ? "Ctrl" : p)).join("+");
-  const symbols: Record<string, string> = {
-    Mod: "⌘",
-    Ctrl: "⌃",
-    Shift: "⇧",
-    Alt: "⌥",
-  };
-  return parts.map((p) => symbols[p] ?? p.toUpperCase()).join("");
+/** The keys of a keybinding as the platform labels them: `["⌘", "⇧", "P"]`. */
+export function keybindingKeys(keybinding: string): string[] {
+  const names: Record<string, string> = isMac
+    ? { Mod: "⌘", Ctrl: "⌃", Shift: "⇧", Alt: "⌥" }
+    : { Mod: "Ctrl", Alt: "Alt" };
+  return keybinding
+    .split("+")
+    .map((p) => names[p] ?? (p.length === 1 ? p.toUpperCase() : p));
 }
 
 /** Dispatches keybindings before the editor sees the key. */

@@ -1,18 +1,31 @@
 import type { EditorView } from "@codemirror/view";
-import { createMemo, createRoot, createSignal } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createRoot,
+  createSignal,
+  on,
+} from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { type LivePreview, livePreview } from "../typst/client";
 import { typst } from "../typst/instance";
 import type { CompileResult } from "../typst/protocol";
 import {
   autosave,
+  type FolderNode,
   type NoteId,
   type NoteSummary,
   type Placement,
   type TreeNode,
   vault,
 } from "../vault/api";
-import { settings } from "./settings";
+import {
+  loadSettings,
+  resetSettings,
+  settings,
+  updateSettings,
+} from "./settings";
+import { isPreviewDark } from "./theme";
 
 /** One open editor tab: its text, live preview and autosave. */
 export interface NoteSession {
@@ -41,17 +54,30 @@ interface WorkspaceFile {
   tabs: (NoteId | null)[];
   active: number;
   sizes?: number[];
+  collapsedFolders?: string[];
 }
 
+const EMPTY_ROOT: FolderNode = {
+  name: "",
+  path: "",
+  kind: "plain",
+  warning: null,
+  folders: [],
+  notes: [],
+};
+
 const [vaultRoot, setVaultRoot] = createSignal<string | null>(null);
-const [tree, setTree] = createSignal<TreeNode[]>([]);
+/** The vault root folder, holding every folder and note. */
+const [tree, setTree] = createSignal<FolderNode>(EMPTY_ROOT);
+/** Folder paths folded in the sidebar; folders are expanded by default. */
+const [collapsedFolders, setCollapsedFolders] = createSignal<string[]>([]);
 const [tabs, setTabs] = createStore<Tab[]>([]);
 /** Key of the active tab. */
 const [active, setActive] = createSignal<string | null>(null);
 const [paneSizes, setPaneSizes] = createSignal<number[]>([20, 40, 40]);
 const sessions = new Map<NoteId, NoteSession>();
 
-export { active, paneSizes, tabs, tree, vaultRoot };
+export { active, collapsedFolders, paneSizes, tabs, tree, vaultRoot };
 
 let nextTabKey = 0;
 const newTabKey = () => `tab-${nextTabKey++}`;
@@ -64,34 +90,46 @@ const index = createRoot(() =>
   createMemo(() => {
     const byId = new Map<NoteId, TreeNode>();
     const byAddress = new Map<string, NoteId>();
-    const walk = (nodes: TreeNode[]) => {
+    /** Notes in sidebar order, depth first. */
+    const notes: TreeNode[] = [];
+    const folders: FolderNode[] = [];
+    let zettelkasten: FolderNode | null = null;
+    const walkNotes = (nodes: TreeNode[]) => {
       for (const node of nodes) {
         byId.set(node.id, node);
+        notes.push(node);
         if (node.address && !byAddress.has(node.address)) {
           byAddress.set(node.address, node.id);
         }
-        walk(node.children);
+        walkNotes(node.children);
       }
     };
-    walk(tree());
-    return { byId, byAddress };
+    const walkFolder = (folder: FolderNode) => {
+      if (folder.kind === "zettelkasten") zettelkasten = folder;
+      for (const sub of folder.folders) {
+        folders.push(sub);
+        walkFolder(sub);
+      }
+      walkNotes(folder.notes);
+    };
+    walkFolder(tree());
+    return { byId, byAddress, notes, folders, zettelkasten };
   }),
 );
 
 export const noteById = (id: NoteId) => index().byId.get(id);
 
-/** Notes in tree order (depth first), for the quick switcher. */
-export function allNotes(): TreeNode[] {
-  const out: TreeNode[] = [];
-  const walk = (nodes: TreeNode[]) => {
-    for (const node of nodes) {
-      out.push(node);
-      walk(node.children);
-    }
-  };
-  walk(tree());
-  return out;
-}
+/** Notes in sidebar order, for the quick switcher. */
+export const allNotes = () => index().notes;
+
+/** Every folder except the root, in sidebar order. */
+export const allFolders = () => index().folders;
+
+/** The Zettelkasten folder, if the vault has one. */
+export const zettelkasten = (): FolderNode | null => index().zettelkasten;
+
+export const inZettelkasten = (id: NoteId) =>
+  noteById(id)?.folder === zettelkasten()?.path;
 
 export function noteLabel(note: NoteSummary | undefined): string {
   if (!note) return "Missing note";
@@ -225,7 +263,10 @@ export async function openVault(path: string, create = false) {
   await closeVault();
   const nodes = create ? await vault.create(path) : await vault.open(path);
   setTree(nodes);
+  await loadSettings();
   await loadLinks();
+  await sendPageWidth();
+  await sendTheme();
   await restoreWorkspace();
   // Last, so the workspace mounts with the restored tabs and pane sizes.
   setVaultRoot(path);
@@ -237,7 +278,9 @@ async function closeVault() {
   sessions.clear();
   setTabs([]);
   setActive(null);
-  setTree([]);
+  setTree(EMPTY_ROOT);
+  setCollapsedFolders([]);
+  resetSettings();
   setVaultRoot(null);
 }
 
@@ -256,6 +299,64 @@ async function loadLinks() {
   await typst.setSource(library.path, library.text);
   for (const session of sessions.values()) session.refresh();
 }
+
+// --- preview page ---
+
+/** Must match `sliver_vault::PAGE_PATH`, which the preview wrapper imports. */
+const PAGE_PATH = "/.sliver/page.typ";
+const PX_PER_PT = 4 / 3;
+/** Widths snap to this many points, so a resize drag compiles less often. */
+const PAGE_STEP_PT = 6;
+let pageWidthPt = 420;
+/** Open notes whose preview was compiled for an older page width. */
+const stalePreviews = new Set<NoteId>();
+
+function sendPageWidth() {
+  return typst.setSource(PAGE_PATH, `#let page-width = ${pageWidthPt}pt\n`);
+}
+
+/**
+ * Sets the preview's page width (CSS px). Only the visible note recompiles
+ * now; the others catch up when their tab is shown.
+ */
+export function setPreviewWidth(px: number) {
+  const pt = Math.max(
+    PAGE_STEP_PT,
+    Math.round(px / PX_PER_PT / PAGE_STEP_PT) * PAGE_STEP_PT,
+  );
+  if (pt === pageWidthPt) return;
+  pageWidthPt = pt;
+  void sendPageWidth().then(invalidatePreviews);
+}
+
+async function sendTheme() {
+  const theme = await vault.themeLibrary(isPreviewDark());
+  await typst.setSource(theme.path, theme.text);
+}
+
+/** Recompiles the visible preview now and the others when they're shown. */
+function invalidatePreviews() {
+  const visible = activeNote();
+  for (const [id, session] of sessions) {
+    if (id === visible) session.refresh();
+    else stalePreviews.add(id);
+  }
+}
+
+createRoot(() =>
+  createEffect(
+    on(isPreviewDark, () => void sendTheme().then(invalidatePreviews), {
+      defer: true,
+    }),
+  ),
+);
+
+createRoot(() =>
+  createEffect(() => {
+    const id = activeNote();
+    if (id && stalePreviews.delete(id)) sessions.get(id)?.refresh();
+  }),
+);
 
 export async function flushAll() {
   await Promise.all([...sessions.values()].map((s) => s.flush()));
@@ -299,7 +400,10 @@ export async function closeTab(key: string, discard = false) {
   const session = id ? sessions.get(id) : undefined;
   if (session && !discard) await session.flush();
   session?.dispose(discard);
-  if (id) sessions.delete(id);
+  if (id) {
+    sessions.delete(id);
+    stalePreviews.delete(id);
+  }
   setTabs((list) => list.filter((t) => t.key !== key));
   if (active() === key) {
     setActive(tabs[Math.min(position, tabs.length - 1)]?.key ?? null);
@@ -330,6 +434,13 @@ export function moveTab(from: number, to: number) {
   persistWorkspace();
 }
 
+export function setFolderCollapsed(path: string, collapsed: boolean) {
+  setCollapsedFolders((list) =>
+    collapsed ? [...new Set([...list, path])] : list.filter((p) => p !== path),
+  );
+  persistWorkspace();
+}
+
 export function setSizes(sizes: number[]) {
   setPaneSizes(sizes);
   persistWorkspace();
@@ -344,6 +455,7 @@ function persistWorkspace() {
       tabs: tabs.map((t) => t.note),
       active: tabs.findIndex((t) => t.key === active()),
       sizes: paneSizes(),
+      collapsedFolders: collapsedFolders(),
     };
     vault
       .saveWorkspace(JSON.stringify(file))
@@ -357,6 +469,9 @@ async function restoreWorkspace() {
   try {
     const file = JSON.parse(json) as WorkspaceFile;
     if (file.sizes?.length === 3) setPaneSizes(file.sizes);
+    if (Array.isArray(file.collapsedFolders)) {
+      setCollapsedFolders(file.collapsedFolders);
+    }
     for (const id of file.tabs) {
       if (id === null) newTab();
       else if (noteById(id)) {
@@ -392,5 +507,71 @@ export async function deleteNote(id: NoteId) {
   const tab = tabs.find((t) => t.note === id);
   if (tab) await closeTab(tab.key, true);
   await vault.deleteNote(id, settings.deleteMode);
+  await refreshTree();
+}
+
+/** Reloads notes whose files the backend rewrote into their open editors. */
+async function reloadChanged(ids: NoteId[]) {
+  for (const id of ids) {
+    const session = sessions.get(id);
+    if (session) session.replaceText(await vault.readNote(id));
+  }
+  await refreshTree();
+}
+
+/**
+ * Moves (files or re-addresses) a note to a Zettelkasten address. Unsaved
+ * edits are saved first: the move may rewrite links in any note.
+ */
+export async function moveToAddress(id: NoteId, placement: Placement) {
+  await flushAll();
+  await reloadChanged(await vault.applyMove(id, placement));
+}
+
+export async function moveToFolder(id: NoteId, folder: string) {
+  await flushAll();
+  await reloadChanged(await vault.moveToFolder(id, folder));
+}
+
+export async function createFolder(parent: string, name: string) {
+  const path = await vault.createFolder(parent, name);
+  setFolderCollapsed(parent, false);
+  await refreshTree();
+  return path;
+}
+
+export async function renameFolder(path: string, name: string) {
+  const renamed = await vault.renameFolder(path, name);
+  const target = settings.newNoteFolder;
+  if (target === path || target.startsWith(`${path}/`)) {
+    updateSettings({ newNoteFolder: renamed + target.slice(path.length) });
+  }
+  setCollapsedFolders((list) =>
+    list.map((p) =>
+      p === path || p.startsWith(`${path}/`)
+        ? renamed + p.slice(path.length)
+        : p,
+    ),
+  );
+  persistWorkspace();
+  await refreshTree();
+}
+
+export async function deleteFolder(path: string) {
+  const inside = (folder: string) =>
+    folder === path || folder.startsWith(`${path}/`);
+  for (const tab of [...tabs]) {
+    if (tab.note && inside(noteById(tab.note)?.folder ?? "")) {
+      await closeTab(tab.key, true);
+    }
+  }
+  await vault.deleteFolder(path, settings.deleteMode);
+  setCollapsedFolders((list) => list.filter((p) => !inside(p)));
+  persistWorkspace();
+  await refreshTree();
+}
+
+export async function setZettelkasten(path: string) {
+  await vault.setZettelkasten(path);
   await refreshTree();
 }

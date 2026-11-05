@@ -41,8 +41,8 @@ impl Address {
         (self.0.len() > 1).then(|| Address(self.0[..self.0.len() - 1].to_vec()))
     }
 
-    /// The next note in the same train of thought: `1.1a` -> `1.1b`.
-    pub fn continuation(&self) -> Address {
+    /// Same depth, one further along: `1.1a` -> `1.1b` (the place for an aside).
+    pub fn next_sibling(&self) -> Address {
         let mut segments = self.0.clone();
         if let Some(last) = segments.last_mut() {
             *last += 1;
@@ -50,8 +50,8 @@ impl Address {
         Address(segments)
     }
 
-    /// The first note branching off this one: `1` -> `1.1`, `1.1` -> `1.1a`, `1.1a` -> `1.1a1`.
-    pub fn branch(&self) -> Address {
+    /// One level deeper: `1` -> `1.1`, `1.1` -> `1.1a`, `1.1a` -> `1.1a1` (the place for a next note).
+    pub fn first_child(&self) -> Address {
         let mut segments = self.0.clone();
         segments.push(1);
         Address(segments)
@@ -59,6 +59,19 @@ impl Address {
 
     pub fn depth(&self) -> usize {
         self.0.len()
+    }
+
+    /// True for `prefix` itself and every address in its subtree.
+    pub fn starts_with(&self, prefix: &Address) -> bool {
+        self.0.starts_with(&prefix.0)
+    }
+
+    /// Moves an address in `from`'s subtree under `to`: `1.1a2` rebased from
+    /// `1.1a` to `3.1` is `3.1a`. Letter and number segments follow from the
+    /// depth, so nothing but the segment values carries over.
+    pub fn rebase(&self, from: &Address, to: &Address) -> Option<Address> {
+        let rest = self.0.strip_prefix(from.0.as_slice())?;
+        Some(Address([to.0.as_slice(), rest].concat()))
     }
 }
 
@@ -194,21 +207,21 @@ mod tests {
     }
 
     #[test]
-    fn continuation_increments_last_segment() {
-        assert_eq!(a("1").continuation(), a("2"));
-        assert_eq!(a("1.9").continuation(), a("1.10"));
-        assert_eq!(a("1.1a").continuation(), a("1.1b"));
-        assert_eq!(a("1.1z").continuation(), a("1.1aa"));
-        assert_eq!(a("1.1az").continuation(), a("1.1ba"));
-        assert_eq!(a("1.1a1").continuation(), a("1.1a2"));
+    fn next_sibling_increments_last_segment() {
+        assert_eq!(a("1").next_sibling(), a("2"));
+        assert_eq!(a("1.9").next_sibling(), a("1.10"));
+        assert_eq!(a("1.1a").next_sibling(), a("1.1b"));
+        assert_eq!(a("1.1z").next_sibling(), a("1.1aa"));
+        assert_eq!(a("1.1az").next_sibling(), a("1.1ba"));
+        assert_eq!(a("1.1a1").next_sibling(), a("1.1a2"));
     }
 
     #[test]
-    fn branch_appends_the_next_segment_kind() {
-        assert_eq!(a("1").branch(), a("1.1"));
-        assert_eq!(a("1.1").branch(), a("1.1a"));
-        assert_eq!(a("1.1a").branch(), a("1.1a1"));
-        assert_eq!(a("1.1a1").branch(), a("1.1a1a"));
+    fn first_child_appends_the_next_segment_kind() {
+        assert_eq!(a("1").first_child(), a("1.1"));
+        assert_eq!(a("1.1").first_child(), a("1.1a"));
+        assert_eq!(a("1.1a").first_child(), a("1.1a1"));
+        assert_eq!(a("1.1a1").first_child(), a("1.1a1a"));
     }
 
     #[test]
@@ -216,5 +229,14 @@ mod tests {
         assert_eq!(a("1.1a1").parent(), Some(a("1.1a")));
         assert_eq!(a("1.1").parent(), Some(a("1")));
         assert_eq!(a("1").parent(), None);
+    }
+
+    #[test]
+    fn rebase_moves_a_subtree() {
+        assert_eq!(a("1.1a2").rebase(&a("1.1a"), &a("3.1")), Some(a("3.1b")));
+        assert_eq!(a("1.1a").rebase(&a("1.1a"), &a("2")), Some(a("2")));
+        assert_eq!(a("1.2").rebase(&a("1.1"), &a("2")), None);
+        assert!(a("1.1a1").starts_with(&a("1.1")));
+        assert!(!a("1.10").starts_with(&a("1.1a")));
     }
 }

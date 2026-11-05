@@ -21,6 +21,7 @@ interface EditorProps {
   onChange: (text: string) => void;
   extensions?: Extension[];
   vim?: boolean;
+  lineNumbers?: boolean;
   onView?: (view: EditorView | undefined) => void;
 }
 
@@ -75,6 +76,9 @@ export function Editor(props: EditorProps) {
   let parent!: HTMLDivElement;
   // Vim must come before the other keymaps to see keys first.
   const vimMode = new Compartment();
+  const gutter = new Compartment();
+  const gutterFor = (on: boolean | undefined) =>
+    on ? [lineNumbers(), highlightActiveLineGutter()] : [];
 
   onMount(() => {
     const view = new EditorView({
@@ -83,9 +87,8 @@ export function Editor(props: EditorProps) {
         doc: props.initialDoc,
         extensions: [
           vimMode.of(props.vim ? vim() : []),
-          lineNumbers(),
+          gutter.of(gutterFor(props.lineNumbers)),
           highlightActiveLine(),
-          highlightActiveLineGutter(),
           drawSelection(),
           history(),
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
@@ -102,6 +105,11 @@ export function Editor(props: EditorProps) {
 
     createEffect(() => {
       view.dispatch({ effects: vimMode.reconfigure(props.vim ? vim() : []) });
+    });
+    createEffect(() => {
+      view.dispatch({
+        effects: gutter.reconfigure(gutterFor(props.lineNumbers)),
+      });
     });
 
     onCleanup(() => {

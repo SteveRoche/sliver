@@ -1,4 +1,15 @@
-import { For, Index, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createSignal,
+  For,
+  Index,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
+import { settings } from "../state/settings";
+import { isPreviewDark } from "../state/theme";
+import { setPreviewWidth } from "../state/workspace";
 import type { Diagnostic } from "../typst/protocol";
 import { LINK_SCHEME } from "./wikilinks";
 
@@ -10,6 +21,9 @@ interface PreviewProps {
   /** Called with the note id when a `sliver://` link is clicked. */
   onOpenNote?: (id: string) => void;
 }
+
+/** The narrowest the preview pane gets before it collapses instead. */
+export const MIN_PREVIEW_PX = 340;
 
 export function Preview(props: PreviewProps) {
   let container!: HTMLDivElement;
@@ -31,10 +45,29 @@ export function Preview(props: PreviewProps) {
   onMount(() => {
     container.addEventListener("click", onClick);
     onCleanup(() => container.removeEventListener("click", onClick));
+
+    // Pages are compiled as wide as the pane allows. Until a compile for a
+    // new width lands, CSS stretches the old SVG to fit (`.page svg`).
+    const [available, setAvailable] = createSignal(container.clientWidth);
+    const observer = new ResizeObserver(() =>
+      setAvailable(container.clientWidth),
+    );
+    observer.observe(container);
+    onCleanup(() => observer.disconnect());
+    createEffect(() => {
+      // A collapsed (or collapsing) pane keeps its last compile.
+      if (available() < MIN_PREVIEW_PX) return;
+      setPreviewWidth(Math.min(available(), settings.maxPreviewWidth));
+    });
   });
 
   return (
-    <div class="preview" ref={container}>
+    <div
+      class="preview"
+      ref={container}
+      data-preview-theme={isPreviewDark() ? "dark" : "light"}
+      style={{ "--max-page-width": `${settings.maxPreviewWidth}px` }}
+    >
       <Index each={props.pages}>
         {/* SVG comes from our own compiler, so innerHTML is safe here. */}
         {(svg) => <div class="page" innerHTML={svg()} />}

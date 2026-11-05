@@ -32,6 +32,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
               onView={(view) => s().attachView(view)}
               extensions={[linkClicks]}
               vim={settings.vim}
+              lineNumbers={settings.lineNumbers}
             />
           )}
         </Match>

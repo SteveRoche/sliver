@@ -2,8 +2,9 @@ import { Dialog } from "@ark-ui/solid";
 import Search from "lucide-solid/icons/search";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { availableCommands, formatKeybinding } from "../commands/registry";
+import { availableCommands } from "../commands/registry";
 import { allNotes, noteLabel, openNote } from "../state/workspace";
+import { Keys } from "./Keys";
 
 export type PaletteMode = "commands" | "notes";
 
@@ -11,11 +12,53 @@ interface Item {
   key: string;
   label: string;
   detail?: string;
+  keybinding?: string;
   run: () => unknown;
 }
 
-const [mode, setMode] = createSignal<PaletteMode | null>(null);
-export const openPalette = (m: PaletteMode) => setMode(m);
+interface Request {
+  placeholder: string;
+  items: () => Item[];
+  /** Called when the palette closes without a choice. */
+  cancel?: () => void;
+}
+
+const [request, setRequest] = createSignal<Request | null>(null);
+
+export function openPalette(mode: PaletteMode) {
+  request()?.cancel?.();
+  setRequest({
+    placeholder: mode === "notes" ? "Go to note..." : "Run a command...",
+    items: () => itemsFor(mode),
+  });
+}
+
+export interface Choice<T> {
+  label: string;
+  detail?: string;
+  value: T;
+}
+
+/** Lets the user pick one of `choices`; resolves to null when cancelled. */
+export function pick<T>(
+  placeholder: string,
+  choices: Choice<T>[],
+): Promise<{ value: T } | null> {
+  request()?.cancel?.();
+  return new Promise((resolve) =>
+    setRequest({
+      placeholder,
+      items: () =>
+        choices.map((choice, i) => ({
+          key: String(i),
+          label: choice.label,
+          detail: choice.detail,
+          run: () => resolve({ value: choice.value }),
+        })),
+      cancel: () => resolve(null),
+    }),
+  );
+}
 
 /**
  * Subsequence match with bonuses for consecutive characters and word starts;
@@ -53,7 +96,7 @@ function itemsFor(m: PaletteMode): Item[] {
     .map((command) => ({
       key: command.id,
       label: command.title,
-      detail: command.keybinding && formatKeybinding(command.keybinding),
+      keybinding: command.keybinding,
       run: command.run,
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
@@ -66,9 +109,9 @@ export function Palette() {
   let list: HTMLDivElement | undefined;
 
   const items = createMemo(() => {
-    const m = mode();
-    if (!m) return [];
-    const all = itemsFor(m);
+    const req = request();
+    if (!req) return [];
+    const all = req.items();
     const q = query().trim();
     if (!q) return all;
     return all
@@ -81,13 +124,15 @@ export function Palette() {
   });
 
   const close = () => {
-    setMode(null);
+    request()?.cancel?.();
+    setRequest(null);
     setQuery("");
     setHighlighted(0);
   };
 
   const choose = (item: Item | undefined) => {
     if (!item) return;
+    setRequest(null);
     close();
     // Let the dialog restore focus before the command moves it elsewhere.
     queueMicrotask(() => void item.run());
@@ -119,7 +164,7 @@ export function Palette() {
 
   return (
     <Dialog.Root
-      open={mode() !== null}
+      open={request() !== null}
       onOpenChange={(details) => !details.open && close()}
       initialFocusEl={() => input ?? null}
       lazyMount
@@ -138,9 +183,7 @@ export function Palette() {
                 aria-expanded="true"
                 aria-controls="palette-list"
                 aria-activedescendant={`palette-item-${highlighted()}`}
-                placeholder={
-                  mode() === "notes" ? "Go to note..." : "Run a command..."
-                }
+                placeholder={request()?.placeholder}
                 value={query()}
                 onInput={(e) => {
                   setQuery(e.currentTarget.value);
@@ -168,8 +211,11 @@ export function Palette() {
                     onClick={() => choose(item)}
                   >
                     <span>{item.label}</span>
+                    <Show when={item.keybinding}>
+                      {(keybinding) => <Keys keybinding={keybinding()} />}
+                    </Show>
                     <Show when={item.detail}>
-                      <kbd>{item.detail}</kbd>
+                      <span class="palette-detail">{item.detail}</span>
                     </Show>
                   </div>
                 )}

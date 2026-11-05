@@ -1,100 +1,198 @@
 import { createTreeCollection, Menu, TreeView } from "@ark-ui/solid";
 import ArrowDown from "lucide-solid/icons/arrow-down";
+import CornerDownRight from "lucide-solid/icons/corner-down-right";
 import FilePlus from "lucide-solid/icons/file-plus";
-import FoldVertical from "lucide-solid/icons/fold-vertical";
-import GitBranch from "lucide-solid/icons/git-branch";
+import Folder from "lucide-solid/icons/folder";
+import FolderInput from "lucide-solid/icons/folder-input";
+import FolderOpen from "lucide-solid/icons/folder-open";
+import FolderPen from "lucide-solid/icons/folder-pen";
+import FolderPlus from "lucide-solid/icons/folder-plus";
+import FolderX from "lucide-solid/icons/folder-x";
+import Library from "lucide-solid/icons/library";
+import Milestone from "lucide-solid/icons/milestone";
 import Pencil from "lucide-solid/icons/pencil";
 import Plus from "lucide-solid/icons/plus";
 import Trash2 from "lucide-solid/icons/trash";
 import TriangleAlert from "lucide-solid/icons/triangle-exclamation-point";
-import UnfoldVertical from "lucide-solid/icons/unfold-vertical";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createMemo,
+  createSignal,
+  For,
+  type JSX,
+  Match,
+  Show,
+  Switch,
+} from "solid-js";
 import { Portal } from "solid-js/web";
 import { runCommand } from "../commands/registry";
 import {
   activeNote,
+  collapsedFolders,
+  inZettelkasten,
   noteById,
   noteLabel,
   openNote,
+  setFolderCollapsed,
   tree,
+  zettelkasten,
 } from "../state/workspace";
-import type { NoteId, TreeNode } from "../vault/api";
+import type { FolderNode, NoteId, TreeNode } from "../vault/api";
 
-type Node = Omit<TreeNode, "children"> & { children?: Node[] };
+/** Row data for Ark's tree: folders and notes share one collection. */
+type Node =
+  | {
+      id: string;
+      kind: "folder";
+      folder: FolderNode;
+      depth: number;
+      children: Node[];
+    }
+  | {
+      id: string;
+      kind: "note";
+      note: TreeNode;
+      depth: number;
+      children?: Node[];
+    };
 
-/** Ark treats a node as a branch whenever it has a children array. */
-function toNodes(nodes: TreeNode[]): Node[] {
-  return nodes.map(({ children, ...note }) =>
-    children.length > 0 ? { ...note, children: toNodes(children) } : note,
-  );
+const FOLDER_PREFIX = "folder:";
+const folderId = (path: string) => FOLDER_PREFIX + path;
+
+function noteNodes(notes: TreeNode[], depth: number): Node[] {
+  return notes.map((note) => ({
+    id: note.id,
+    kind: "note",
+    note,
+    depth,
+    // Ark treats a node as a branch whenever it has a children array.
+    children:
+      note.children.length > 0 ? noteNodes(note.children, depth) : undefined,
+  }));
 }
 
-function branchIds(nodes: Node[], out: string[] = []): string[] {
+/** Subfolders indent like a file tree; trains of thought don't. */
+function folderContents(folder: FolderNode, depth: number): Node[] {
+  return [
+    ...folder.folders.map(
+      (sub): Node => ({
+        id: folderId(sub.path),
+        kind: "folder",
+        folder: sub,
+        depth,
+        children: folderContents(sub, depth + 1),
+      }),
+    ),
+    ...noteNodes(folder.notes, depth),
+  ];
+}
+
+function noteBranchIds(nodes: Node[], out: string[] = []): string[] {
   for (const node of nodes) {
-    if (node.children) {
-      out.push(node.id);
-      branchIds(node.children, out);
-    }
+    if (node.kind === "note" && node.children) out.push(node.id);
+    noteBranchIds(node.children ?? [], out);
   }
   return out;
 }
 
-/** The note the context menu acts on; menu commands read it. */
+/** What the context menu acts on; menu commands read these. */
 const [menuTarget, setMenuTarget] = createSignal<NoteId | null>(null);
+const [menuFolder, setMenuFolder] = createSignal<string | null>(null);
 
-export { menuTarget };
+export { menuFolder, menuTarget };
 
 export function Sidebar() {
-  const nodes = createMemo(() => toNodes(tree()));
+  const nodes = createMemo(() => folderContents(tree(), 0));
   const collection = createMemo(() =>
     createTreeCollection<Node>({
       nodeToValue: (node) => node.id,
-      nodeToString: (node) => noteLabel(node as TreeNode),
+      nodeToString: (node) =>
+        node.kind === "folder" ? node.folder.name : noteLabel(node.note),
       rootNode: {
         id: "root",
-        title: null,
-        address: null,
-        tags: [],
-        headerError: null,
+        kind: "folder",
+        folder: tree(),
+        depth: 0,
         children: nodes(),
       },
     }),
   );
 
-  // Branches start expanded; ones created later are expanded as they appear.
-  const [expanded, setExpanded] = createSignal<string[]>([]);
-  const seen = new Set<string>();
-  createEffect(() => {
-    const fresh = branchIds(nodes()).filter((id) => !seen.has(id));
-    for (const id of fresh) seen.add(id);
-    if (fresh.length) setExpanded((current) => [...current, ...fresh]);
+  // Trains of thought start unfolded; ones created later unfold as they appear.
+  const [foldedNotes, setFoldedNotes] = createSignal<string[]>([]);
+  const expanded = createMemo(() => {
+    const folded = new Set(foldedNotes());
+    const collapsed = new Set(collapsedFolders());
+    return [
+      ...noteBranchIds(nodes()).filter((id) => !folded.has(id)),
+      ...[tree(), ...allSubfolders(tree())]
+        .filter((f) => !collapsed.has(f.path))
+        .map((f) => folderId(f.path)),
+    ];
   });
+
+  const onExpandedChange = (open: string[]) => {
+    const isOpen = new Set(open);
+    const before = new Set(expanded());
+    for (const id of new Set([...before, ...isOpen])) {
+      if (before.has(id) === isOpen.has(id)) continue;
+      if (id.startsWith(FOLDER_PREFIX)) {
+        setFolderCollapsed(id.slice(FOLDER_PREFIX.length), !isOpen.has(id));
+      } else {
+        setFoldedNotes((list) =>
+          isOpen.has(id) ? list.filter((n) => n !== id) : [...list, id],
+        );
+      }
+    }
+  };
 
   const onContextMenu = (event: MouseEvent) => {
     const row = (event.target as Element).closest<HTMLElement>(
-      "[data-note-id]",
+      "[data-note-id], [data-folder-path]",
     );
     setMenuTarget(row?.dataset.noteId ?? null);
+    setMenuFolder(row?.dataset.folderPath ?? null);
   };
+
+  const targetNote = () => noteById(menuTarget() ?? "");
+  const targetFolder = () =>
+    allSubfolders(tree()).find((f) => f.path === menuFolder());
+  const isEmpty = () =>
+    tree().folders.length === 0 && tree().notes.length === 0;
 
   return (
     <aside class="sidebar">
       <div class="sidebar-header">
         <span>Notes</span>
-        <button
-          type="button"
-          class="icon-button"
-          title="New note"
-          aria-label="New note"
-          onClick={() => runCommand("note.new")}
-        >
-          <Plus size={16} />
-        </button>
+        <div class="sidebar-actions">
+          <button
+            type="button"
+            class="icon-button"
+            title="New folder"
+            aria-label="New folder"
+            onClick={() => runCommand("folder.new")}
+          >
+            <FolderPlus size={16} />
+          </button>
+          <button
+            type="button"
+            class="icon-button"
+            title="New note"
+            aria-label="New note"
+            onClick={() => runCommand("note.new")}
+          >
+            <Plus size={16} />
+          </button>
+        </div>
       </div>
       <Menu.Root
         onSelect={(details) => runCommand(details.value)}
         onOpenChange={(details) => {
-          if (!details.open) queueMicrotask(() => setMenuTarget(null));
+          if (!details.open) {
+            queueMicrotask(() => {
+              setMenuTarget(null);
+              setMenuFolder(null);
+            });
+          }
         }}
       >
         {/* A div, not Ark's default button: a button centres its content. */}
@@ -109,11 +207,13 @@ export function Sidebar() {
             selectedValue={activeNote() ? [activeNote() as string] : []}
             onSelectionChange={(details) => {
               const id = details.selectedValue[0];
-              if (id) openNote(id);
+              if (id && !id.startsWith(FOLDER_PREFIX)) openNote(id);
             }}
             expandOnClick={false}
             expandedValue={expanded()}
-            onExpandedChange={(details) => setExpanded(details.expandedValue)}
+            onExpandedChange={(details) =>
+              onExpandedChange(details.expandedValue)
+            }
           >
             <TreeView.Tree aria-label="Notes">
               <For each={collection().rootNode.children ?? []}>
@@ -123,41 +223,37 @@ export function Sidebar() {
               </For>
             </TreeView.Tree>
           </TreeView.Root>
-          <Show when={tree().length === 0}>
+          <Show when={isEmpty()}>
             <p class="pane-message">No notes yet. Press + to create one.</p>
           </Show>
         </Menu.ContextTrigger>
         <Portal>
           <Menu.Positioner>
             <Menu.Content class="menu">
-              <Show
-                when={menuTarget()}
+              <Switch
                 fallback={
-                  <Menu.Item value="note.new">
-                    <FilePlus size={14} /> New note
-                  </Menu.Item>
+                  <>
+                    <Menu.Item value="note.new">
+                      <FilePlus size={14} /> New note
+                    </Menu.Item>
+                    <Menu.Item value="folder.new">
+                      <FolderPlus size={14} /> New folder...
+                    </Menu.Item>
+                  </>
                 }
               >
-                <Menu.Item
-                  value="menu.continue"
-                  disabled={!noteById(menuTarget() ?? "")?.address}
-                >
-                  <ArrowDown size={14} /> New continuation
-                </Menu.Item>
-                <Menu.Item
-                  value="menu.branch"
-                  disabled={!noteById(menuTarget() ?? "")?.address}
-                >
-                  <GitBranch size={14} /> New branch
-                </Menu.Item>
-                <Menu.Separator class="menu-separator" />
-                <Menu.Item value="menu.rename">
-                  <Pencil size={14} /> Rename...
-                </Menu.Item>
-                <Menu.Item value="menu.delete" class="danger">
-                  <Trash2 size={14} /> Delete...
-                </Menu.Item>
-              </Show>
+                <Match when={targetNote()}>
+                  {(note) => (
+                    <NoteMenu
+                      addressed={!!note().address && inZettelkasten(note().id)}
+                      filed={inZettelkasten(note().id)}
+                    />
+                  )}
+                </Match>
+                <Match when={targetFolder()}>
+                  {(folder) => <FolderMenu folder={folder()} />}
+                </Match>
+              </Switch>
             </Menu.Content>
           </Menu.Positioner>
         </Portal>
@@ -166,65 +262,223 @@ export function Sidebar() {
   );
 }
 
+function allSubfolders(folder: FolderNode): FolderNode[] {
+  return folder.folders.flatMap((f) => [f, ...allSubfolders(f)]);
+}
+
+function NoteMenu(props: { addressed: boolean; filed: boolean }) {
+  return (
+    <>
+      <Show when={props.addressed}>
+        <Menu.Item value="menu.next">
+          <CornerDownRight size={14} /> New next note
+        </Menu.Item>
+        <Menu.Item value="menu.aside">
+          <ArrowDown size={14} /> New aside
+        </Menu.Item>
+        <Menu.Separator class="menu-separator" />
+      </Show>
+      <Menu.Item value="menu.moveToAddress" disabled={!zettelkasten()}>
+        <Milestone size={14} />{" "}
+        {props.filed ? "Move to address..." : "File into Zettelkasten..."}
+      </Menu.Item>
+      <Menu.Item value="menu.moveToFolder">
+        <FolderInput size={14} /> Move to folder...
+      </Menu.Item>
+      <Menu.Separator class="menu-separator" />
+      <Menu.Item value="menu.rename">
+        <Pencil size={14} /> Rename...
+      </Menu.Item>
+      <Menu.Item value="menu.delete" class="danger">
+        <Trash2 size={14} /> Delete...
+      </Menu.Item>
+    </>
+  );
+}
+
+function FolderMenu(props: { folder: FolderNode }) {
+  const isZettelkasten = () => props.folder.kind === "zettelkasten";
+  return (
+    <>
+      <Menu.Item value="folder.menu.newNote">
+        <FilePlus size={14} /> New note
+      </Menu.Item>
+      <Show when={!isZettelkasten()}>
+        <Menu.Item value="folder.menu.newFolder">
+          <FolderPlus size={14} /> New folder...
+        </Menu.Item>
+      </Show>
+      <Show when={!zettelkasten()}>
+        <Menu.Item value="folder.menu.setZettelkasten">
+          <Library size={14} /> Use as Zettelkasten
+        </Menu.Item>
+      </Show>
+      <Menu.Separator class="menu-separator" />
+      <Menu.Item value="folder.menu.rename">
+        <FolderPen size={14} /> Rename folder...
+      </Menu.Item>
+      <Show when={!isZettelkasten()}>
+        <Menu.Item value="folder.menu.delete" class="danger">
+          <FolderX size={14} /> Delete folder...
+        </Menu.Item>
+      </Show>
+    </>
+  );
+}
+
+function Warning(props: { message: string | null; label: string }) {
+  return (
+    <Show when={props.message}>
+      {(message) => (
+        <span class="note-warning" title={message()}>
+          <TriangleAlert size={12} aria-label={props.label} />
+        </span>
+      )}
+    </Show>
+  );
+}
+
 function NodeView(props: { node: Node; indexPath: number[] }) {
-  const label = () => (
-    <span class="note-label" data-note-id={props.node.id}>
-      <Show when={props.node.address}>
-        <span class="note-address">{props.node.address}</span>
-      </Show>
-      <span class="note-title">{props.node.title ?? "Untitled"}</span>
-      <Show when={props.node.headerError}>
-        {(error) => (
-          <span class="note-warning" title={error()}>
-            <TriangleAlert size={12} aria-label="Header error" />
-          </span>
+  const depthStyle = (): JSX.CSSProperties => ({
+    "--depth": String(props.node.depth),
+  });
+  return (
+    <TreeView.NodeProvider node={props.node} indexPath={props.indexPath}>
+      <Switch>
+        <Match when={props.node.kind === "folder" && props.node}>
+          {(node) => (
+            <FolderView
+              node={node() as Extract<Node, { kind: "folder" }>}
+              indexPath={props.indexPath}
+              style={depthStyle()}
+            />
+          )}
+        </Match>
+        <Match when={props.node.kind === "note" && props.node}>
+          {(node) => (
+            <NoteView
+              node={node() as Extract<Node, { kind: "note" }>}
+              indexPath={props.indexPath}
+              style={depthStyle()}
+            />
+          )}
+        </Match>
+      </Switch>
+    </TreeView.NodeProvider>
+  );
+}
+
+function Children(props: { nodes: Node[]; indexPath: number[] }) {
+  return (
+    <TreeView.BranchContent class="tree-children">
+      <For each={props.nodes}>
+        {(child, index) => (
+          <NodeView node={child} indexPath={[...props.indexPath, index()]} />
         )}
-      </Show>
-    </span>
+      </For>
+    </TreeView.BranchContent>
+  );
+}
+
+function FolderView(props: {
+  node: Extract<Node, { kind: "folder" }>;
+  indexPath: number[];
+  style: JSX.CSSProperties;
+}) {
+  const folder = () => props.node.folder;
+  return (
+    <TreeView.Branch>
+      <TreeView.BranchControl
+        class="tree-item folder-row"
+        style={props.style}
+        data-folder-path={folder().path}
+      >
+        {/* The whole row folds: a folder has nothing to open. */}
+        <TreeView.BranchTrigger class="folder-toggle">
+          <TreeView.NodeContext>
+            {(node) => (
+              <span class="folder-icon">
+                <Switch>
+                  <Match when={folder().kind === "zettelkasten"}>
+                    <Library size={14} aria-label="Zettelkasten" />
+                  </Match>
+                  <Match when={node().expanded}>
+                    <FolderOpen size={14} />
+                  </Match>
+                  <Match when={true}>
+                    <Folder size={14} />
+                  </Match>
+                </Switch>
+              </span>
+            )}
+          </TreeView.NodeContext>
+          <span class="note-title">{folder().name}</span>
+          <Warning message={folder().warning} label="Folder warning" />
+        </TreeView.BranchTrigger>
+      </TreeView.BranchControl>
+      <Children nodes={props.node.children} indexPath={props.indexPath} />
+    </TreeView.Branch>
+  );
+}
+
+function NoteView(props: {
+  node: Extract<Node, { kind: "note" }>;
+  indexPath: number[];
+  style: JSX.CSSProperties;
+}) {
+  const note = () => props.node.note;
+  const title = () => (
+    <>
+      <span class="note-title">{note().title ?? "Untitled"}</span>
+      <Warning message={note().headerError} label="Header error" />
+      <Warning message={note().warning} label="Note warning" />
+    </>
   );
 
   return (
-    <TreeView.NodeProvider node={props.node} indexPath={props.indexPath}>
-      <Show
-        when={props.node.children}
-        fallback={
-          <TreeView.Item class="tree-item">
-            <TreeView.ItemText class="tree-text">{label()}</TreeView.ItemText>
-          </TreeView.Item>
-        }
-      >
-        {(children) => (
-          <TreeView.Branch>
-            <TreeView.BranchControl class="tree-item">
-              {/* Only this toggles; clicking the rest of the row opens the note. */}
-              <TreeView.BranchTrigger class="tree-toggle">
-                <TreeView.NodeContext>
-                  {(node) =>
-                    node().expanded ? (
-                      <FoldVertical size={12} aria-label="Collapse" />
-                    ) : (
-                      <UnfoldVertical size={12} aria-label="Expand" />
-                    )
-                  }
-                </TreeView.NodeContext>
-              </TreeView.BranchTrigger>
-              <TreeView.BranchText class="tree-text">
-                {label()}
-              </TreeView.BranchText>
-            </TreeView.BranchControl>
-            <TreeView.BranchContent class="tree-children">
-              <For each={children()}>
-                {(child, index) => (
-                  <NodeView
-                    node={child}
-                    indexPath={[...props.indexPath, index()]}
-                  />
-                )}
-              </For>
-            </TreeView.BranchContent>
-          </TreeView.Branch>
-        )}
-      </Show>
-    </TreeView.NodeProvider>
+    <Show
+      when={props.node.children}
+      fallback={
+        <TreeView.Item
+          class="tree-item"
+          style={props.style}
+          data-note-id={note().id}
+        >
+          <TreeView.ItemText class="note-label">
+            <Show when={note().address}>
+              <span class="note-address">{note().address}</span>
+            </Show>
+            {title()}
+          </TreeView.ItemText>
+        </TreeView.Item>
+      }
+    >
+      {(children) => (
+        <TreeView.Branch>
+          <TreeView.BranchControl
+            class="tree-item"
+            style={props.style}
+            data-note-id={note().id}
+          >
+            {/* Only the address folds; the rest of the row opens the note.
+                Branches always have an address: only addressed notes have next notes. */}
+            <TreeView.NodeContext>
+              {(node) => (
+                <TreeView.BranchTrigger
+                  class="note-address fold-toggle"
+                  title={node().expanded ? "Fold" : "Unfold"}
+                >
+                  {note().address}
+                </TreeView.BranchTrigger>
+              )}
+            </TreeView.NodeContext>
+            <TreeView.BranchText class="note-label">
+              {title()}
+            </TreeView.BranchText>
+          </TreeView.BranchControl>
+          <Children nodes={children()} indexPath={props.indexPath} />
+        </TreeView.Branch>
+      )}
+    </Show>
   );
 }

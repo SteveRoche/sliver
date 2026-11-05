@@ -8,7 +8,6 @@ import { PromptHost } from "./components/Prompt";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Welcome } from "./components/Welcome";
 import { Workspace } from "./components/Workspace";
-import { loadSettings } from "./state/settings";
 import { flushAll, openVault, vaultRoot } from "./state/workspace";
 import { vault } from "./vault/api";
 
@@ -23,7 +22,6 @@ function App() {
     onCleanup(() => void unlisten.then((f) => f()));
 
     try {
-      await loadSettings();
       const last = await vault.last();
       if (last) await openVault(last);
     } catch (error) {

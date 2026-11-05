@@ -12,6 +12,7 @@ pub fn run() {
     let builder = builder.menu(menu::app_menu);
     builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(commands::OpenVault(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::create_vault,
@@ -23,14 +24,22 @@ pub fn run() {
             commands::write_note,
             commands::rename_note,
             commands::delete_note,
+            commands::create_folder,
+            commands::rename_folder,
+            commands::delete_folder,
+            commands::set_zettelkasten,
+            commands::move_to_folder,
+            commands::plan_move,
+            commands::apply_move,
             commands::backlinks,
             commands::resolve_link,
             commands::link_library,
             commands::preview_main,
+            commands::theme_library,
             commands::load_workspace,
             commands::save_workspace,
-            commands::get_settings,
-            commands::set_settings,
+            commands::load_settings,
+            commands::save_settings,
             commands::load_package,
             commands::save_package,
         ])

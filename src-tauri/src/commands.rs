@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use sliver_vault::{DeleteMode, LinkDisplay, NoteSummary, Placement, TreeNode, Uuid, Vault};
+use sliver_vault::{
+    DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary, Placement, Uuid, Vault,
+};
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, State};
 
@@ -29,7 +31,7 @@ fn with_vault<T>(
     f(vault).map_err(|e| e.to_string())
 }
 
-fn activate(app: &AppHandle, open: &OpenVault, vault: Vault) -> CommandResult<Vec<TreeNode>> {
+fn activate(app: &AppHandle, open: &OpenVault, vault: Vault) -> CommandResult<FolderNode> {
     let tree = vault.tree();
     let mut app_state = state::load(app);
     app_state.last_vault = Some(vault.root().to_path_buf());
@@ -43,7 +45,7 @@ pub async fn create_vault(
     app: AppHandle,
     open: State<'_, OpenVault>,
     path: PathBuf,
-) -> CommandResult<Vec<TreeNode>> {
+) -> CommandResult<FolderNode> {
     let vault = Vault::create(path).map_err(|e| e.to_string())?;
     activate(&app, &open, vault)
 }
@@ -53,7 +55,7 @@ pub async fn open_vault(
     app: AppHandle,
     open: State<'_, OpenVault>,
     path: PathBuf,
-) -> CommandResult<Vec<TreeNode>> {
+) -> CommandResult<FolderNode> {
     let vault = Vault::open(path).map_err(|e| e.to_string())?;
     activate(&app, &open, vault)
 }
@@ -65,7 +67,7 @@ pub async fn last_vault(app: AppHandle) -> Option<PathBuf> {
 }
 
 #[tauri::command]
-pub async fn list_tree(open: State<'_, OpenVault>) -> CommandResult<Vec<TreeNode>> {
+pub async fn list_tree(open: State<'_, OpenVault>) -> CommandResult<FolderNode> {
     with_vault(&open, |vault| Ok(vault.tree()))
 }
 
@@ -114,6 +116,70 @@ pub async fn delete_note(
 }
 
 #[tauri::command]
+pub async fn create_folder(
+    open: State<'_, OpenVault>,
+    parent: String,
+    name: String,
+) -> CommandResult<String> {
+    with_vault(&open, |vault| vault.create_folder(&parent, &name))
+}
+
+#[tauri::command]
+pub async fn rename_folder(
+    open: State<'_, OpenVault>,
+    path: String,
+    name: String,
+) -> CommandResult<String> {
+    with_vault(&open, |vault| vault.rename_folder(&path, &name))
+}
+
+/// Returns the ids of the notes deleted with the folder.
+#[tauri::command]
+pub async fn delete_folder(
+    open: State<'_, OpenVault>,
+    path: String,
+    mode: Option<DeleteMode>,
+) -> CommandResult<Vec<Uuid>> {
+    with_vault(&open, |vault| {
+        vault.delete_folder(&path, mode.unwrap_or_default())
+    })
+}
+
+#[tauri::command]
+pub async fn set_zettelkasten(open: State<'_, OpenVault>, path: String) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.set_zettelkasten(&path))
+}
+
+/// Returns the ids of every note whose file changed.
+#[tauri::command]
+pub async fn move_to_folder(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    folder: String,
+) -> CommandResult<Vec<Uuid>> {
+    with_vault(&open, |vault| vault.move_to_folder(id, &folder))
+}
+
+#[tauri::command]
+pub async fn plan_move(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    placement: Placement,
+) -> CommandResult<MovePlan> {
+    with_vault(&open, |vault| vault.plan_move(id, &placement))
+}
+
+/// Returns the ids of every note whose file changed.
+#[tauri::command]
+pub async fn apply_move(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    placement: Placement,
+) -> CommandResult<Vec<Uuid>> {
+    with_vault(&open, |vault| vault.apply_move(id, &placement))
+}
+
+#[tauri::command]
 pub async fn backlinks(open: State<'_, OpenVault>, id: Uuid) -> CommandResult<Vec<NoteSummary>> {
     with_vault(&open, |vault| vault.backlinks(id))
 }
@@ -152,6 +218,15 @@ pub async fn link_library(
     })
 }
 
+/// `/.sliver/theme.typ` for the preview: the current app theme's colours.
+#[tauri::command]
+pub async fn theme_library(dark: bool) -> SourceFile {
+    SourceFile {
+        path: sliver_vault::THEME_PATH.to_owned(),
+        text: sliver_vault::theme_library(dark),
+    }
+}
+
 /// The wrapper main the preview compiles for note `id`.
 #[tauri::command]
 pub async fn preview_main(open: State<'_, OpenVault>, id: Uuid) -> CommandResult<SourceFile> {
@@ -175,16 +250,15 @@ pub async fn save_workspace(open: State<'_, OpenVault>, json: String) -> Command
     with_vault(&open, |vault| vault.save_workspace(&json))
 }
 
+/// The open vault's settings as JSON; the schema (and defaults) belong to the frontend.
 #[tauri::command]
-pub async fn get_settings(app: AppHandle) -> serde_json::Value {
-    state::load(&app).settings
+pub async fn load_settings(open: State<'_, OpenVault>) -> CommandResult<Option<String>> {
+    with_vault(&open, |vault| vault.load_settings())
 }
 
 #[tauri::command]
-pub async fn set_settings(app: AppHandle, settings: serde_json::Value) -> CommandResult<()> {
-    let mut app_state = state::load(&app);
-    app_state.settings = settings;
-    state::save(&app, &app_state)
+pub async fn save_settings(open: State<'_, OpenVault>, json: String) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.save_settings(&json))
 }
 
 /// The vault's cached `.tar.gz` for a package as raw bytes; empty if there is

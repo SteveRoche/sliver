@@ -81,12 +81,24 @@ pub fn format_header(header: &NoteHeader) -> String {
 /// note (and any unknown header fields) is left byte-for-byte intact. Adds a
 /// header if the note has none.
 pub fn set_title(text: &str, title: &str) -> Result<String, HeaderError> {
+    set_field(text, "title", Some(title))
+}
+
+/// Sets or (with `None`) removes the header's `address`, like [`set_title`].
+pub fn set_address(text: &str, address: Option<&str>) -> Result<String, HeaderError> {
+    set_field(text, "address", address)
+}
+
+fn set_field(text: &str, field: &str, value: Option<&str>) -> Result<String, HeaderError> {
     let source = Source::detached(text);
     let Some(call) = find_header(source.root()) else {
-        let header = format_header(&NoteHeader {
-            title: Some(title.to_owned()),
-            ..NoteHeader::default()
-        });
+        let Some(value) = value else {
+            return Ok(text.to_owned());
+        };
+        let header = format!(
+            "#metadata(({field}: {})) <{HEADER_LABEL}>",
+            string_literal(value)
+        );
         return Ok(format!("{header}\n{text}"));
     };
     let dict = header_dict(call)?;
@@ -97,21 +109,43 @@ pub fn set_title(text: &str, title: &str) -> Result<String, HeaderError> {
             .ok_or(HeaderError::NotADict)
     };
 
-    let literal = string_literal(title);
+    let items: Vec<ast::DictItem> = dict.items().collect();
+    let position = items.iter().position(
+        |item| matches!(item, ast::DictItem::Named(named) if named.name().get() == field),
+    );
     let mut out = text.to_owned();
-    let existing = dict.items().find_map(|item| match item {
-        ast::DictItem::Named(named) if named.name().get() == "title" => Some(named.expr()),
-        _ => None,
-    });
-    match existing {
-        Some(expr) => out.replace_range(range(expr.to_untyped())?, &literal),
-        None if dict.items().next().is_none() => {
-            out.replace_range(range(dict.to_untyped())?, &format!("(title: {literal})"))
+    match (position, value) {
+        (Some(i), Some(value)) => {
+            let ast::DictItem::Named(named) = items[i] else {
+                unreachable!()
+            };
+            out.replace_range(range(named.expr().to_untyped())?, &string_literal(value));
         }
-        None => out.insert_str(
-            range(dict.to_untyped())?.start + 1,
-            &format!("title: {literal}, "),
-        ),
+        (None, Some(value)) => {
+            let literal = string_literal(value);
+            if items.is_empty() {
+                out.replace_range(range(dict.to_untyped())?, &format!("({field}: {literal})"));
+            } else {
+                out.insert_str(
+                    range(dict.to_untyped())?.start + 1,
+                    &format!("{field}: {literal}, "),
+                );
+            }
+        }
+        (Some(i), None) => {
+            let own = range(items[i].to_untyped())?;
+            // Take the separator along: the comma after the field, or before it if it's last.
+            let cut = if items.len() == 1 {
+                out.replace_range(range(dict.to_untyped())?, "(:)");
+                return Ok(out);
+            } else if let Some(next) = items.get(i + 1) {
+                own.start..range(next.to_untyped())?.start
+            } else {
+                range(items[i - 1].to_untyped())?.end..own.end
+            };
+            out.replace_range(cut, "");
+        }
+        (None, None) => {}
     }
     Ok(out)
 }
@@ -298,5 +332,33 @@ mod tests {
             set_title("Body", "T").unwrap(),
             "#metadata((title: \"T\")) <note>\nBody"
         );
+    }
+
+    #[test]
+    fn set_address_replaces_inserts_and_removes() {
+        let header = |dict: &str| format!("#metadata({dict}) <note>\nBody");
+        let set = |dict: &str, address| set_address(&header(dict), address).unwrap();
+        assert_eq!(
+            set("(title: \"T\", address: \"1\")", Some("2.1")),
+            header("(title: \"T\", address: \"2.1\")")
+        );
+        assert_eq!(
+            set("(title: \"T\")", Some("3")),
+            header("(address: \"3\", title: \"T\")")
+        );
+        assert_eq!(
+            set("(title: \"T\", address: \"1\", tags: ())", None),
+            header("(title: \"T\", tags: ())")
+        );
+        assert_eq!(
+            set("(title: \"T\", address: \"1\")", None),
+            header("(title: \"T\")")
+        );
+        assert_eq!(
+            set("(address: \"1\", title: \"T\")", None),
+            header("(title: \"T\")")
+        );
+        assert_eq!(set("(address: \"1\")", None), header("(:)"));
+        assert_eq!(set_address("Body", None).unwrap(), "Body");
     }
 }

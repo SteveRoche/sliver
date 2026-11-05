@@ -9,17 +9,42 @@ export interface NoteSummary {
   address: string | null;
   tags: string[];
   headerError: string | null;
+  /** Directory relative to the vault root, `/`-separated; `""` is the root. */
+  folder: string;
 }
 
 export interface TreeNode extends NoteSummary {
+  /** Something about the note's place in the vault looks wrong. */
+  warning: string | null;
   children: TreeNode[];
 }
 
+/**
+ * A folder: subfolders, then notes. In the Zettelkasten the notes form the
+ * address tree (unaddressed ones last); elsewhere they're a flat list.
+ */
+export interface FolderNode {
+  name: string;
+  path: string;
+  kind: "plain" | "zettelkasten";
+  warning: string | null;
+  folders: FolderNode[];
+  notes: TreeNode[];
+}
+
+/** What `applyMove` would change, for a confirmation prompt. */
+export interface MovePlan {
+  moves: { id: NoteId; from: string | null; to: string }[];
+  linkEdits: { id: NoteId; count: number }[];
+}
+
 export type Placement =
-  | { kind: "unaddressed" }
+  | { kind: "unaddressed"; folder?: string }
   | { kind: "top" }
-  | { kind: "continuation"; of: NoteId }
-  | { kind: "branch"; of: NoteId };
+  /** The next free sibling of `of`: `1.1a` -> `1.1b`. */
+  | { kind: "aside"; of: NoteId }
+  /** One level deeper than `of`: `1.1a` -> `1.1a1`. */
+  | { kind: "next"; of: NoteId };
 
 export type DeleteMode = "trash" | "permanent";
 
@@ -30,10 +55,10 @@ export interface SourceFile {
 }
 
 export const vault = {
-  create: (path: string) => invoke<TreeNode[]>("create_vault", { path }),
-  open: (path: string) => invoke<TreeNode[]>("open_vault", { path }),
+  create: (path: string) => invoke<FolderNode>("create_vault", { path }),
+  open: (path: string) => invoke<FolderNode>("open_vault", { path }),
   last: () => invoke<string | null>("last_vault"),
-  tree: () => invoke<TreeNode[]>("list_tree"),
+  tree: () => invoke<FolderNode>("list_tree"),
   createNote: (placement: Placement, title?: string) =>
     invoke<NoteSummary>("create_note", { placement, title }),
   readNote: (id: NoteId) => invoke<string>("read_note", { id }),
@@ -43,6 +68,22 @@ export const vault = {
     invoke<NoteSummary>("rename_note", { id, title }),
   deleteNote: (id: NoteId, mode?: DeleteMode) =>
     invoke<void>("delete_note", { id, mode }),
+  createFolder: (parent: string, name: string) =>
+    invoke<string>("create_folder", { parent, name }),
+  renameFolder: (path: string, name: string) =>
+    invoke<string>("rename_folder", { path, name }),
+  /** Resolves to the ids of the notes deleted with the folder. */
+  deleteFolder: (path: string, mode?: DeleteMode) =>
+    invoke<NoteId[]>("delete_folder", { path, mode }),
+  setZettelkasten: (path: string) => invoke<void>("set_zettelkasten", { path }),
+  /** Resolves to the ids of every note whose file changed. */
+  moveToFolder: (id: NoteId, folder: string) =>
+    invoke<NoteId[]>("move_to_folder", { id, folder }),
+  planMove: (id: NoteId, placement: Placement) =>
+    invoke<MovePlan>("plan_move", { id, placement }),
+  /** Resolves to the ids of every note whose file changed. */
+  applyMove: (id: NoteId, placement: Placement) =>
+    invoke<NoteId[]>("apply_move", { id, placement }),
   backlinks: (id: NoteId) => invoke<NoteSummary[]>("backlinks", { id }),
   /** Resolves a wikilink target (address or uuid) to a note id. */
   resolveLink: (target: string) =>
@@ -50,13 +91,16 @@ export const vault = {
   /** `/.sliver/links.typ`: the link table and `wikilinks` show rule. */
   linkLibrary: (showAddresses: boolean) =>
     invoke<SourceFile>("link_library", { showAddresses }),
+  /** `/.sliver/theme.typ` with the light or dark theme's colours. */
+  themeLibrary: (dark: boolean) =>
+    invoke<SourceFile>("theme_library", { dark }),
   /** The wrapper main that includes note `id` with wikilinks applied. */
   previewMain: (id: NoteId) => invoke<SourceFile>("preview_main", { id }),
   loadWorkspace: () => invoke<string | null>("load_workspace"),
   saveWorkspace: (json: string) => invoke<void>("save_workspace", { json }),
-  getSettings: () => invoke<unknown>("get_settings"),
-  setSettings: (settings: unknown) =>
-    invoke<void>("set_settings", { settings }),
+  /** The open vault's `.sliver/settings.json`, if it has one. */
+  loadSettings: () => invoke<string | null>("load_settings"),
+  saveSettings: (json: string) => invoke<void>("save_settings", { json }),
 };
 
 /**
