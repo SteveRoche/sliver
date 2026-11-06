@@ -13,7 +13,7 @@ import type { Diagnostic, Page, PagePoint } from '../typst/protocol';
 import { type NoteId, vault } from '../vault/api';
 import { SeverityIcon } from './SeverityIcon';
 import { withOverlayScrollbar } from './scrollbars';
-import { CITE_SCHEME, LINK_SCHEME } from './wikilinks';
+import { CITE_SCHEME, LINK_SCHEME, NEW_LINK_SCHEME } from './wikilinks';
 
 interface PreviewProps {
   /** The note shown; its page is compiled as wide as this preview. */
@@ -31,6 +31,8 @@ interface PreviewProps {
   loadingPackages?: string[];
   /** Called with the note id when a `sliver://` link is clicked. */
   onOpenNote?: (id: string) => void;
+  /** Mod-click on a broken wikilink, with its target. */
+  onBrokenLink?: (target: string) => void;
   /** The keys cited in a run of link areas on a line (in points). */
   citationsAt?: (
     page: number,
@@ -284,6 +286,10 @@ export function Preview(props: PreviewProps) {
     const href = hrefOf(anchor) ?? '';
     if (href.startsWith(LINK_SCHEME)) {
       props.onOpenNote?.(href.slice(LINK_SCHEME.length));
+    } else if (href.startsWith(NEW_LINK_SCHEME)) {
+      if (event.metaKey || event.ctrlKey) {
+        props.onBrokenLink?.(href.slice(NEW_LINK_SCHEME.length));
+      }
     } else if (EXTERNAL.test(href)) {
       void vault
         .openUrl(href)

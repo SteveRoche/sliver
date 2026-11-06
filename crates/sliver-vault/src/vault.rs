@@ -137,6 +137,14 @@ pub struct FolderNode {
     pub assets: Vec<AssetNode>,
 }
 
+/// Where [`Vault::place_for_address`] puts a note: the next note of `of`, or
+/// a new top-level number without it, at `address`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AddressPlace {
+    pub of: Option<Uuid>,
+    pub address: String,
+}
+
 /// Where a new note goes: a Zettelkasten address, or a folder without one.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -728,6 +736,39 @@ impl Vault {
             candidate = candidate.next_sibling();
         }
         Ok(candidate)
+    }
+
+    /// Where a new note for a link to `target` goes, if `target` is an
+    /// address: as the next note of its nearest existing ancestor (the next
+    /// top-level number without one), at the address that allocation gives.
+    /// That's `target` itself only when it leaves no gap; notes are never
+    /// created at an address whose parent or earlier siblings are missing.
+    pub fn place_for_address(&self, target: &str) -> Result<Option<AddressPlace>> {
+        let Ok(address) = target.trim().parse::<Address>() else {
+            return Ok(None);
+        };
+        self.zettelkasten()?;
+        let mut ancestor = address.parent();
+        let of = loop {
+            let Some(candidate) = ancestor else {
+                break None;
+            };
+            if let Some(note) = self
+                .notes
+                .values()
+                .find(|n| self.address_of(n).as_ref() == Some(&candidate))
+            {
+                break Some(note.id);
+            }
+            ancestor = candidate.parent();
+        };
+        let placement = match of {
+            Some(of) => Placement::Next { of },
+            None => Placement::Top,
+        };
+        let taken = self.taken_addresses(&HashSet::new());
+        let address = self.allocate(&placement, &taken)?.to_string();
+        Ok(Some(AddressPlace { of, address }))
     }
 
     /// Resolves a wikilink target: an address first, then a uuid.
@@ -1569,6 +1610,56 @@ mod tests {
                 .join(format!("{}.typ", note.id))
                 .exists()
         );
+    }
+
+    #[test]
+    fn places_link_notes_without_gaps() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let one = vault.create_note(None, Placement::Top).unwrap();
+        let one_one = vault
+            .create_note(None, Placement::Next { of: one.id })
+            .unwrap();
+        let place = |vault: &Vault, target: &str| vault.place_for_address(target).unwrap();
+        // The next note of an existing parent: exactly the target.
+        assert_eq!(
+            place(&vault, "1.1a"),
+            Some(AddressPlace {
+                of: Some(one_one.id),
+                address: "1.1a".into()
+            })
+        );
+        assert_eq!(
+            place(&vault, "2"),
+            Some(AddressPlace {
+                of: None,
+                address: "2".into()
+            })
+        );
+        // A missing parent, a skipped sibling and a skipped number each get
+        // the address that leaves no gap.
+        assert_eq!(
+            place(&vault, "1.1a1"),
+            Some(AddressPlace {
+                of: Some(one_one.id),
+                address: "1.1a".into()
+            })
+        );
+        assert_eq!(
+            place(&vault, "1.3"),
+            Some(AddressPlace {
+                of: Some(one.id),
+                address: "1.2".into()
+            })
+        );
+        assert_eq!(
+            place(&vault, "7.2"),
+            Some(AddressPlace {
+                of: None,
+                address: "2".into()
+            })
+        );
+        assert_eq!(place(&vault, "Some title"), None);
     }
 
     #[test]

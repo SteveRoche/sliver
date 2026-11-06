@@ -8,6 +8,7 @@ import {
   on,
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
+import { linksAt } from '../editor/analysis';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -116,6 +117,10 @@ export interface NoteSession {
   replaceText(text: string): void;
   /** Replaces the editor's selection with `text` (inserts at the cursor) and focuses it. */
   insert(text: string): void;
+  /** Points the editor's wikilinks to `from` at `to` instead, keeping their custom text (one undo step). */
+  retarget(from: string, to: string): void;
+  /** The target as the note's source writes it, for a target from the preview (see `plainQuotes`). */
+  sourceTarget(target: string): string | undefined;
   /** The note's editor while it's on screen. */
   shownView(): EditorView | undefined;
   attachView(view: EditorView | undefined): void;
@@ -586,6 +591,23 @@ function createSession(id: NoteId): NoteSession {
     shownView() {
       // Hidden tabs and reading view hide the editor with `display: none`.
       return view?.dom.offsetParent ? view : undefined;
+    },
+    retarget(from, to) {
+      if (!view) return;
+      const changes = linksAt(view.state)
+        .filter(link => sameTarget(link.target, from))
+        .map(link => ({
+          from: link.targetFrom,
+          to: link.targetTo,
+          insert: to,
+        }));
+      if (changes.length > 0) view.dispatch({ changes });
+    },
+    sourceTarget(target) {
+      if (!view) return undefined;
+      return linksAt(view.state)
+        .find(link => sameTarget(link.target, target))
+        ?.target.trim();
     },
     insert(text) {
       if (!view) return;
@@ -1142,6 +1164,17 @@ async function restoreWorkspace() {
 }
 
 // --- notes ---
+
+/**
+ * `text` with curly quotes made straight. The preview sees a link's text
+ * after Typst turned `'` and `"` into smart quotes; the source has them
+ * straight, and titles may have either.
+ */
+export const plainQuotes = (text: string) =>
+  text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"');
+
+const sameTarget = (a: string, b: string) =>
+  plainQuotes(a.trim()) === plainQuotes(b.trim());
 
 /** Where new notes' editors put the cursor, as an offset from the end of the text. */
 const startCursors = new Map<NoteId, number>();

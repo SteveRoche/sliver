@@ -18,15 +18,15 @@ pub use header::{
     set_kind, set_title,
 };
 pub use links::{
-    LINK_SCHEME, LINKS_PATH, LinkDisplay, WikiLink, link_library, link_table, link_table_path,
-    links_in, page_path, preview_main, preview_main_path,
+    LINK_SCHEME, LINKS_PATH, LinkDisplay, NEW_LINK_SCHEME, WikiLink, link_library, link_table,
+    link_table_path, links_in, page_path, preview_main, preview_main_path,
 };
 pub use preambles::{PreambleWarning, default_text, preamble_path};
 pub use syntax::{Analysis, CitationRange, LinkRange, analyze};
 pub use theme::{THEME_PATH, theme_library};
 pub use uuid::Uuid;
 pub use vault::{
-    AddressChange, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderKind, FolderNode,
-    LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan, Placement, Preamble, Reference,
-    SETTINGS_FILE, Template, TreeNode, Vault, VaultError,
+    AddressChange, AddressPlace, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderKind,
+    FolderNode, LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan, Placement,
+    Preamble, Reference, SETTINGS_FILE, Template, TreeNode, Vault, VaultError,
 };

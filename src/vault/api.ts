@@ -83,6 +83,12 @@ export type Placement =
 export type DeleteMode = 'trash' | 'permanent';
 
 /** A wikilink in the editor's text; offsets are UTF-16, like CodeMirror's. */
+/** A new note's place for a link to an address: the next note of `of` (top level without it), at `address`. */
+export interface AddressPlace {
+  of: NoteId | null;
+  address: string;
+}
+
 export interface LinkRange {
   from: number;
   to: number;
@@ -205,6 +211,9 @@ export const vault = {
   /** Resolves to the ids of every note whose file changed. */
   moveToFolder: (id: NoteId, folder: string) =>
     invoke<NoteId[]>('move_to_folder', { id, folder }),
+  /** Where a note created for a broken link to `target` goes, if it's an address (`place_for_address`). */
+  placeForAddress: (target: string) =>
+    invoke<AddressPlace | null>('place_for_address', { target }),
   planMove: (id: NoteId, placement: Placement) =>
     invoke<MovePlan>('plan_move', { id, placement }),
   /** Resolves to the ids of every note whose file changed. */

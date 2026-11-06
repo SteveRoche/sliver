@@ -178,6 +178,15 @@ pub async fn plan_move(
     with_vault(&open, |vault| vault.plan_move(id, &placement))
 }
 
+/// Where a note created for a link to `target` goes, if it's an address.
+#[tauri::command]
+pub async fn place_for_address(
+    open: State<'_, OpenVault>,
+    target: String,
+) -> CommandResult<Option<sliver_vault::AddressPlace>> {
+    with_vault(&open, |vault| vault.place_for_address(&target))
+}
+
 /// Returns the ids of every note whose file changed.
 #[tauri::command]
 pub async fn apply_move(

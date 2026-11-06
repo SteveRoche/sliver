@@ -1,5 +1,6 @@
 import { Splitter, useSplitter } from '@ark-ui/solid';
 import { createEffect, For, type JSX, Show } from 'solid-js';
+import { followBrokenLink } from '../commands/app';
 import { keybindingFor } from '../commands/registry';
 import {
   citationsAt,
@@ -178,6 +179,7 @@ function NotePreview(props: { note: NoteId; jumps?: () => boolean }) {
       diagnostics={session()?.result()?.diagnostics ?? []}
       loadingPackages={session()?.result()?.loadingPackages ?? []}
       onOpenNote={openNote}
+      onBrokenLink={target => void followBrokenLink(props.note, target)}
       citationsAt={(page, box) => citationsAt(props.note, page, box)}
       onCitation={keys => void openCitations(keys)}
       citationCard={keys => citationCard(props.note, keys)}

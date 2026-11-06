@@ -7,6 +7,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from '@codemirror/view';
+import { isMac } from '../commands/registry';
 import type { LinkRange } from '../vault/api';
 import { linksAt, syntaxField } from './analysis';
 
@@ -40,7 +41,9 @@ class LinkWidget extends WidgetType {
     const span = document.createElement('span');
     span.className = this.broken ? 'cm-wikilink broken' : 'cm-wikilink';
     span.textContent = this.label;
-    span.title = this.broken ? `No note "${this.target}"` : this.target;
+    span.title = this.broken
+      ? `No note "${this.target}". ${isMac ? 'Cmd' : 'Ctrl'}-click to create it.`
+      : this.target;
     return span;
   }
 

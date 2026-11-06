@@ -41,7 +41,9 @@ import {
   noteById,
   noteLabel,
   openAsset,
+  openNote,
   openVault,
+  plainQuotes,
   previewLayout,
   refreshLinks,
   renameAsset,
@@ -58,7 +60,12 @@ import {
   vaultRoot,
   zettelkasten,
 } from '../state/workspace';
-import { type NoteId, type Placement, vault } from '../vault/api';
+import {
+  type NoteId,
+  type NoteSummary,
+  type Placement,
+  vault,
+} from '../vault/api';
 import { type Command, registerCommands } from './registry';
 
 export async function chooseAndOpenVault(create: boolean) {
@@ -305,16 +312,114 @@ async function removeAsset(path: string) {
 const existingFolder = (path: string) =>
   path === '' || allFolders().some(f => f.path === path) ? path : '';
 
-/** Mod+N: a note where the vault's settings say new notes go. */
-async function newNoteDefault(kind?: string) {
-  const current = activeNote();
+/** The folder the vault's settings say new notes go in, `current` being the note they're made from. */
+function newNoteFolder(current: NoteId | null): string {
   const wanted =
     settings.newNoteLocation === 'folder'
       ? settings.newNoteFolder
       : settings.newNoteLocation === 'current' && current
         ? (noteById(current)?.folder ?? '')
         : '';
-  await newNoteIn(existingFolder(wanted), kind);
+  return existingFolder(wanted);
+}
+
+/** Mod+N: a note where the vault's settings say new notes go. */
+async function newNoteDefault(kind?: string) {
+  await newNoteIn(newNoteFolder(activeNote()), kind);
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Mod-click on a broken wikilink in note `source`. A title links to the
+ * note with that title (asked when there are several), else creates it
+ * where new notes go. An address creates the note there when that leaves
+ * no gap in the Zettelkasten, else offers the address that doesn't (or a
+ * note titled as the target). Either way the note's links to the target
+ * then point at the note (its address, or uuid without one); other notes'
+ * stay as they are. A uuid does nothing: it can't be chosen.
+ */
+export async function followBrokenLink(source: NoteId, raw: string) {
+  const target = sessionFor(source)?.sourceTarget(raw) ?? raw.trim();
+  if (!target || UUID.test(target)) return;
+  const relink = (note: NoteSummary) => {
+    const next = note.address ?? note.id;
+    if (next !== target) sessionFor(source)?.retarget(target, next);
+  };
+
+  const key = plainQuotes(target).toLowerCase();
+  const titled = allNotes().filter(
+    n => n.title && plainQuotes(n.title.trim()).toLowerCase() === key,
+  );
+  if (titled.length === 1) {
+    relink(titled[0]);
+    openNote(titled[0].id);
+    return;
+  }
+  if (titled.length > 1) {
+    const choice = await pick<NoteId | null>(`Notes titled "${target}"`, [
+      ...titled.map(n => ({
+        label: n.folder ? `${noteLabel(n)} (${n.folder})` : noteLabel(n),
+        value: n.id,
+      })),
+      { label: `Create another note titled "${target}"`, value: null },
+    ]);
+    if (!choice) return;
+    if (choice.value !== null) {
+      const note = noteById(choice.value);
+      if (note) relink(note);
+      openNote(choice.value);
+      return;
+    }
+  } else {
+    // Fails without a Zettelkasten: then it's only a title.
+    const place = await vault.placeForAddress(target).catch(() => null);
+    if (place) {
+      const parent = place.of && noteById(place.of);
+      if (place.address !== target) {
+        const where = parent
+          ? `the next note after ${noteLabel(parent)}`
+          : 'a new top-level address';
+        const choice = await pick<'address' | 'title'>(`No note ${target}`, [
+          {
+            label: `Create ${place.address}, ${where}, and link to it (${target} would leave a gap)`,
+            value: 'address',
+          },
+          { label: `Create a note titled "${target}"`, value: 'title' },
+        ]);
+        if (!choice) return;
+        if (choice.value === 'address') {
+          await linkedNoteAt(place.of, place.address, relink);
+          return;
+        }
+      } else {
+        await linkedNoteAt(place.of, place.address, relink);
+        return;
+      }
+    }
+  }
+
+  const folder = newNoteFolder(source);
+  let placement: Placement | null = { kind: 'unaddressed', folder };
+  if (folder === zettelkasten()?.path) placement = await chooseAddress(null);
+  if (!placement) return;
+  relink(await createNote(placement, target));
+}
+
+/** Asks for a title and creates the next note of `of` (top level without), expected at `address`. */
+async function linkedNoteAt(
+  of: NoteId | null,
+  address: string,
+  relink: (note: NoteSummary) => void,
+) {
+  const title = await prompt({
+    title: `New note ${address}`,
+    label: 'Title',
+    confirm: 'Create',
+  });
+  if (title === null) return;
+  const placement: Placement = of ? { kind: 'next', of } : { kind: 'top' };
+  relink(await createNote(placement, title.trim()));
 }
 
 /** Asks for a kind, then creates a note in that kind's folder (else where Mod+N would). */

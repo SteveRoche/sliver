@@ -38,6 +38,7 @@ pub fn run() {
             commands::set_zettelkasten,
             commands::move_to_folder,
             commands::plan_move,
+            commands::place_for_address,
             commands::apply_move,
             commands::backlinks,
             commands::link_library,

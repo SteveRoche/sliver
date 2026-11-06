@@ -31,6 +31,10 @@ pub fn page_path(id: &str) -> String {
 }
 pub const LINK_SCHEME: &str = "sliver://";
 
+/// Link scheme of broken wikilinks in the preview, followed by the target:
+/// Mod-click creates the note.
+pub const NEW_LINK_SCHEME: &str = "sliver-new:";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WikiLink {
     pub target: String,
@@ -110,6 +114,8 @@ fn scan_markup(markup: &SyntaxNode, offset: usize, out: &mut Vec<WikiLink>) {
                 Some(n) if n.kind() == SyntaxKind::Space && !n.leaf_text().contains('\n') => {
                     inner.push_str(n.leaf_text());
                 }
+                // `'` and `"` in markup parse as smart quotes, not text.
+                Some(n) if n.kind() == SyntaxKind::SmartQuote => inner.push_str(n.leaf_text()),
                 _ => break None,
             }
             j += 1;
@@ -179,7 +185,7 @@ pub fn link_library(display: LinkDisplay) -> String {
     let custom = if bar == none {{ "" }} else {{ inner.slice(bar + 1).trim() }}
     let note = notes.at(target, default: none)
     if note == none {{
-      text(fill: theme.error, it)
+      link("{NEW_LINK_SCHEME}" + target, text(fill: theme.error, it))
     }} else {{
       let shown = if custom != "" {{ custom }} else if display == "address" and note.address != none {{ note.address }} else {{ note.title }}
       link("{LINK_SCHEME}" + note.id, shown)
@@ -321,6 +327,18 @@ mod tests {
                 ),
                 ("1.1a1".into(), None, "[[1.1a1]]"),
             ]
+        );
+    }
+
+    #[test]
+    fn finds_links_with_quotes() {
+        assert_eq!(
+            links("[[Markov's \"inequality\"]]"),
+            vec![(
+                "Markov's \"inequality\"".into(),
+                None,
+                "[[Markov's \"inequality\"]]"
+            )]
         );
     }
 

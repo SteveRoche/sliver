@@ -1,5 +1,6 @@
 import type { EditorView } from '@codemirror/view';
 import { createEffect, createResource, Match, on, Switch } from 'solid-js';
+import { followBrokenLink } from '../commands/app';
 import { pasteImages } from '../editor/attachments';
 import { citations, refreshCitations } from '../editor/citations';
 import { setDiagnostics } from '../editor/diagnostics';
@@ -33,17 +34,6 @@ import type { NoteId } from '../vault/api';
 import { citationCard } from './citationCard';
 import { Editor } from './Editor';
 
-const links = wikilinks({
-  title: target => {
-    const id = resolveTarget(target);
-    return id ? (noteById(id)?.title ?? 'Untitled') : null;
-  },
-  open: target => {
-    const id = resolveTarget(target);
-    if (id) openNote(id);
-  },
-});
-
 const linkCandidates = () =>
   allNotes().map(note => ({
     label: noteLabel(note),
@@ -58,6 +48,17 @@ const linkCandidates = () =>
  */
 export function NoteTab(props: { id: NoteId; hidden: boolean }) {
   const session = sessionFor(props.id);
+  const links = wikilinks({
+    title: target => {
+      const id = resolveTarget(target);
+      return id ? (noteById(id)?.title ?? 'Untitled') : null;
+    },
+    open: target => {
+      const id = resolveTarget(target);
+      if (id) openNote(id);
+      else void followBrokenLink(props.id, target);
+    },
+  });
   const [text] = createResource(() => session?.text);
   let view: EditorView | undefined;
 
