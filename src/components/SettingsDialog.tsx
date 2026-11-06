@@ -183,6 +183,14 @@ export function SettingsDialog() {
                         updateSettings({ previewTheme })
                       }
                     />
+                    <ToggleSetting
+                      name="Indent guides"
+                      description="Draw a line in the sidebar along the contents of each open folder."
+                      checked={settings.indentGuides}
+                      onChange={indentGuides =>
+                        updateSettings({ indentGuides })
+                      }
+                    />
                   </SectionBody>
                 </Match>
                 <Match when={section() === 'editor'}>

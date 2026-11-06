@@ -33,6 +33,7 @@ import {
 import { Portal } from 'solid-js/web';
 import { type DropTarget, dropAsset, dropNote } from '../commands/app';
 import { runCommand } from '../commands/registry';
+import { settings } from '../state/settings';
 import {
   activeAsset,
   activeNote,
@@ -583,10 +584,26 @@ function NodeView(props: { node: Node; indexPath: number[] }) {
   );
 }
 
-/** A branch's rows, rendered only while it's unfolded: folded ones cost nothing. */
-function Children(props: { nodes: Node[]; indexPath: number[] }) {
+/** A branch's rows, rendered only while it's unfolded: folded ones cost nothing.
+    A folder's (`guideDepth`, its own depth) get an indent guide below its icon. */
+function Children(props: {
+  nodes: Node[];
+  indexPath: number[];
+  guideDepth?: number;
+}) {
   return (
-    <TreeView.BranchContent class="tree-children">
+    <TreeView.BranchContent
+      class={
+        props.guideDepth === undefined
+          ? 'tree-children'
+          : 'tree-children indent-guide'
+      }
+      style={
+        props.guideDepth === undefined
+          ? undefined
+          : { '--depth': String(props.guideDepth) }
+      }
+    >
       <TreeView.NodeContext>
         {node => (
           <Show when={node().expanded}>
@@ -641,7 +658,11 @@ function FolderView(props: {
           <Warning message={folder().warning} label="Folder warning" />
         </TreeView.BranchTrigger>
       </TreeView.BranchControl>
-      <Children nodes={props.node.children} indexPath={props.indexPath} />
+      <Children
+        nodes={props.node.children}
+        indexPath={props.indexPath}
+        guideDepth={settings.indentGuides ? props.node.depth : undefined}
+      />
     </TreeView.Branch>
   );
 }
