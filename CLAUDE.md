@@ -140,6 +140,18 @@ Not a priority. Keep page setup and theme out of note files so this stays possib
 - [ ] Empty states that teach: an empty vault, an empty Zettelkasten and an empty tab each say what to do next, with the relevant keybindings
 - [ ] A keybinding overview (a palette command or settings link), and first-run hints in a new vault, e.g. a starter note that links to the tutorial
 
+### M14 — Outlines
+
+Compose notes (Zettelkasten or any folder) into larger structures, as Luhmann's structure notes did: an outline orders and nests notes for a project, an article or a topic, and a note can be in any number of outlines. Nothing about a note changes when it joins an outline.
+
+- [ ] Format: an outline is itself a note, marked by a header field (`outline: true`; additive, no break), so it lives in a folder, has a title and can be linked, synced and moved like any note. Its body is a Typst list, nested for structure: an item that is a wikilink (`- [[1.1a]]`, `- [[1.1a|custom heading]]`) places that note, any other item is a section heading of its own, and text after an item's link is a comment. Parsed from the syntax tree (`typst-syntax`, like `links_in`) into the index; no new files, no database. An outline item can be another outline (nesting), with cycles flagged as warnings
+- [ ] Membership: "in outlines" for each note comes from the index, like backlinks (shown wherever backlinks are, and as a count in the note's tooltip); moves and re-addressing already rewrite the links, so outlines follow their notes
+- [ ] Outline view: a tab showing the outline as a tree (titles and addresses, warnings for broken links), editable by dragging rows to reorder and indent, dragging notes in from the sidebar, "Add to outline..." on a note (pick an outline and a place) and removing items. Every edit rewrites the list in the outline's source through `typst-syntax` so the user's other text and comments stay byte for byte; the source stays editable as a normal note too
+- [ ] Reading an outline: a preview that renders the notes in order as one document, each note's heading levels offset by its depth (`set heading(offset: ...)`), with each section linking back to its note. Needs a transclusion wrapper: notes keep their own hidden preamble prefixes and kind templates (the engine already keeps a prefix per path), and their `<note>` header metadata must not confuse the wrapper's `query(<note>)`. Compiles only the visible part, like bands
+- [ ] Creating: "New outline", and "Outline from train of thought" (a Zettelkasten note and the notes under it, in address order, as a starting outline to rearrange)
+- [ ] Export (with M12): an outline exports as one PDF or a standalone `.typ` with every note inlined
+- Open questions: whether an outline item can pick part of a note (a section, once section links exist); whether outlines get their own place in the sidebar (a filter or a section) or stay ordinary notes found through the switcher; how a note's title shows in an outline versus a custom heading in the item
+
 ### Later
 
 - Multiple main windows on the same vault, e.g. for two monitors, each with its own tabs, panes and preview. Each window is a separate webview, so its JS state and its compiler worker are its own. The backend's `Vault` stays the single owner of the files. Open questions:
