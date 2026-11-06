@@ -672,9 +672,10 @@ impl Vault {
             tags: Vec::new(),
             kind,
         });
-        let body = body.trim_matches('\n');
-        let text = if body.is_empty() {
-            format!("{header}\n\n")
+        // Trailing blank lines stay: a template's cursor may be on one.
+        let body = body.trim_start_matches('\n');
+        let text = if body.is_empty() || body.ends_with('\n') {
+            format!("{header}\n\n{body}")
         } else {
             format!("{header}\n\n{body}\n")
         };
@@ -2180,7 +2181,10 @@ mod tests {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
         vault.create_kind("Paper").unwrap();
-        assert_eq!(vault.note_template(Some("Paper")).unwrap(), "= {{title}}\n");
+        assert_eq!(
+            vault.note_template(Some("Paper")).unwrap(),
+            crate::preambles::DEFAULT_TEMPLATE
+        );
         vault.save_template(None, "").unwrap();
         assert_eq!(vault.note_template(Some("Paper")).unwrap(), "");
         vault.save_template(None, "= {{title}}\n").unwrap();

@@ -26,6 +26,7 @@ import {
   sessionFor,
   setPreviewFocus,
   tabOf,
+  takeStartCursor,
   tree,
 } from '../state/workspace';
 import type { NoteId } from '../vault/api';
@@ -94,6 +95,14 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
     view = v;
     session?.attachView(v);
     if (v) {
+      const start = takeStartCursor(props.id, v.state.doc.toString());
+      if (start !== undefined) {
+        v.dispatch({ selection: { anchor: start }, scrollIntoView: true });
+        // After the pane adopts the editor's element.
+        requestAnimationFrame(() => {
+          if (!props.hidden) v.focus();
+        });
+      }
       setVimActions(v, {
         save: () => void saveNote(props.id),
         quit: () => {

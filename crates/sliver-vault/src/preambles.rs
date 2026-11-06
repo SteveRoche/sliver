@@ -40,7 +40,7 @@ pub fn preamble_path(kind: Option<&str>) -> String {
 pub const TEMPLATES_DIR: &str = ".sliver/templates";
 
 /// The default template a new vault starts with.
-pub const DEFAULT_TEMPLATE: &str = "= {{title}}\n";
+pub const DEFAULT_TEMPLATE: &str = "= {{title}}\n\n{{cursor}}\n";
 
 /// Where the template for `kind` (or the default one, for `None`) lives,
 /// relative to the vault root.

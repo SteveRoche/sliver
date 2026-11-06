@@ -1143,19 +1143,34 @@ async function restoreWorkspace() {
 
 // --- notes ---
 
+/** Where new notes' editors put the cursor, as an offset from the end of the text. */
+const startCursors = new Map<NoteId, number>();
+
+/** Where note `id`'s new editor puts its cursor, once (from its template). */
+export function takeStartCursor(id: NoteId, text: string): number | undefined {
+  const fromEnd = startCursors.get(id);
+  startCursors.delete(id);
+  return fromEnd === undefined ? undefined : Math.max(0, text.length - fromEnd);
+}
+
 export async function createNote(
   placement: Placement,
   title: string,
   kind?: string,
 ) {
   const template = await vault.noteTemplate(kind);
-  const body = expandTemplate(template, { title, now: new Date() });
+  const { body, cursor } = expandTemplate(template, {
+    title,
+    now: new Date(),
+  });
   const note = await vault.createNote(
     placement,
     title || undefined,
     kind,
     body,
   );
+  // The body ends the note's text (see `create_note_of_kind`).
+  if (cursor !== null) startCursors.set(note.id, body.length - cursor);
   await refreshTree();
   openNote(note.id);
   return note;
