@@ -221,6 +221,6 @@ From a review (2026-11-05) of how the features interact and where time goes; not
 - Keep dependencies minimal. Before adding any new crate or npm package, give a strong justification and ask the user first; never install one unprompted.
 - Limit comments to things that wouldn't be obvious to an experienced developer.
 - Avoid emoji in code.
-- Breaking changes to the vault format are fine for now; don't write migration or compatibility code for existing vaults until asked.
+- Breaking changes need approval: real vaults exist now, so before any change that would break existing vaults or on-disk data (layout, header fields, `.sliver/` files, `workspace.json`, settings), say what breaks and ask first. Don't write migration or compatibility code unless asked.
 - Scrollbars are overlays: native ones are hidden app-wide, and every scroll container gets floating, auto-hiding thumbs from `components/scrollbars.ts` (`overlayScrollbar(el)`, or `ref={withOverlayScrollbar}`). Add it to any new scroll container; nothing else shows a scrollbar. Thumbs are appended to the container's parent, so give them a parent whose children are static.
 - No rounded corners in the UI. The exception is switches, which keep the usual pill shape.
