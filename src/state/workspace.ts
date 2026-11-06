@@ -22,7 +22,9 @@ import type {
 } from '../typst/protocol';
 import {
   autosave,
+  type DiskChanges,
   type FolderNode,
+  type Moved,
   type NoteId,
   type NoteSummary,
   type Placement,
@@ -37,6 +39,7 @@ import {
   type DropZone,
   findPane,
   insertBeside,
+  isEmptyTab,
   type LayoutNode,
   newPane,
   type Pane,
@@ -95,6 +98,13 @@ export interface NoteSession {
   /** Where the preview's anchor is, sent with each compile; `undefined` to stop. */
   setAnchor(get: (() => PagePoint | null) | undefined): void;
   dirty: () => boolean;
+  /** Set when the file changed or went away on disk while there were unsaved edits. */
+  conflict: () => DiskConflict | null;
+  setConflict(conflict: DiskConflict | null): void;
+  /** Takes the file's text from disk, dropping unsaved edits. */
+  loadFromDisk(text: string): void;
+  /** The editor's text now. */
+  currentText(): string;
   edit(text: string): void;
   flush(): Promise<void>;
   /** Swaps in text changed outside the editor (e.g. a rename), keeping the cursor. */
@@ -113,6 +123,9 @@ export interface NoteSession {
 }
 
 export type { Pane, Tab, ViewMode };
+
+/** How a note's file on disk disagrees with its unsaved edits. */
+export type DiskConflict = 'changed' | 'deleted';
 
 /** One preview per pane, or one beside all panes for the focused pane's note. */
 export type PreviewLayout = 'pane' | 'global';
@@ -137,6 +150,7 @@ const EMPTY_ROOT: FolderNode = {
   warning: null,
   folders: [],
   notes: [],
+  assets: [],
 };
 
 const [vaultRoot, setVaultRoot] = createSignal<string | null>(null);
@@ -233,6 +247,7 @@ const index = createRoot(() =>
     /** Notes in sidebar order, depth first. */
     const notes: TreeNode[] = [];
     const folders: FolderNode[] = [];
+    const assets = new Set<string>();
     let zettelkasten: FolderNode | null = null;
     const walkNotes = (nodes: TreeNode[], parent?: TreeNode) => {
       for (const node of nodes) {
@@ -247,6 +262,7 @@ const index = createRoot(() =>
     };
     const walkFolder = (folder: FolderNode) => {
       if (folder.kind === 'zettelkasten') zettelkasten = folder;
+      for (const asset of folder.assets) assets.add(asset.path);
       for (const sub of folder.folders) {
         folders.push(sub);
         walkFolder(sub);
@@ -254,7 +270,7 @@ const index = createRoot(() =>
       walkNotes(folder.notes);
     };
     walkFolder(tree());
-    return { byId, byAddress, parents, notes, folders, zettelkasten };
+    return { byId, byAddress, parents, notes, folders, assets, zettelkasten };
   }),
 );
 
@@ -268,6 +284,9 @@ export const allNotes = () => index().notes;
 
 /** Every folder except the root, in sidebar order. */
 export const allFolders = () => index().folders;
+
+/** Whether the vault has a file (not a note) at vault path `path`. */
+export const assetExists = (path: string) => index().assets.has(path);
 
 /** The Zettelkasten folder, if the vault has one. */
 export const zettelkasten = (): FolderNode | null => index().zettelkasten;
@@ -304,6 +323,7 @@ function createSession(id: NoteId): NoteSession {
   let mainPath: string | undefined;
   const [pages, setPages] = createSignal<Page[]>([]);
   const [dirty, setDirty] = createSignal(false);
+  const [conflict, setConflict] = createSignal<DiskConflict | null>(null);
   let view: EditorView | undefined;
   let preview: LivePreview | undefined;
   const [shift, setShift] = createSignal<CompileResult['anchor']>(null);
@@ -326,10 +346,12 @@ function createSession(id: NoteId): NoteSession {
     },
     error => console.error(`could not save ${id}:`, error),
     {
-      enabled: () => settings.autosave,
+      // A conflict holds edits back until the user picks a side.
+      enabled: () => settings.autosave && !conflict(),
       delayMs: () => settings.autosaveDelay,
     },
   );
+  let latestText: string | undefined;
 
   const text = (async () => {
     const [main, source] = await Promise.all([
@@ -409,6 +431,19 @@ function createSession(id: NoteId): NoteSession {
       anchor = get;
     },
     dirty,
+    conflict,
+    setConflict(next) {
+      if (next) saver.hold();
+      setConflict(next);
+    },
+    currentText: () => view?.state.doc.toString() ?? latestText ?? '',
+    loadFromDisk(next) {
+      this.replaceText(next);
+      // The edit the replacement made goes nowhere: it's what's on disk.
+      saver.cancel();
+      setDirty(false);
+      setConflict(null);
+    },
     async jumpFromClick(page, x, y) {
       if (!mainPath || !view) return;
       const found = await typst.jumpFromClick(mainPath, page, x, y);
@@ -437,6 +472,7 @@ function createSession(id: NoteId): NoteSession {
       return typst.jumpFromCursor(mainPath, notePath(id), position);
     },
     edit(next) {
+      latestText = next;
       preview?.update(next);
       saver.update(next);
       setDirty(true);
@@ -706,7 +742,7 @@ export function openNote(id: NoteId) {
     const pane = findPane(state.root, target.id);
     if (!pane) return;
     const current = pane.tabs.find(t => t.key === pane.active);
-    if (current && current.note === null) {
+    if (current && isEmptyTab(current)) {
       current.note = id;
     } else {
       const key = newTabKey();
@@ -739,7 +775,10 @@ export async function navigate(paneId: string, id: NoteId) {
   sessions.set(id, createSession(id));
   update(state => {
     const found = paneOfTab(state.root, key)?.tabs.find(t => t.key === key);
-    if (found) found.note = id;
+    if (found) {
+      found.note = id;
+      found.asset = undefined;
+    }
   });
 }
 
@@ -980,14 +1019,16 @@ async function restoreWorkspace() {
     if (file.globalSizes?.length === 2) setGlobalSizesSignal(file.globalSizes);
     if (file.globalShown === false) setGlobalShown(false);
     if (!file.layout) return;
-    const seen = new Set<NoteId>();
+    const seen = new Set<string>();
+    const once = (key: string, exists: boolean) => {
+      if (!exists || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    };
     const root = restore(
       file.layout,
-      id => {
-        if (!noteById(id) || seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      },
+      id => once(id, !!noteById(id)),
+      path => once(`asset:${path}`, assetExists(path)),
       newTabKey,
     );
     for (const pane of panes(root)) {
@@ -1071,10 +1112,14 @@ export async function createFolder(parent: string, name: string) {
 }
 
 export async function renameFolder(path: string, name: string) {
-  const renamed = await vault.renameFolder(path, name);
-  const target = settings.newNoteFolder;
-  if (target === path || target.startsWith(`${path}/`)) {
-    updateSettings({ newNoteFolder: renamed + target.slice(path.length) });
+  await flushAll();
+  const moved = await vault.renameFolder(path, name);
+  const renamed = moved.path;
+  for (const key of ['newNoteFolder', 'attachmentFolder'] as const) {
+    const target = settings[key];
+    if (target === path || target.startsWith(`${path}/`)) {
+      updateSettings({ [key]: renamed + target.slice(path.length) });
+    }
   }
   setCollapsedFolders(list =>
     list.map(p =>
@@ -1083,15 +1128,17 @@ export async function renameFolder(path: string, name: string) {
         : p,
     ),
   );
-  persistWorkspace();
-  await refreshTree();
+  await afterPathMove(path, moved);
 }
 
 export async function deleteFolder(path: string) {
   const inside = (folder: string) =>
     folder === path || folder.startsWith(`${path}/`);
   for (const tab of allTabs()) {
-    if (tab.note && inside(noteById(tab.note)?.folder ?? '')) {
+    const folder = tab.asset
+      ? parentFolder(tab.asset)
+      : tab.note && noteById(tab.note)?.folder;
+    if (folder !== undefined && folder !== null && inside(folder)) {
       await closeTab(tab.key, true);
     }
   }
@@ -1257,3 +1304,219 @@ export function diagnosticsIn(path: string): Diagnostic[] {
 /** Whether note `id`'s editor is on screen: its pane's active tab, not in reading mode. */
 export const isEditorShown = (id: NoteId) =>
   panes(layout.root).some(p => paneNote(p) === id && p.mode !== 'read');
+
+// --- assets ---
+
+const parentFolder = (path: string) =>
+  path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+
+/** Images the app shows in a tab; other files open in their own app. */
+const VIEWABLE = /\.(png|jpe?g|gif|svg|webp|bmp|avif)$/i;
+export const isViewable = (path: string) => VIEWABLE.test(path);
+
+const assetTab = (path: string) => allTabs().find(t => t.asset === path);
+
+/** The image in the focused pane's active tab, if any. */
+export const activeAsset = () =>
+  focusedPane().tabs.find(t => t.key === focusedPane().active)?.asset ?? null;
+
+/** Bumped when an asset changes on disk, so an image tab shows the new one. */
+const [assetVersions, setAssetVersions] = createSignal(
+  new Map<string, number>(),
+);
+export const assetVersion = (path: string) => assetVersions().get(path) ?? 0;
+
+/**
+ * Opens asset `path`: an image in a tab (like a note: at most one tab per
+ * image), anything else in the system's app for it.
+ */
+export async function openAsset(path: string) {
+  if (!isViewable(path)) {
+    await vault.openAsset(path);
+    return;
+  }
+  const existing = assetTab(path);
+  if (existing) {
+    activateTab(existing.key);
+    return;
+  }
+  const target = focusedPane();
+  update(state => {
+    const pane = findPane(state.root, target.id);
+    if (!pane) return;
+    const current = pane.tabs.find(t => t.key === pane.active);
+    if (current && isEmptyTab(current)) {
+      current.asset = path;
+    } else {
+      const key = newTabKey();
+      pane.tabs.push({ key, note: null, asset: path });
+      pane.active = key;
+    }
+  });
+}
+
+/**
+ * After an asset or folder moved from `from` (and paths to it were
+ * rewritten): tabs follow it, rewritten notes reload, preambles reload
+ * (they may have been rewritten too), and the compiler forgets both paths.
+ */
+async function afterPathMove(from: string, moved: Moved) {
+  const rebase = (path: string) =>
+    path === from || path.startsWith(`${from}/`)
+      ? moved.path + path.slice(from.length)
+      : path;
+  update(state => {
+    for (const pane of panes(state.root)) {
+      for (const tab of pane.tabs) if (tab.asset) tab.asset = rebase(tab.asset);
+    }
+  });
+  await reloadChanged(moved.changed);
+  await loadPreambles();
+  await reloadMains();
+  await typst.forgetFile(`/${from}`);
+  await typst.forgetFile(`/${moved.path}`);
+}
+
+export async function renameAsset(path: string, name: string) {
+  await flushAll();
+  await afterPathMove(path, await vault.renameAsset(path, name));
+}
+
+export async function moveAsset(path: string, folder: string) {
+  if (parentFolder(path) === folder) return;
+  await flushAll();
+  await afterPathMove(path, await vault.moveAsset(path, folder));
+}
+
+export async function deleteAsset(path: string) {
+  const tab = assetTab(path);
+  if (tab) await closeTab(tab.key);
+  await vault.deleteAsset(path, settings.deleteMode);
+  await typst.forgetFile(`/${path}`);
+  await refreshTree();
+}
+
+/** Copies files from outside the vault (dropped from Finder) into `folder`. */
+export async function importAssets(folder: string, sources: string[]) {
+  const added: string[] = [];
+  for (const source of sources)
+    added.push(await vault.importAsset(folder, source));
+  setFolderCollapsed(folder, false);
+  await refreshTree();
+  return added;
+}
+
+/** Where files pasted or dropped into note `id` go (`attachmentLocation`). */
+function attachmentFolder(id: NoteId | null): string {
+  switch (settings.attachmentLocation) {
+    case 'root':
+      return '';
+    case 'current':
+      return (id && noteById(id)?.folder) || '';
+    case 'folder':
+      return settings.attachmentFolder;
+  }
+}
+
+/** Saves a file pasted into note `id`; resolves to its vault path. */
+export async function saveAttachment(
+  id: NoteId | null,
+  name: string,
+  data: ArrayBuffer,
+) {
+  const path = await vault.addAsset(attachmentFolder(id), name, data);
+  await refreshTree();
+  return path;
+}
+
+/** The open note whose editor is `view`. */
+export const noteOfView = (view: EditorView) =>
+  [...sessions.values()].find(s => s.shownView() === view)?.id ?? null;
+
+/** Copies files dropped onto note `id`'s editor; resolves to their vault paths. */
+export function importAttachments(id: NoteId | null, sources: string[]) {
+  return importAssets(attachmentFolder(id), sources);
+}
+
+/**
+ * Takes in changes made to the vault outside the app (the backend's file
+ * watcher): the tree, notes' text (open editors without unsaved edits
+ * reload, others get a conflict notice), assets the compiler has loaded,
+ * and preambles.
+ */
+export async function applyDiskChanges(changes: DiskChanges) {
+  for (const id of changes.removed) {
+    const folder = noteById(id)?.folder;
+    if (folder !== undefined) deletedFrom.set(id, folder);
+  }
+  if (
+    changes.tree ||
+    changes.changed.length > 0 ||
+    changes.removed.length > 0
+  ) {
+    await refreshTree();
+  }
+  for (const id of changes.changed) {
+    const session = sessions.get(id);
+    if (!session) continue;
+    if (session.dirty()) session.setConflict('changed');
+    else session.loadFromDisk(await vault.readNote(id));
+  }
+  for (const id of changes.removed) {
+    const session = sessions.get(id);
+    const tab = tabOf(id);
+    if (!session || !tab) continue;
+    if (session.dirty()) session.setConflict('deleted');
+    else await closeTab(tab.key, true);
+  }
+  for (const path of changes.assets) {
+    const mains = new Set(await typst.forgetFile(`/${path}`));
+    invalidatePreviews(
+      [...sessions.values()].filter(s => mains.has(s.mainPath() ?? '')),
+    );
+    const tab = assetTab(path);
+    if (tab && !assetExists(path)) await closeTab(tab.key);
+  }
+  if (changes.assets.length > 0) {
+    setAssetVersions(versions => {
+      const next = new Map(versions);
+      for (const path of changes.assets)
+        next.set(path, (next.get(path) ?? 0) + 1);
+      return next;
+    });
+  }
+  if (changes.preambles) {
+    await loadPreambles();
+    await reloadMains();
+  }
+}
+
+/** Resolves a conflict: keep the editor's text (saved over the file) or take the file's. */
+export async function resolveConflict(id: NoteId, keep: 'mine' | 'disk') {
+  const session = sessions.get(id);
+  if (!session) return;
+  const conflict = session.conflict();
+  if (keep === 'disk') {
+    if (conflict === 'deleted') {
+      const tab = tabOf(id);
+      if (tab) await closeTab(tab.key, true);
+    } else {
+      session.loadFromDisk(await vault.readNote(id));
+    }
+    return;
+  }
+  session.setConflict(null);
+  const text = session.currentText();
+  if (conflict === 'deleted') {
+    await vault.restoreNote(id, deletedFrom.get(id) ?? '', text);
+    deletedFrom.delete(id);
+    await refreshTree();
+  } else {
+    // Written even when nothing is pending: the file has the other text.
+    session.edit(text);
+  }
+  await session.flush();
+}
+
+/** The folders of notes deleted on disk, for restoring them. */
+const deletedFrom = new Map<NoteId, string>();

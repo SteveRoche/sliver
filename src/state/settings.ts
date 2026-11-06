@@ -20,6 +20,10 @@ export interface Settings {
   newNoteLocation: 'root' | 'current' | 'folder';
   /** The folder for `newNoteLocation: "folder"`; `""` is the vault root. */
   newNoteFolder: string;
+  /** Where files pasted or dropped into a note are saved. */
+  attachmentLocation: 'root' | 'current' | 'folder';
+  /** The folder for `attachmentLocation: "folder"`, created when first used. */
+  attachmentFolder: string;
   theme: 'system' | 'light' | 'dark';
   /** The preview's theme: the app's, or fixed. */
   previewTheme: 'app' | 'light' | 'dark';
@@ -55,6 +59,8 @@ const DEFAULTS: Settings = {
   linkDisplay: 'title',
   newNoteLocation: 'root',
   newNoteFolder: '',
+  attachmentLocation: 'folder',
+  attachmentFolder: 'Attachments',
   theme: 'system',
   previewTheme: 'app',
   maxPreviewWidth: 560,
@@ -71,6 +77,7 @@ const CHOICES: { [K in keyof Settings]?: readonly Settings[K][] } = {
   deleteMode: ['trash', 'permanent'],
   linkDisplay: ['title', 'address'],
   newNoteLocation: ['root', 'current', 'folder'],
+  attachmentLocation: ['root', 'current', 'folder'],
   theme: ['system', 'light', 'dark'],
   previewTheme: ['app', 'light', 'dark'],
   defaultViewMode: ['edit', 'read', 'source'],

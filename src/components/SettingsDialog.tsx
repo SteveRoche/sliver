@@ -307,6 +307,36 @@ export function SettingsDialog() {
                         }
                       />
                     </Show>
+                    <SelectSetting<Settings['attachmentLocation']>
+                      id="setting-attachment-location"
+                      name="Default location for new attachments"
+                      description="Where files pasted or dropped into a note are saved."
+                      value={settings.attachmentLocation}
+                      options={[
+                        { value: 'root', label: 'Vault root folder' },
+                        {
+                          value: 'current',
+                          label: 'Same folder as current note',
+                        },
+                        {
+                          value: 'folder',
+                          label: 'In the folder specified below',
+                        },
+                      ]}
+                      onChange={attachmentLocation =>
+                        updateSettings({ attachmentLocation })
+                      }
+                    />
+                    <Show when={settings.attachmentLocation === 'folder'}>
+                      <FolderSetting
+                        id="setting-attachment-folder"
+                        name="Folder for new attachments"
+                        value={settings.attachmentFolder}
+                        onChange={attachmentFolder =>
+                          updateSettings({ attachmentFolder })
+                        }
+                      />
+                    </Show>
                     <SelectSetting<Settings['deleteMode']>
                       id="setting-delete-mode"
                       name="Deleting a note"

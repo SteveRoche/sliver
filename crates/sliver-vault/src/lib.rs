@@ -2,6 +2,7 @@ pub mod address;
 pub mod citations;
 pub mod header;
 pub mod links;
+pub mod paths;
 pub mod preambles;
 pub mod syntax;
 pub mod theme;
@@ -25,7 +26,7 @@ pub use syntax::{Analysis, CitationRange, LinkRange, analyze};
 pub use theme::{THEME_PATH, theme_library};
 pub use uuid::Uuid;
 pub use vault::{
-    AddressChange, CitationStyle, DeleteMode, FolderKind, FolderNode, LinkEdits, MovePlan,
-    NotePreview, NoteSummary, Placement, Preamble, Reference, SETTINGS_FILE, Template, TreeNode,
-    Vault, VaultError,
+    AddressChange, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderKind, FolderNode,
+    LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan, Placement, Preamble, Reference,
+    SETTINGS_FILE, Template, TreeNode, Vault, VaultError,
 };

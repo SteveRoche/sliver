@@ -6,12 +6,12 @@ import type {
   FromWorker,
   HostReply,
   Hover,
-  PackageHost,
   PagePoint,
   Position,
   Request,
   Signature,
   SourceLocation,
+  WorkerHost,
 } from './protocol';
 
 type Args<K extends keyof Calls> = Calls[K]['args'];
@@ -29,13 +29,13 @@ export class TypstClient {
     number,
     { resolve: (value: unknown) => void; reject: (error: Error) => void }
   >();
-  private packageListeners = new Set<(specs: string[]) => void>();
+  private loadedListeners = new Set<() => void>();
 
-  constructor(private packages: PackageHost) {
+  constructor(private host: WorkerHost) {
     this.worker.onmessage = (event: MessageEvent<FromWorker>) => {
       const message = event.data;
       if ('event' in message) {
-        for (const listener of this.packageListeners) listener(message.specs);
+        for (const listener of this.loadedListeners) listener();
       } else if ('op' in message) {
         void this.serveHost(message);
       } else {
@@ -61,6 +61,11 @@ export class TypstClient {
 
   removeSource(path: string): Promise<void> {
     return this.call('removeSource', { path });
+  }
+
+  /** Forgets vault file `path`; resolves to the mains that read it. */
+  forgetFile(path: string): Promise<string[]> {
+    return this.call('forgetFile', { path });
   }
 
   /** Compiles `main`; with `render`, also renders its changed pages. */
@@ -193,22 +198,28 @@ export class TypstClient {
     return this.call('citationStyles', {});
   }
 
-  /** Fires when packages finish loading, so dependent documents can recompile. */
-  onPackagesLoaded(listener: (specs: string[]) => void): () => void {
-    this.packageListeners.add(listener);
-    return () => this.packageListeners.delete(listener);
+  /**
+   * Fires when packages or vault files finish loading, so documents that
+   * needed them can recompile.
+   */
+  onLoaded(listener: () => void): () => void {
+    this.loadedListeners.add(listener);
+    return () => this.loadedListeners.delete(listener);
   }
 
   private async serveHost(request: Extract<FromWorker, { op: string }>) {
     if (request.op === 'savePackage') {
-      await this.packages
+      await this.host
         .save(request.spec, request.data)
         .catch(error =>
           console.warn(`could not cache ${request.spec}:`, error),
         );
       return;
     }
-    const value = await this.packages.load(request.spec).catch(() => null);
+    const value = await (request.op === 'loadFile'
+      ? this.host.loadFile(request.path)
+      : this.host.load(request.spec)
+    ).catch(() => null);
     const reply: HostReply = { hostId: request.hostId, value };
     this.worker.postMessage(reply, value ? [value] : []);
   }
@@ -326,7 +337,7 @@ export function livePreview(
   const refresh = () => {
     if (latest !== undefined) void run(latest);
   };
-  const unsubscribe = client.onPackagesLoaded(refresh);
+  const unsubscribe = client.onLoaded(refresh);
   return {
     update: text => {
       latest = text;

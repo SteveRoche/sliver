@@ -1,5 +1,6 @@
 import type { EditorView } from '@codemirror/view';
 import { createEffect, createResource, Match, on, Switch } from 'solid-js';
+import { pasteImages } from '../editor/attachments';
 import { citations, refreshCitations } from '../editor/citations';
 import { setDiagnostics } from '../editor/diagnostics';
 import { followCursor } from '../editor/sync';
@@ -20,6 +21,7 @@ import {
   noteLabel,
   openNote,
   resolveTarget,
+  saveAttachment,
   saveNote,
   sessionFor,
   setPreviewFocus,
@@ -75,7 +77,12 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
     zotero: searchZotero,
     tooltip: async (text, position, before) =>
       (await session?.tooltip(text, position, before)) ?? null,
+    lintPaths: true,
   });
+
+  const paste = pasteImages((name, data) =>
+    saveAttachment(props.id, name, data),
+  );
 
   const cites = citations({
     known: hasReference,
@@ -128,7 +135,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
             initialDoc={text() ?? ''}
             onChange={next => s().edit(next)}
             onView={attach}
-            extensions={[editing, links, cites, follow]}
+            extensions={[editing, links, cites, follow, paste]}
             vim={settings.vim}
             lineNumbers={settings.lineNumbers}
           />

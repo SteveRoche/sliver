@@ -45,59 +45,87 @@ function toSquiggles(
   });
 }
 
-const squiggleField = StateField.define<{
-  squiggles: Squiggle[];
+/**
+ * Sets warnings found in the syntax (not by compiling) for `text`, as
+ * document offsets; kept apart from the compile's, which they don't replace.
+ */
+export const setLint = StateEffect.define<{
+  text: string;
+  warnings: { from: number; to: number; message: string }[];
+}>();
+
+interface SquiggleState {
+  compile: Squiggle[];
+  lint: Squiggle[];
   decorations: DecorationSet;
-}>({
-  create: () => ({ squiggles: [], decorations: Decoration.none }),
+}
+
+function withDecorations(compile: Squiggle[], lint: Squiggle[]): SquiggleState {
+  return {
+    compile,
+    lint,
+    decorations: Decoration.set(
+      [...compile, ...lint].map(s =>
+        Decoration.mark({
+          class: `cm-squiggle cm-squiggle-${s.diagnostic.severity}`,
+        }).range(s.from, s.to),
+      ),
+      true,
+    ),
+  };
+}
+
+const squiggleField = StateField.define<SquiggleState>({
+  create: () => withDecorations([], []),
   update(value, tr) {
+    const doc = tr.state.doc.toString();
+    let { compile, lint } = value;
+    let changed = false;
+    if (tr.docChanged) {
+      const map = (squiggles: Squiggle[]) =>
+        squiggles
+          .map(s => ({
+            ...s,
+            from: tr.changes.mapPos(s.from, 1),
+            to: tr.changes.mapPos(s.to, -1),
+          }))
+          .filter(s => s.from < s.to);
+      compile = map(compile);
+      lint = map(lint);
+      changed = true;
+    }
     for (const effect of tr.effects) {
-      if (
-        effect.is(setDiagnostics) &&
-        effect.value.text === tr.state.doc.toString()
-      ) {
-        const squiggles = toSquiggles(
+      if (effect.is(setDiagnostics) && effect.value.text === doc) {
+        compile = toSquiggles(
           effect.value.text,
           effect.value.diagnostics,
           tr.state.doc,
         );
-        return {
-          squiggles,
-          decorations: Decoration.set(
-            squiggles.map(s =>
-              Decoration.mark({
-                class: `cm-squiggle cm-squiggle-${s.diagnostic.severity}`,
-              }).range(s.from, s.to),
-            ),
-            true,
-          ),
-        };
+        changed = true;
+      } else if (effect.is(setLint) && effect.value.text === doc) {
+        lint = effect.value.warnings
+          .filter(w => w.from < w.to)
+          .map(w => ({
+            from: w.from,
+            to: w.to,
+            diagnostic: { severity: 'warning', message: w.message, hints: [] },
+          }));
+        changed = true;
       }
     }
-    if (!tr.docChanged) return value;
-    return {
-      squiggles: value.squiggles
-        .map(s => ({
-          ...s,
-          from: tr.changes.mapPos(s.from, 1),
-          to: tr.changes.mapPos(s.to, -1),
-        }))
-        .filter(s => s.from < s.to),
-      decorations: value.decorations.map(tr.changes),
-    };
+    return changed ? withDecorations(compile, lint) : value;
   },
   provide: field =>
     EditorView.decorations.from(field, value => value.decorations),
 });
 
 const tooltip = hoverTooltip((view, pos, side) => {
-  const found = view.state
-    .field(squiggleField)
-    .squiggles.filter(
-      s =>
-        (s.from < pos || (s.from === pos && side > 0)) &&
-        (pos < s.to || (pos === s.to && side < 0)),
-    );
+  const state = view.state.field(squiggleField);
+  const found = [...state.compile, ...state.lint].filter(
+    s =>
+      (s.from < pos || (s.from === pos && side > 0)) &&
+      (pos < s.to || (pos === s.to && side < 0)),
+  );
   if (found.length === 0) return null;
   return {
     pos: Math.min(...found.map(s => s.from)),

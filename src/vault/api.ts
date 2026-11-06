@@ -32,6 +32,38 @@ export interface FolderNode {
   warning: string | null;
   folders: FolderNode[];
   notes: TreeNode[];
+  /** Files that aren't notes, by name. */
+  assets: AssetNode[];
+}
+
+/** A file in the vault that isn't a note: an image, a PDF, data, ... */
+export interface AssetNode {
+  name: string;
+  /** Relative to the vault root, `/`-separated (no leading slash). */
+  path: string;
+}
+
+/** Where an asset or folder went, and the notes whose paths were rewritten. */
+export interface Moved {
+  path: string;
+  changed: NoteId[];
+}
+
+/** What moving an asset or folder would rewrite, for a confirmation prompt. */
+export interface PathPlan {
+  notes: { id: NoteId; count: number }[];
+  /** Preambles and templates, as vault paths. */
+  files: string[];
+}
+
+/** What changed in the vault outside the app (the `vault-changed` event). */
+export interface DiskChanges {
+  changed: NoteId[];
+  removed: NoteId[];
+  /** Assets added, changed or removed, as vault paths. */
+  assets: string[];
+  tree: boolean;
+  preambles: boolean;
 }
 
 /** What `applyMove` would change, for a confirmation prompt. */
@@ -74,6 +106,8 @@ export interface Analysis {
   tagClasses: string[];
   links: LinkRange[];
   citations: CitationRange[];
+  /** Paths that don't start at the vault root. */
+  relativePaths: { from: number; to: number }[];
 }
 
 /** A generated Typst file the preview compiles alongside the notes. */
@@ -161,8 +195,9 @@ export const vault = {
     invoke<void>('delete_note', { id, mode }),
   createFolder: (parent: string, name: string) =>
     invoke<string>('create_folder', { parent, name }),
+  /** Paths into the folder are rewritten in notes, preambles and templates. */
   renameFolder: (path: string, name: string) =>
-    invoke<string>('rename_folder', { path, name }),
+    invoke<Moved>('rename_folder', { path, name }),
   /** Resolves to the ids of the notes deleted with the folder. */
   deleteFolder: (path: string, mode?: DeleteMode) =>
     invoke<NoteId[]>('delete_folder', { path, mode }),
@@ -233,6 +268,35 @@ export const vault = {
   zoteroSearch: (query: string) =>
     invoke<ZoteroItem[]>('zotero_search', { query }),
   openInZotero: (key: string) => invoke<void>('open_in_zotero', { key }),
+  /** Any vault file by vault path (`/a/b.png`); rejects if there's none. */
+  readFile: (path: string) => invoke<ArrayBuffer>('read_file', { path }),
+  /** Saves a new asset; resolves to its vault path (a number added if taken). */
+  addAsset: (folder: string, name: string, data: ArrayBuffer | Uint8Array) =>
+    invoke<string>('add_asset', new Uint8Array(data), {
+      headers: {
+        'x-folder': encodeURIComponent(folder),
+        'x-name': encodeURIComponent(name),
+      },
+    }),
+  /** Copies a file from outside the vault into `folder`. */
+  importAsset: (folder: string, source: string) =>
+    invoke<string>('import_asset', { folder, source }),
+  /** What moving asset or folder `from` to `to` would rewrite. */
+  planPathMove: (from: string, to: string) =>
+    invoke<PathPlan>('plan_path_move', { from, to }),
+  renameAsset: (path: string, name: string) =>
+    invoke<Moved>('rename_asset', { path, name }),
+  moveAsset: (path: string, folder: string) =>
+    invoke<Moved>('move_asset', { path, folder }),
+  deleteAsset: (path: string, mode?: DeleteMode) =>
+    invoke<void>('delete_asset', { path, mode }),
+  /** Opens an asset in the system's default app for it. */
+  openAsset: (path: string) => invoke<void>('open_asset', { path }),
+  /** Opens a web or mail link in the default browser or mail app. */
+  openUrl: (url: string) => invoke<void>('open_url', { url }),
+  /** Writes a note deleted outside the app back to disk. */
+  restoreNote: (id: NoteId, folder: string, text: string) =>
+    invoke<NoteSummary>('restore_note', { id, folder, text }),
 };
 
 /**
@@ -269,6 +333,10 @@ export function autosave(
       if (options.enabled()) timer = setTimeout(flush, options.delayMs());
     },
     flush,
+    /** Stops a scheduled save; what's pending waits for `flush()`. */
+    hold() {
+      clearTimeout(timer);
+    },
     /** Drops unsaved edits, e.g. after the note was deleted. */
     cancel() {
       clearTimeout(timer);

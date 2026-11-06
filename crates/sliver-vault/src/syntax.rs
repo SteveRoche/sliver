@@ -6,6 +6,7 @@ use typst_syntax::{Lines, LinkedNode, Tag, highlight};
 
 use crate::citations::citations_in;
 use crate::links::links_in;
+use crate::paths::relative_paths;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +18,14 @@ pub struct Analysis {
     pub tag_classes: Vec<&'static str>,
     pub links: Vec<LinkRange>,
     pub citations: Vec<CitationRange>,
+    /// Paths that don't start at the vault root.
+    pub relative_paths: Vec<Span>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Span {
+    pub from: u32,
+    pub to: u32,
 }
 
 /// A citation key: `@key` (without a supplement) or the `<key>` in `cite(<key>)`.
@@ -45,8 +54,16 @@ pub fn analyze(text: &str) -> Analysis {
     let lines = Lines::new(text.to_owned());
     let utf16 = |byte: usize| lines.byte_to_utf16(byte).unwrap_or(0) as u32;
 
+    let linked = LinkedNode::new(&root);
     let mut highlights = Vec::new();
-    collect(&LinkedNode::new(&root), &utf16, &mut highlights);
+    collect(&linked, &utf16, &mut highlights);
+    let relative_paths = relative_paths(&linked)
+        .iter()
+        .map(|node| Span {
+            from: utf16(node.range().start),
+            to: utf16(node.range().end),
+        })
+        .collect();
 
     let links = links_in(&root)
         .into_iter()
@@ -78,6 +95,7 @@ pub fn analyze(text: &str) -> Analysis {
         tag_classes: Tag::LIST.iter().map(|t| t.css_class()).collect(),
         links,
         citations,
+        relative_paths,
     }
 }
 

@@ -5,13 +5,19 @@ import { createSignal, Match, onCleanup, onMount, Switch } from 'solid-js';
 import './App.css';
 import { registerAppCommands } from './commands/app';
 import { installKeybindings } from './commands/registry';
+import { installFileDrop } from './components/fileDrop';
 import { Palette } from './components/Palette';
 import { PromptHost } from './components/Prompt';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Welcome } from './components/Welcome';
 import { Workspace } from './components/Workspace';
-import { flushAll, openVault, vaultRoot } from './state/workspace';
-import { vault } from './vault/api';
+import {
+  applyDiskChanges,
+  flushAll,
+  openVault,
+  vaultRoot,
+} from './state/workspace';
+import { type DiskChanges, vault } from './vault/api';
 
 function App() {
   const [starting, setStarting] = createSignal(true);
@@ -28,6 +34,14 @@ function App() {
       await invoke('quit');
     });
     onCleanup(() => void unlistenQuit.then(f => f()));
+    // Changes made outside the app, from the backend's file watcher.
+    const unlistenChanges = listen<DiskChanges>('vault-changed', event => {
+      void applyDiskChanges(event.payload).catch(error =>
+        console.error('could not apply changes from disk:', error),
+      );
+    });
+    onCleanup(() => void unlistenChanges.then(f => f()));
+    onCleanup(installFileDrop());
 
     try {
       const last = await vault.last();

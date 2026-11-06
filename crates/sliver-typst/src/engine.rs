@@ -8,7 +8,7 @@ use typst::foundations::{
 };
 use typst::introspection::PagedPosition;
 use typst::introspection::{Introspector, MetadataElem};
-use typst::layout::{Abs, Frame, FrameItem, Point, Transform};
+use typst::layout::{Abs, Frame, Point};
 use typst::model::{CiteElem, CslSource, RefElem};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{
@@ -24,6 +24,7 @@ use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
 use crate::bands;
+use crate::text_layer::{text_items, with_text_layer};
 
 /// Long-lived compiler state shared by every open tab: the file map, fonts and
 /// the standard library. Each `compile` call picks one file as the main file.
@@ -82,6 +83,9 @@ pub struct CompileOutput {
     /// Packages the document imports that aren't loaded yet, as
     /// `@namespace/name:version`. Load them with `add_package` and recompile.
     pub missing_packages: Vec<String>,
+    /// Files in the project (vault) the document reads that the engine
+    /// doesn't have. Load them with `set_file` (or `set_source`) and recompile.
+    pub missing_files: Vec<String>,
     /// Time spent compiling (parse, evaluate, layout), in milliseconds.
     pub compile_ms: f64,
     /// Time spent rendering pages to SVG, in milliseconds.
@@ -285,6 +289,18 @@ impl Engine {
         self.deps.remove(&id);
         self.documents.remove(&id);
         self.rendered.remove(&id);
+        Ok(())
+    }
+
+    /// Adds or replaces a binary file, e.g. an image from the vault.
+    pub fn set_file(&mut self, path: &str, data: &[u8]) -> Result<(), InvalidPath> {
+        self.binaries
+            .insert(file_id(path)?, Bytes::new(data.to_vec()));
+        Ok(())
+    }
+
+    pub fn remove_file(&mut self, path: &str) -> Result<(), InvalidPath> {
+        self.binaries.remove(&file_id(path)?);
         Ok(())
     }
 
@@ -498,7 +514,12 @@ impl Engine {
                                 top: band.top.to_pt(),
                                 height: band.height.to_pt(),
                                 key: band.key,
-                                svg: (!known).then(|| typst_svg::svg(&band.page, &opts)),
+                                svg: (!known).then(|| {
+                                    with_text_layer(
+                                        typst_svg::svg(&band.page, &opts),
+                                        &band.page.frame,
+                                    )
+                                }),
                             }
                         })
                         .collect(),
@@ -516,6 +537,14 @@ impl Engine {
             .map(ToString::to_string)
             .collect();
         missing_packages.sort();
+        let mut missing_files: Vec<String> = world
+            .missing_files
+            .into_inner()
+            .unwrap_or_default()
+            .into_iter()
+            .map(path_of)
+            .collect();
+        missing_files.sort();
         let accessed = world.accessed.into_inner().unwrap_or_default();
         self.deps.insert(main, accessed);
         let pages = pages.map(|(pages, keys)| {
@@ -546,6 +575,7 @@ impl Engine {
             anchor: moved,
             diagnostics,
             missing_packages,
+            missing_files,
             compile_ms: compiled - started,
             render_ms: rendered - compiled,
         })
@@ -736,6 +766,7 @@ impl Engine {
             overlay,
             accessed: Mutex::default(),
             missing: Mutex::default(),
+            missing_files: Mutex::default(),
         }
     }
 }
@@ -783,19 +814,10 @@ pub struct CitationMark {
 
 /// Every text item in `frame` with its baseline's y on the page.
 fn texts(frame: &Frame) -> Vec<(Abs, &TextItem)> {
-    fn walk<'a>(frame: &'a Frame, ts: Transform, out: &mut Vec<(Abs, &'a TextItem)>) {
-        for (pos, item) in frame.items() {
-            let ts = ts.pre_concat(Transform::translate(pos.x, pos.y));
-            match item {
-                FrameItem::Group(group) => walk(&group.frame, ts.pre_concat(group.transform), out),
-                FrameItem::Text(text) => out.push((Point::zero().transform(ts).y, text)),
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(frame, Transform::identity(), &mut out);
-    out
+    text_items(frame)
+        .into_iter()
+        .map(|(ts, text)| (Point::zero().transform(ts).y, text))
+        .collect()
 }
 
 /// Typst's built-in citation styles: each name it accepts (aliases
@@ -1034,6 +1056,7 @@ struct CompileWorld<'a> {
     overlay: Option<Source>,
     accessed: Mutex<HashSet<FileId>>,
     missing: Mutex<HashSet<PackageSpec>>,
+    missing_files: Mutex<HashSet<FileId>>,
 }
 
 impl CompileWorld<'_> {
@@ -1051,6 +1074,11 @@ impl CompileWorld<'_> {
                 missing.insert(spec.clone());
             }
             return FileError::Package(PackageError::NotFound(spec.clone()));
+        }
+        if matches!(id.root(), VirtualRoot::Project)
+            && let Ok(mut missing) = self.missing_files.lock()
+        {
+            missing.insert(id);
         }
         FileError::NotFound(id.vpath().get_without_slash().into())
     }
@@ -1218,6 +1246,23 @@ mod tests {
             .unwrap();
         let again = engine.compile("/main.typ", true).unwrap().pages.unwrap();
         assert_eq!(svgs(again), [true, true]);
+    }
+
+    #[test]
+    fn reports_and_loads_missing_files() {
+        let mut engine = Engine::new();
+        engine
+            .set_source("/main.typ", "#read(\"/data/a.txt\")")
+            .unwrap();
+        let out = engine.compile("/main.typ", false).unwrap();
+        assert_eq!(out.missing_files, vec!["/data/a.txt"]);
+        engine.set_file("/data/a.txt", b"hello").unwrap();
+        let out = engine.compile("/main.typ", true).unwrap();
+        assert!(out.missing_files.is_empty());
+        assert!(out.diagnostics.is_empty());
+        let svg = out.pages.unwrap()[0].bands[0].svg.clone().unwrap();
+        assert!(svg.contains("class=\"text-layer\""));
+        assert!(svg.contains(">hello</text>"));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 mod bands;
 mod engine;
 mod tar;
+mod text_layer;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 

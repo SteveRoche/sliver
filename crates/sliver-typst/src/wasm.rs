@@ -64,6 +64,8 @@ pub struct Compiled {
     pub diagnostic_hint_counts: Vec<u32>,
     #[wasm_bindgen(js_name = missingPackages)]
     pub missing_packages: Vec<String>,
+    #[wasm_bindgen(js_name = missingFiles)]
+    pub missing_files: Vec<String>,
     #[wasm_bindgen(js_name = compileMs)]
     pub compile_ms: f64,
     #[wasm_bindgen(js_name = renderMs)]
@@ -170,6 +172,17 @@ impl Compiler {
         Ok(self.0.remove_source(path)?)
     }
 
+    /// Adds or replaces a binary file, e.g. an image from the vault.
+    #[wasm_bindgen(js_name = setFile)]
+    pub fn set_file(&mut self, path: &str, data: &[u8]) -> Result<(), JsError> {
+        Ok(self.0.set_file(path, data)?)
+    }
+
+    #[wasm_bindgen(js_name = removeFile)]
+    pub fn remove_file(&mut self, path: &str) -> Result<(), JsError> {
+        Ok(self.0.remove_file(path)?)
+    }
+
     #[wasm_bindgen(js_name = affectedMains)]
     pub fn affected_mains(&self, path: &str) -> Result<Vec<String>, JsError> {
         Ok(self.0.affected_mains(path)?)
@@ -247,6 +260,7 @@ impl Compiler {
             diagnostic_hints: Vec::new(),
             diagnostic_hint_counts: Vec::new(),
             missing_packages: out.missing_packages,
+            missing_files: out.missing_files,
             compile_ms: out.compile_ms,
             render_ms: out.render_ms,
         };

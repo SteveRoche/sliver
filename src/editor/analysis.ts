@@ -18,6 +18,7 @@ import {
   type LinkRange,
   vault,
 } from '../vault/api';
+import { setLint } from './diagnostics';
 
 /**
  * The note's syntax as `sliver-vault` sees it (`analyze`): highlighting,
@@ -115,48 +116,67 @@ export const citationsAt = (state: EditorState) =>
 export const inRaw = (state: EditorState, pos: number) =>
   state.field(syntaxField).raw.some(r => r.from < pos && pos < r.to);
 
-const analyzer = ViewPlugin.fromClass(
-  class {
-    private running = false;
-    private stale = true;
-    private destroyed = false;
+const RELATIVE_PATH =
+  'Relative paths resolve against where the app compiles the note, not its folder; start the path at the vault root (`/...`).';
 
-    constructor(private view: EditorView) {
-      void this.run();
-    }
+const analyzer = (lint: boolean) =>
+  ViewPlugin.fromClass(
+    class {
+      private running = false;
+      private stale = true;
+      private destroyed = false;
 
-    update(update: ViewUpdate) {
-      if (!update.docChanged) return;
-      this.stale = true;
-      void this.run();
-    }
-
-    destroy() {
-      this.destroyed = true;
-    }
-
-    private async run() {
-      if (this.running) return;
-      this.running = true;
-      try {
-        while (this.stale && !this.destroyed) {
-          this.stale = false;
-          const text = this.view.state.doc.toString();
-          const started = performance.now();
-          const analysis = await vault.analyze(text);
-          recordAnalysis(performance.now() - started);
-          // A result for older text is dropped; the loop fetches the latest.
-          if (!this.destroyed && text === this.view.state.doc.toString()) {
-            this.view.dispatch({ effects: setAnalysis.of({ text, analysis }) });
-          }
-        }
-      } catch (error) {
-        console.warn('could not analyze the note:', error);
-      } finally {
-        this.running = false;
+      constructor(private view: EditorView) {
+        void this.run();
       }
-    }
-  },
-);
 
-export const syntax = (): Extension => [syntaxField, analyzer];
+      update(update: ViewUpdate) {
+        if (!update.docChanged) return;
+        this.stale = true;
+        void this.run();
+      }
+
+      destroy() {
+        this.destroyed = true;
+      }
+
+      private async run() {
+        if (this.running) return;
+        this.running = true;
+        try {
+          while (this.stale && !this.destroyed) {
+            this.stale = false;
+            const text = this.view.state.doc.toString();
+            const started = performance.now();
+            const analysis = await vault.analyze(text);
+            recordAnalysis(performance.now() - started);
+            // A result for older text is dropped; the loop fetches the latest.
+            if (!this.destroyed && text === this.view.state.doc.toString()) {
+              const warnings = lint
+                ? analysis.relativePaths.map(r => ({
+                    ...r,
+                    message: RELATIVE_PATH,
+                  }))
+                : [];
+              this.view.dispatch({
+                effects: [
+                  setAnalysis.of({ text, analysis }),
+                  setLint.of({ text, warnings }),
+                ],
+              });
+            }
+          }
+        } catch (error) {
+          console.warn('could not analyze the note:', error);
+        } finally {
+          this.running = false;
+        }
+      }
+    },
+  );
+
+/** `lint`: warn about paths that don't start at the vault root (notes; preambles have their own check). */
+export const syntax = (lint = false): Extension => [
+  syntaxField,
+  analyzer(lint),
+];

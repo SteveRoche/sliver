@@ -2,6 +2,7 @@ mod commands;
 #[cfg(target_os = "macos")]
 mod menu;
 mod state;
+mod watch;
 mod window;
 mod zotero;
 
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(commands::OpenVault(Mutex::new(None)))
+        .manage(watch::VaultWatcher::default())
         .setup(|app| Ok(window::create(app)?))
         .invoke_handler(tauri::generate_handler![
             commands::create_vault,
@@ -67,6 +69,16 @@ pub fn run() {
             commands::zotero_pick,
             commands::open_in_zotero,
             commands::quit,
+            commands::read_file,
+            commands::add_asset,
+            commands::import_asset,
+            commands::plan_path_move,
+            commands::rename_asset,
+            commands::move_asset,
+            commands::delete_asset,
+            commands::open_asset,
+            commands::open_url,
+            commands::restore_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

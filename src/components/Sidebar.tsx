@@ -1,6 +1,10 @@
 import { createTreeCollection, Menu, TreeView } from '@ark-ui/solid';
 import ArrowDown from 'lucide-solid/icons/arrow-down';
+import Copy from 'lucide-solid/icons/copy';
 import CornerDownRight from 'lucide-solid/icons/corner-down-right';
+import ExternalLink from 'lucide-solid/icons/external-link';
+import File from 'lucide-solid/icons/file';
+import FileImage from 'lucide-solid/icons/file-image';
 import FilePlus from 'lucide-solid/icons/file-plus';
 import Folder from 'lucide-solid/icons/folder';
 import FolderInput from 'lucide-solid/icons/folder-input';
@@ -27,19 +31,23 @@ import {
   Switch,
 } from 'solid-js';
 import { Portal } from 'solid-js/web';
+import { type DropTarget, dropAsset, dropNote } from '../commands/app';
 import { runCommand } from '../commands/registry';
 import {
+  activeAsset,
   activeNote,
   collapsedFolders,
   inZettelkasten,
+  isViewable,
   noteById,
   noteLabel,
+  openAsset,
   openNote,
   setFolderCollapsed,
   tree,
   zettelkasten,
 } from '../state/workspace';
-import type { FolderNode, NoteId, TreeNode } from '../vault/api';
+import type { AssetNode, FolderNode, NoteId, TreeNode } from '../vault/api';
 import { overlayScrollbar } from './scrollbars';
 
 /** Row data for Ark's tree: folders and notes share one collection. */
@@ -57,10 +65,19 @@ type Node =
       note: TreeNode;
       depth: number;
       children?: Node[];
+    }
+  | {
+      id: string;
+      kind: 'asset';
+      asset: AssetNode;
+      depth: number;
+      children?: undefined;
     };
 
 const FOLDER_PREFIX = 'folder:';
 const folderId = (path: string) => FOLDER_PREFIX + path;
+const ASSET_PREFIX = 'asset:';
+const assetId = (path: string) => ASSET_PREFIX + path;
 
 function noteNodes(notes: TreeNode[], depth: number): Node[] {
   return notes.map(note => ({
@@ -87,6 +104,14 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
       }),
     ),
     ...noteNodes(folder.notes, depth),
+    ...folder.assets.map(
+      (asset): Node => ({
+        id: assetId(asset.path),
+        kind: 'asset',
+        asset,
+        depth,
+      }),
+    ),
   ];
 }
 
@@ -101,8 +126,125 @@ function noteBranchIds(nodes: Node[], out: string[] = []): string[] {
 /** What the context menu acts on; menu commands read these. */
 const [menuTarget, setMenuTarget] = createSignal<NoteId | null>(null);
 const [menuFolder, setMenuFolder] = createSignal<string | null>(null);
+const [menuAsset, setMenuAsset] = createSignal<string | null>(null);
 
-export { menuFolder, menuTarget };
+export { menuAsset, menuFolder, menuTarget };
+
+/** How far the pointer moves before a press on a row becomes a drag. */
+const DRAG_PX = 5;
+
+/**
+ * Dragging notes and files onto folders or note rows to move them (pointer
+ * events: HTML5 drag and drop is unreliable in the webview). The row under
+ * the pointer is marked; the click that ends a drag is swallowed, so it
+ * doesn't open the row.
+ */
+function treeDragging(tree: HTMLElement) {
+  const rowAt = (x: number, y: number) =>
+    document
+      .elementFromPoint(x, y)
+      ?.closest<HTMLElement>(
+        '[data-folder-path], [data-note-id], [data-asset-path]',
+      );
+  let marked: HTMLElement | null = null;
+  const mark = (el: HTMLElement | null) => {
+    if (el === marked) return;
+    marked?.classList.remove('drop-target');
+    el?.classList.add('drop-target');
+    marked = el;
+  };
+
+  const onDown = (down: PointerEvent) => {
+    if (down.button !== 0) return;
+    const row = (down.target as Element).closest<HTMLElement>(
+      '[data-note-id], [data-asset-path]',
+    );
+    if (!row || (down.target as Element).closest('.fold-toggle')) return;
+    const dragged: { note: NoteId } | { asset: string } = row.dataset.noteId
+      ? { note: row.dataset.noteId }
+      : { asset: row.dataset.assetPath ?? '' };
+    let dragging = false;
+    let target: DropTarget | null = null;
+    let ghost: HTMLElement | undefined;
+
+    const onMove = (move: PointerEvent) => {
+      if (
+        !dragging &&
+        Math.hypot(move.clientX - down.clientX, move.clientY - down.clientY) <
+          DRAG_PX
+      ) {
+        return;
+      }
+      if (!dragging) {
+        // Like a tab dragged off its bar: the row's label follows the pointer.
+        ghost = document.createElement('div');
+        ghost.className = 'drag-ghost';
+        ghost.textContent =
+          'note' in dragged
+            ? noteLabel(noteById(dragged.note))
+            : dragged.asset.slice(dragged.asset.lastIndexOf('/') + 1);
+        document.body.appendChild(ghost);
+        row.classList.add('drag-source');
+      }
+      dragging = true;
+      tree.classList.add('dragging');
+      if (ghost) {
+        ghost.style.left = `${move.clientX + 12}px`;
+        ghost.style.top = `${move.clientY + 8}px`;
+      }
+      const over = rowAt(move.clientX, move.clientY);
+      const inTree = over
+        ? tree.contains(over)
+        : tree.contains(document.elementFromPoint(move.clientX, move.clientY));
+      if (over === row || !inTree) {
+        target = null;
+        mark(null);
+        return;
+      }
+      target = over?.dataset.noteId
+        ? { note: over.dataset.noteId }
+        : over?.dataset.folderPath !== undefined
+          ? { folder: over.dataset.folderPath }
+          : over?.dataset.assetPath !== undefined
+            ? { folder: parentPath(over.dataset.assetPath) }
+            : { folder: '' };
+      mark(over ?? null);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      tree.classList.remove('dragging');
+      row.classList.remove('drag-source');
+      ghost?.remove();
+      mark(null);
+      if (!dragging) return;
+      // The click that follows the release would open the row.
+      window.addEventListener(
+        'click',
+        event => {
+          event.stopPropagation();
+          event.preventDefault();
+        },
+        { capture: true, once: true },
+      );
+      if (!target) return;
+      const done =
+        'note' in dragged
+          ? dropNote(dragged.note, target)
+          : dropAsset(dragged.asset, target);
+      void done.catch(error => console.error('could not move:', error));
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  };
+  tree.addEventListener('pointerdown', onDown);
+  return () => tree.removeEventListener('pointerdown', onDown);
+}
+
+const parentPath = (path: string) =>
+  path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 
 export function Sidebar() {
   const nodes = createMemo(() => folderContents(tree(), 0));
@@ -110,7 +252,11 @@ export function Sidebar() {
     createTreeCollection<Node>({
       nodeToValue: node => node.id,
       nodeToString: node =>
-        node.kind === 'folder' ? node.folder.name : noteLabel(node.note),
+        node.kind === 'folder'
+          ? node.folder.name
+          : node.kind === 'asset'
+            ? node.asset.name
+            : noteLabel(node.note),
       rootNode: {
         id: 'root',
         kind: 'folder',
@@ -151,17 +297,25 @@ export function Sidebar() {
 
   const onContextMenu = (event: MouseEvent) => {
     const row = (event.target as Element).closest<HTMLElement>(
-      '[data-note-id], [data-folder-path]',
+      '[data-note-id], [data-folder-path], [data-asset-path]',
     );
     setMenuTarget(row?.dataset.noteId ?? null);
     setMenuFolder(row?.dataset.folderPath ?? null);
+    setMenuAsset(row?.dataset.assetPath ?? null);
   };
 
   const targetNote = () => noteById(menuTarget() ?? '');
   const targetFolder = () =>
     allSubfolders(tree()).find(f => f.path === menuFolder());
   const isEmpty = () =>
-    tree().folders.length === 0 && tree().notes.length === 0;
+    tree().folders.length === 0 &&
+    tree().notes.length === 0 &&
+    tree().assets.length === 0;
+  const selected = () => {
+    const note = activeNote();
+    const asset = activeAsset();
+    return note ? [note] : asset ? [assetId(asset)] : [];
+  };
 
   return (
     <aside
@@ -169,7 +323,10 @@ export function Sidebar() {
       ref={aside =>
         onMount(() => {
           const tree = aside.querySelector<HTMLElement>('.sidebar-tree');
-          if (tree) onCleanup(overlayScrollbar(tree));
+          if (tree) {
+            onCleanup(overlayScrollbar(tree));
+            onCleanup(treeDragging(tree));
+          }
         })
       }
     >
@@ -203,6 +360,7 @@ export function Sidebar() {
             queueMicrotask(() => {
               setMenuTarget(null);
               setMenuFolder(null);
+              setMenuAsset(null);
             });
           }
         }}
@@ -216,10 +374,15 @@ export function Sidebar() {
           <TreeView.Root
             collection={collection()}
             selectionMode="single"
-            selectedValue={activeNote() ? [activeNote() as string] : []}
+            selectedValue={selected()}
             onSelectionChange={details => {
               const id = details.selectedValue[0];
-              if (id && !id.startsWith(FOLDER_PREFIX)) openNote(id);
+              if (!id || id.startsWith(FOLDER_PREFIX)) return;
+              if (id.startsWith(ASSET_PREFIX)) {
+                void openAsset(id.slice(ASSET_PREFIX.length));
+              } else {
+                openNote(id);
+              }
             }}
             expandOnClick={false}
             expandedValue={expanded()}
@@ -264,6 +427,9 @@ export function Sidebar() {
                 </Match>
                 <Match when={targetFolder()}>
                   {folder => <FolderMenu folder={folder()} />}
+                </Match>
+                <Match when={menuAsset()}>
+                  <AssetMenu />
                 </Match>
               </Switch>
             </Menu.Content>
@@ -341,6 +507,32 @@ function FolderMenu(props: { folder: FolderNode }) {
   );
 }
 
+function AssetMenu() {
+  return (
+    <>
+      <Menu.Item value="asset.menu.open">
+        <FileImage size={14} /> Open
+      </Menu.Item>
+      <Menu.Item value="asset.menu.openExternal">
+        <ExternalLink size={14} /> Open in default app
+      </Menu.Item>
+      <Menu.Item value="asset.menu.copyPath">
+        <Copy size={14} /> Copy path
+      </Menu.Item>
+      <Menu.Separator class="menu-separator" />
+      <Menu.Item value="asset.menu.move">
+        <FolderInput size={14} /> Move to folder...
+      </Menu.Item>
+      <Menu.Item value="asset.menu.rename">
+        <Pencil size={14} /> Rename...
+      </Menu.Item>
+      <Menu.Item value="asset.menu.delete" class="danger">
+        <Trash2 size={14} /> Delete...
+      </Menu.Item>
+    </>
+  );
+}
+
 function Warning(props: { message: string | null; label: string }) {
   return (
     <Show when={props.message}>
@@ -374,6 +566,14 @@ function NodeView(props: { node: Node; indexPath: number[] }) {
             <NoteView
               node={node() as Extract<Node, { kind: 'note' }>}
               indexPath={props.indexPath}
+              style={depthStyle()}
+            />
+          )}
+        </Match>
+        <Match when={props.node.kind === 'asset' && props.node}>
+          {node => (
+            <AssetRow
+              asset={(node() as Extract<Node, { kind: 'asset' }>).asset}
               style={depthStyle()}
             />
           )}
@@ -495,5 +695,27 @@ function NoteView(props: {
         </TreeView.Branch>
       )}
     </Show>
+  );
+}
+
+function AssetRow(props: { asset: AssetNode; style: JSX.CSSProperties }) {
+  return (
+    <TreeView.Item
+      class="tree-item asset-row"
+      style={props.style}
+      data-asset-path={props.asset.path}
+    >
+      <TreeView.ItemText class="note-label">
+        <span class="asset-icon">
+          <Show
+            when={isViewable(props.asset.path)}
+            fallback={<File size={14} />}
+          >
+            <FileImage size={14} />
+          </Show>
+        </span>
+        <span class="note-title">{props.asset.name}</span>
+      </TreeView.ItemText>
+    </TreeView.Item>
   );
 }

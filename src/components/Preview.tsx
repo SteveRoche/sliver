@@ -10,7 +10,7 @@ import { settings } from '../state/settings';
 import { isPreviewDark } from '../state/theme';
 import { resizing, setPreviewWidth } from '../state/workspace';
 import type { Diagnostic, Page, PagePoint } from '../typst/protocol';
-import type { NoteId } from '../vault/api';
+import { type NoteId, vault } from '../vault/api';
 import { SeverityIcon } from './SeverityIcon';
 import { withOverlayScrollbar } from './scrollbars';
 import { CITE_SCHEME, LINK_SCHEME } from './wikilinks';
@@ -81,6 +81,47 @@ function linkBox(anchor: Element) {
   const y = Number(match[2]) + Number(band?.dataset.top ?? 0);
   return { x, end: x + width, y, height };
 }
+
+/**
+ * The link area under the pointer. The text layer (for selecting text) lies
+ * over the links, so that's the event's target, not the link.
+ */
+function anchorAt(x: number, y: number): Element | null {
+  for (const el of document.elementsFromPoint(x, y)) {
+    const anchor = el.closest('a');
+    if (anchor) return anchor;
+    if (el.classList.contains('page')) break;
+  }
+  return null;
+}
+
+/**
+ * The selected text of the preview's text layer: the selection's part of
+ * each run, a line break between lines. The webview's own copy would run
+ * the lines together.
+ */
+function selectedText(host: Element, range: Range): string {
+  let out = '';
+  let line: string | null = null;
+  let band: Element | null = null;
+  for (const text of host.querySelectorAll('.text-layer text')) {
+    if (!range.intersectsNode(text)) continue;
+    const node = text.firstChild;
+    const content = text.textContent ?? '';
+    const start = node === range.startContainer ? range.startOffset : 0;
+    const end = node === range.endContainer ? range.endOffset : content.length;
+    const y = text.getAttribute('data-y');
+    const inBand = text.closest('.band');
+    if (out && (y !== line || inBand !== band)) out += '\n';
+    out += content.slice(start, end);
+    line = y;
+    band = inBand;
+  }
+  return out.replace(/\u00a0/g, ' ');
+}
+
+/** Links the preview opens outside the app. */
+const EXTERNAL = /^(https?:|mailto:)/i;
 
 const hrefOf = (anchor: Element) =>
   anchor.getAttribute('href') ?? anchor.getAttribute('xlink:href');
@@ -226,8 +267,11 @@ export function Preview(props: PreviewProps) {
   // Every anchor is intercepted: following one would navigate the webview
   // away from the app.
   const onClick = (event: MouseEvent) => {
-    const anchor = (event.target as Element).closest('a');
+    const anchor = anchorAt(event.clientX, event.clientY);
     if (!anchor) {
+      // Releasing a drag that selected text isn't a click on the page.
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
       const page = (event.target as Element).closest<HTMLElement>('.page');
       const point = page && pagePoint(page, event);
       if (page && point) {
@@ -240,6 +284,10 @@ export function Preview(props: PreviewProps) {
     const href = hrefOf(anchor) ?? '';
     if (href.startsWith(LINK_SCHEME)) {
       props.onOpenNote?.(href.slice(LINK_SCHEME.length));
+    } else if (EXTERNAL.test(href)) {
+      void vault
+        .openUrl(href)
+        .catch(error => console.warn('could not open link:', error));
     } else {
       const area = citationArea(anchor);
       if (!area) return;
@@ -265,8 +313,8 @@ export function Preview(props: PreviewProps) {
     cardAnchor = undefined;
   };
 
-  const onOver = (event: MouseEvent) => {
-    const area = citationArea(event.target);
+  const showCardFor = (anchor: Element) => {
+    const area = citationArea(anchor);
     if (!area || !props.citationCard) return;
     clearTimeout(hideTimer);
     if (area.anchor === cardAnchor) return;
@@ -294,8 +342,32 @@ export function Preview(props: PreviewProps) {
     hideTimer = setTimeout(hideCard, 200);
   };
 
-  const onOut = (event: MouseEvent) => {
-    if (citationArea(event.target)) scheduleHide();
+  // Hover is tracked by position, like clicks (see `anchorAt`).
+  let hovered: Element | null = null;
+  const leaveLink = () => {
+    if (hovered && citationArea(hovered)) scheduleHide();
+    hovered = null;
+    container.classList.remove('over-link');
+  };
+  const onMove = (event: MouseEvent) => {
+    const anchor = anchorAt(event.clientX, event.clientY);
+    if (anchor === hovered) return;
+    leaveLink();
+    if (!anchor) return;
+    hovered = anchor;
+    container.classList.add('over-link');
+    showCardFor(anchor);
+  };
+
+  const onCopy = (event: ClipboardEvent) => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      return;
+    }
+    const text = selectedText(pagesHost, selection.getRangeAt(0));
+    if (!text) return;
+    event.clipboardData?.setData('text/plain', text);
+    event.preventDefault();
   };
 
   /** Scrolls `point` into view if it isn't, and marks it briefly. */
@@ -406,13 +478,15 @@ export function Preview(props: PreviewProps) {
       showNearBands(container);
     });
     container.addEventListener('click', onClick);
-    container.addEventListener('mouseover', onOver);
-    container.addEventListener('mouseout', onOut);
+    container.addEventListener('mousemove', onMove);
+    container.addEventListener('mouseleave', leaveLink);
+    container.addEventListener('copy', onCopy);
     container.addEventListener('scroll', onScroll, { passive: true });
     onCleanup(() => {
       container.removeEventListener('click', onClick);
-      container.removeEventListener('mouseover', onOver);
-      container.removeEventListener('mouseout', onOut);
+      container.removeEventListener('mousemove', onMove);
+      container.removeEventListener('mouseleave', leaveLink);
+      container.removeEventListener('copy', onCopy);
       container.removeEventListener('scroll', onScroll);
       hideCard();
     });

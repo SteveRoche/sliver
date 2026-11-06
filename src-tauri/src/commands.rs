@@ -5,21 +5,22 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use sliver_vault::{
-    CitationOptions, CitationStyle, DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary,
-    Placement, Preamble, PreambleWarning, Reference, Template, Uuid, Vault,
+    CitationOptions, CitationStyle, DeleteMode, FolderNode, LinkDisplay, MovePlan, Moved,
+    NoteSummary, PathPlan, Placement, Preamble, PreambleWarning, Reference, Template, Uuid, Vault,
 };
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state;
+use crate::watch;
 use crate::zotero::{self, Pick};
 
 pub struct OpenVault(pub Mutex<Option<Vault>>);
 
 type CommandResult<T> = Result<T, String>;
 
-fn lock(open: &OpenVault) -> MutexGuard<'_, Option<Vault>> {
+pub fn lock(open: &OpenVault) -> MutexGuard<'_, Option<Vault>> {
     open.0
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -39,6 +40,7 @@ fn activate(app: &AppHandle, open: &OpenVault, vault: Vault) -> CommandResult<Fo
     let mut app_state = state::load(app);
     app_state.last_vault = Some(vault.root().to_path_buf());
     state::save(app, &app_state)?;
+    watch::watch(app, vault.root());
     *lock(open) = Some(vault);
     Ok(tree)
 }
@@ -136,7 +138,7 @@ pub async fn rename_folder(
     open: State<'_, OpenVault>,
     path: String,
     name: String,
-) -> CommandResult<String> {
+) -> CommandResult<Moved> {
     with_vault(&open, |vault| vault.rename_folder(&path, &name))
 }
 
@@ -540,4 +542,136 @@ pub async fn open_in_zotero(app: AppHandle, key: String) -> CommandResult<()> {
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+// --- assets ---
+
+/// Any file in the vault by its vault path (`/a/b.png`), as raw bytes; an
+/// error if it doesn't exist.
+#[tauri::command]
+pub async fn read_file(open: State<'_, OpenVault>, path: String) -> CommandResult<Response> {
+    with_vault(&open, |vault| vault.read_file(&path)).map(Response::new)
+}
+
+/// Decodes a header value the webview percent-encoded (`encodeURIComponent`),
+/// since header values must be ASCII.
+fn header_text(request: &Request<'_>, name: &str) -> CommandResult<String> {
+    let raw = request
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| format!("missing {name} header"))?;
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut rest = raw.as_bytes();
+    while let Some((&b, tail)) = rest.split_first() {
+        if b == b'%' && tail.len() >= 2 {
+            let hex = std::str::from_utf8(&tail[..2]).map_err(|e| e.to_string())?;
+            bytes.push(u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(b);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Saves a new asset (e.g. a pasted image). The raw body is the file; the
+/// folder and name come in the `x-folder` and `x-name` headers. Returns its
+/// vault path, which may have a number added to the name.
+#[tauri::command]
+pub async fn add_asset(open: State<'_, OpenVault>, request: Request<'_>) -> CommandResult<String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected a raw file body".into());
+    };
+    let folder = header_text(&request, "x-folder")?;
+    let name = header_text(&request, "x-name")?;
+    with_vault(&open, |vault| vault.add_asset(&folder, &name, bytes))
+}
+
+/// Copies a file from outside the vault (dropped from Finder) into `folder`.
+#[tauri::command]
+pub async fn import_asset(
+    open: State<'_, OpenVault>,
+    folder: String,
+    source: PathBuf,
+) -> CommandResult<String> {
+    with_vault(&open, |vault| vault.import_asset(&folder, &source))
+}
+
+#[tauri::command]
+pub async fn plan_path_move(
+    open: State<'_, OpenVault>,
+    from: String,
+    to: String,
+) -> CommandResult<PathPlan> {
+    with_vault(&open, |vault| vault.plan_path_move(&from, &to))
+}
+
+#[tauri::command]
+pub async fn rename_asset(
+    open: State<'_, OpenVault>,
+    path: String,
+    name: String,
+) -> CommandResult<Moved> {
+    with_vault(&open, |vault| vault.rename_asset(&path, &name))
+}
+
+#[tauri::command]
+pub async fn move_asset(
+    open: State<'_, OpenVault>,
+    path: String,
+    folder: String,
+) -> CommandResult<Moved> {
+    with_vault(&open, |vault| vault.move_asset(&path, &folder))
+}
+
+#[tauri::command]
+pub async fn delete_asset(
+    open: State<'_, OpenVault>,
+    path: String,
+    mode: Option<DeleteMode>,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| {
+        vault.delete_asset(&path, mode.unwrap_or_default())
+    })
+}
+
+/// Opens an asset in the system's default app for it.
+#[tauri::command]
+pub async fn open_asset(
+    app: AppHandle,
+    open: State<'_, OpenVault>,
+    path: String,
+) -> CommandResult<()> {
+    let file = with_vault(&open, |vault| vault.asset_file(&path))?;
+    app.opener()
+        .open_path(file.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Opens a web or mail link from the preview in the default browser or
+/// mail app; nothing else (no `file:` or app schemes).
+#[tauri::command]
+pub async fn open_url(app: AppHandle, url: String) -> CommandResult<()> {
+    let allowed = ["https://", "http://", "mailto:"]
+        .iter()
+        .any(|scheme| url.to_ascii_lowercase().starts_with(scheme));
+    if !allowed {
+        return Err(format!("not a web or mail link: {url}"));
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// Writes a note whose file was deleted outside the app back to disk.
+#[tauri::command]
+pub async fn restore_note(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    folder: String,
+    text: String,
+) -> CommandResult<NoteSummary> {
+    with_vault(&open, |vault| vault.restore_note(id, &folder, &text))
 }

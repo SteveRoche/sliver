@@ -32,10 +32,11 @@ const failedAt = new Map<string, number>();
 let nextHostId = 0;
 const hostReplies = new Map<number, (value: ArrayBuffer | null) => void>();
 
-function host(request: {
-  op: 'loadPackage';
-  spec: string;
-}): Promise<ArrayBuffer | null> {
+function host(
+  request:
+    | { op: 'loadPackage'; spec: string }
+    | { op: 'loadFile'; path: string },
+): Promise<ArrayBuffer | null> {
   const hostId = nextHostId++;
   return new Promise(resolve => {
     hostReplies.set(hostId, resolve);
@@ -78,7 +79,7 @@ function ensurePackages(compiler: Compiler, specs: string[]) {
     if (Date.now() - (failedAt.get(spec) ?? -Infinity) < RETRY_MS) continue;
     const task = loadPackage(compiler, spec)
       .then(
-        () => post({ event: 'packagesLoaded', specs: [spec] }),
+        () => post({ event: 'loaded' }),
         error => {
           failedAt.set(spec, Date.now());
           console.warn(`could not load ${spec}:`, error);
@@ -86,6 +87,35 @@ function ensurePackages(compiler: Compiler, specs: string[]) {
       )
       .finally(() => loading.delete(spec));
     loading.set(spec, task);
+  }
+}
+
+/** Vault files being loaded, and ones the vault doesn't have (until forgotten). */
+const loadingFiles = new Set<string>();
+const absentFiles = new Set<string>();
+
+/**
+ * Loads vault files a compile read but the compiler lacks (images, data,
+ * other `.typ` files) and announces them, so the documents recompile.
+ */
+function ensureFiles(compiler: Compiler, paths: string[]) {
+  for (const path of paths) {
+    if (loadingFiles.has(path) || absentFiles.has(path)) continue;
+    loadingFiles.add(path);
+    void host({ op: 'loadFile', path })
+      .then(data => {
+        if (!data) {
+          absentFiles.add(path);
+          return;
+        }
+        if (path.endsWith('.typ')) {
+          compiler.setSource(path, new TextDecoder().decode(data));
+        } else {
+          compiler.setFile(path, new Uint8Array(data));
+        }
+        post({ event: 'loaded' });
+      })
+      .finally(() => loadingFiles.delete(path));
   }
 }
 
@@ -115,6 +145,9 @@ function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
     const missing = out.missingPackages;
     ensurePackages(compiler, missing);
     const loadingPackages = missing.filter(spec => loading.has(spec));
+    const files = out.missingFiles;
+    ensureFiles(compiler, files);
+    const loadingVaultFiles = files.filter(path => loadingFiles.has(path));
     const severities = out.diagnosticSeverities;
     const messages = out.diagnosticMessages;
     const paths = out.diagnosticPaths;
@@ -126,8 +159,13 @@ function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
     for (let i = 0; i < messages.length; i++) {
       const own = hints.slice(hint, hint + hintCounts[i]);
       hint += hintCounts[i];
-      // "Not found" errors of packages being fetched are left out.
-      if (loadingPackages.some(spec => messages[i].includes(spec))) continue;
+      // "Not found" errors of packages and files being fetched are left out.
+      if (
+        loadingPackages.some(spec => messages[i].includes(spec)) ||
+        loadingVaultFiles.some(path => messages[i].includes(path.slice(1)))
+      ) {
+        continue;
+      }
       const r = ranges.subarray(4 * i, 4 * i + 4);
       diagnostics.push({
         severity: severities[i] === 0 ? 'error' : 'warning',
@@ -177,6 +215,13 @@ function handle(compiler: Compiler, req: Request): unknown {
       return compiler.removeSource(req.path);
     case 'affectedMains':
       return compiler.affectedMains(req.path);
+    case 'forgetFile': {
+      const mains = compiler.affectedMains(req.path);
+      absentFiles.delete(req.path);
+      compiler.removeFile(req.path);
+      if (req.path.endsWith('.typ')) compiler.removeSource(req.path);
+      return mains;
+    }
     case 'compile': {
       if (req.source) compiler.setSource(req.source.path, req.source.text);
       const result = toCompile(

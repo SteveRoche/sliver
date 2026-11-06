@@ -280,6 +280,18 @@ button.primary {
   background: var(--selected);
 }
 
+/* The note or file being dragged in the sidebar. */
+.tree-item.drag-source {
+  opacity: 0.5;
+}
+
+/* Where a dragged note or file (or files from Finder) would go. */
+.drop-target,
+.file-drop-target {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--hover);
+}
+
 .tree-item:focus-visible {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
@@ -318,7 +330,8 @@ button.primary {
   cursor: pointer;
 }
 
-.folder-icon {
+.folder-icon,
+.asset-icon {
   display: inline-flex;
   flex: none;
   align-self: center;
@@ -417,8 +430,9 @@ button.primary {
   color: var(--fg);
 }
 
-/* Follows the pointer while a tab is dragged off its bar. */
-.tab-ghost {
+/* Follows the pointer while a tab is dragged off its bar, or a note or
+   file in the sidebar. */
+.drag-ghost {
   position: fixed;
   z-index: 50;
   max-width: 240px;
@@ -656,6 +670,42 @@ button.primary {
   inset: 0;
 }
 
+.pane-asset {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.asset-view {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  overflow: auto;
+  padding: 16px;
+  background: var(--pane-bg);
+}
+
+.asset-view img {
+  display: block;
+  max-width: 100%;
+}
+
+/* A note's file changed on disk while it had unsaved edits. */
+.pane-notice {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.pane-notice span {
+  flex: 1;
+  color: var(--warning);
+}
+
 .pane-preview,
 .global-preview {
   display: flex;
@@ -795,6 +845,24 @@ button.primary {
 
 .page a {
   cursor: pointer;
+}
+
+/* Invisible text over the glyphs, so the preview's text can be selected. */
+.text-layer text {
+  fill: transparent;
+  font-family: sans-serif;
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.over-link .text-layer text {
+  cursor: pointer;
+}
+
+.text-layer text::selection {
+  fill: transparent;
+  background: var(--selection);
 }
 
 .loading {
@@ -1589,4 +1657,10 @@ button.keybinding-button.recording {
 
 .debug-bar.slow {
   background: var(--error);
+}
+
+/* After every other cursor: a drag in the sidebar shows grabbing throughout. */
+.sidebar-tree.dragging,
+.sidebar-tree.dragging * {
+  cursor: grabbing;
 }

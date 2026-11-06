@@ -164,6 +164,11 @@ export interface Calls {
   removeSource: { args: { path: string }; result: undefined };
   /** Main files whose last compile read `path`. */
   affectedMains: { args: { path: string }; result: string[] };
+  /**
+   * Drops vault file `path` (an asset changed on disk), so the next compile
+   * that reads it loads it again; returns the mains whose last compile read it.
+   */
+  forgetFile: { args: { path: string }; result: string[] };
   compile: {
     args: {
       main: string;
@@ -240,7 +245,7 @@ export type Request = {
 
 export interface HostReply {
   hostId: number;
-  /** A package's `.tar.gz`, or null if the host doesn't have it. */
+  /** A package's `.tar.gz` or a vault file, or null if the host doesn't have it. */
   value: ArrayBuffer | null;
 }
 
@@ -251,17 +256,23 @@ export type Response =
 
 export type HostRequest =
   | { hostId: number; op: 'loadPackage'; spec: string }
+  | { hostId: number; op: 'loadFile'; path: string }
   | { hostId: number; op: 'savePackage'; spec: string; data: ArrayBuffer };
 
-export interface PackagesLoaded {
-  event: 'packagesLoaded';
-  specs: string[];
+/** Packages or vault files finished loading: documents that needed them can recompile. */
+export interface Loaded {
+  event: 'loaded';
 }
 
-export type FromWorker = Response | HostRequest | PackagesLoaded;
+export type FromWorker = Response | HostRequest | Loaded;
 
-/** Where packages are cached between sessions (the open vault's `.sliver/pkg`). */
-export interface PackageHost {
+/**
+ * What the worker gets from the app: packages cached between sessions (the
+ * open vault's `.sliver/pkg`) and the vault's files (images, data).
+ */
+export interface WorkerHost {
   load(spec: string): Promise<ArrayBuffer | null>;
   save(spec: string, data: ArrayBuffer): Promise<void>;
+  /** A vault file by its vault path, or null if there is none. */
+  loadFile(path: string): Promise<ArrayBuffer | null>;
 }

@@ -34,6 +34,8 @@ export interface TypstEditingOptions {
   notes?: () => LinkCandidate[];
   /** Zotero items for `@` completion; none by default. */
   zotero?: (query: string) => Promise<CitationCandidate[]>;
+  /** Warn about paths that don't start at the vault root (in notes). */
+  lintPaths?: boolean;
 }
 
 /**
@@ -41,7 +43,7 @@ export interface TypstEditingOptions {
  * signature help, hover tooltips and auto-closing pairs.
  */
 export const typstEditing = (options: TypstEditingOptions): Extension => [
-  syntax(),
+  syntax(options.lintPaths),
   diagnostics(),
   completion({
     notes: options.notes ?? (() => []),

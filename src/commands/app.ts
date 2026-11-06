@@ -2,7 +2,7 @@ import { ask, open } from '@tauri-apps/plugin-dialog';
 import { openPalette, pick } from '../components/Palette';
 import { prompt } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
-import { menuFolder, menuTarget } from '../components/Sidebar';
+import { menuAsset, menuFolder, menuTarget } from '../components/Sidebar';
 import { toggleWrap } from '../editor/format';
 import { triggerSignature } from '../editor/signature';
 import { insertCitation, refreshReferences } from '../state/citations';
@@ -26,6 +26,7 @@ import {
   createNote,
   cyclePane,
   cycleTab,
+  deleteAsset,
   deleteFolder,
   deleteNote,
   focusedPane,
@@ -33,14 +34,17 @@ import {
   inZettelkasten,
   kinds,
   layout,
+  moveAsset,
   moveToAddress,
   moveToFolder,
   newTab,
   noteById,
   noteLabel,
+  openAsset,
   openVault,
   previewLayout,
   refreshLinks,
+  renameAsset,
   renameFolder,
   renameNote,
   saveNote,
@@ -137,7 +141,11 @@ function isUnder(address: string, root: string): boolean {
 
 async function fileNote(id: NoteId) {
   const placement = await chooseAddress(id);
-  if (!placement) return;
+  if (placement) await fileAt(id, placement);
+}
+
+/** Moves note `id` to `placement`, after confirming what else changes. */
+async function fileAt(id: NoteId, placement: Placement) {
   const plan = await vault.planMove(id, placement);
   const [first, ...rest] = plan.moves;
   const links = plan.linkEdits.reduce((sum, e) => sum + e.count, 0);
@@ -169,7 +177,12 @@ async function moveNoteToFolder(id: NoteId) {
     .filter(path => path !== zk && path !== note?.folder)
     .map(path => ({ label: folderLabel(path), value: path }));
   const choice = await pick('Move to folder...', choices);
-  if (!choice) return;
+  if (choice) await moveNoteInto(id, choice.value);
+}
+
+/** Moves note `id` into folder `folder`, warning first if it loses its address. */
+async function moveNoteInto(id: NoteId, folder: string) {
+  const note = noteById(id);
   if (note?.address && inZettelkasten(id)) {
     const ok = await ask(
       `Moving "${noteLabel(note)}" out of the Zettelkasten removes its address ${note.address}. Links to it will point at its id instead.`,
@@ -177,7 +190,115 @@ async function moveNoteToFolder(id: NoteId) {
     );
     if (!ok) return;
   }
-  await moveToFolder(id, choice.value);
+  await moveToFolder(id, folder);
+}
+
+/** Where a note or file was dropped in the sidebar: a folder, or a note's row. */
+export type DropTarget = { folder: string } | { note: NoteId };
+
+/**
+ * Drops note `id` in the sidebar: onto the Zettelkasten, a new top-level
+ * address; onto a Zettelkasten note, a next note or aside of it (asked);
+ * onto another folder (or a note in one), into that folder.
+ */
+export async function dropNote(id: NoteId, target: DropTarget) {
+  const zk = zettelkasten()?.path;
+  if ('note' in target) {
+    if (target.note === id) return;
+    const onto = noteById(target.note);
+    if (!onto) return;
+    if (onto.address && inZettelkasten(onto.id)) {
+      const label = noteLabel(onto);
+      const how = await pick<'next' | 'aside'>('Next note or aside?', [
+        { label: `Next note after ${label}`, value: 'next' },
+        { label: `Aside to ${label}`, value: 'aside' },
+      ]);
+      if (how) await fileAt(id, { kind: how.value, of: onto.id });
+      return;
+    }
+    return dropNote(id, { folder: onto.folder });
+  }
+  if (target.folder === zk) {
+    if (!inZettelkasten(id)) await fileAt(id, { kind: 'top' });
+    return;
+  }
+  if (noteById(id)?.folder !== target.folder) {
+    await moveNoteInto(id, target.folder);
+  }
+}
+
+const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+const parentOf = (path: string) =>
+  path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+const joinPath = (folder: string, name: string) =>
+  folder ? `${folder}/${name}` : name;
+
+/**
+ * Whether to go ahead with moving `from` to `to` (a file or a folder): asks
+ * when paths in notes, preambles or templates would be rewritten.
+ */
+async function confirmPathMove(from: string, to: string, title: string) {
+  const plan = await vault.planPathMove(from, to);
+  const paths = plan.notes.reduce((sum, e) => sum + e.count, 0);
+  if (paths === 0 && plan.files.length === 0) return true;
+  const where = [
+    plan.notes.length > 0
+      ? `${paths} path(s) in ${plan.notes.length} note(s)`
+      : '',
+    plan.files.length > 0
+      ? `${plan.files.length} preamble or template file(s)`
+      : '',
+  ].filter(Boolean);
+  return ask(`${where.join(' and ')} will be updated to /${to}.`, {
+    title,
+    kind: 'info',
+    okLabel: 'Move',
+  });
+}
+
+/** Drops file `path` in the sidebar: into the folder (or the note's folder) under it. */
+export async function dropAsset(path: string, target: DropTarget) {
+  const folder =
+    'note' in target ? noteById(target.note)?.folder : target.folder;
+  if (folder === undefined || folder === parentOf(path)) return;
+  if (
+    await confirmPathMove(path, joinPath(folder, fileName(path)), 'Move file')
+  ) {
+    await moveAsset(path, folder);
+  }
+}
+
+async function renameAssetPrompt(path: string) {
+  const name = await prompt({
+    title: 'Rename file',
+    label: 'Name',
+    initial: fileName(path),
+    confirm: 'Rename',
+  });
+  if (name === null || !name.trim() || name.trim() === fileName(path)) return;
+  const to = joinPath(parentOf(path), name.trim());
+  if (await confirmPathMove(path, to, 'Rename file')) {
+    await renameAsset(path, name.trim());
+  }
+}
+
+async function moveAssetPrompt(path: string) {
+  const choices = ['', ...allFolders().map(f => f.path)]
+    .filter(folder => folder !== parentOf(path))
+    .map(folder => ({ label: folderLabel(folder), value: folder }));
+  const choice = await pick('Move file to folder...', choices);
+  if (choice) await dropAsset(path, { folder: choice.value });
+}
+
+async function removeAsset(path: string) {
+  const verb =
+    settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
+  const ok = await ask(`${verb}: "${path}"?`, {
+    title: 'Delete file',
+    kind: 'warning',
+    okLabel: verb,
+  });
+  if (ok) await deleteAsset(path);
 }
 
 /** A folder that's gone (deleted or renamed outside the app) falls back to the root. */
@@ -250,7 +371,10 @@ async function renameFolderPrompt(path: string) {
     confirm: 'Rename',
   });
   if (name === null || !name.trim()) return;
-  await renameFolder(path, name.trim());
+  const to = joinPath(parentOf(path), name.trim());
+  if (to !== path && (await confirmPathMove(path, to, 'Rename folder'))) {
+    await renameFolder(path, name.trim());
+  }
 }
 
 async function removeFolder(path: string) {
@@ -371,6 +495,53 @@ function onFolder(): Command[] {
   ];
 }
 
+/** Commands for the sidebar's right-clicked file; only enabled while its menu is open. */
+function onAsset(): Command[] {
+  const withAsset = (f: (path: string) => unknown) => () => {
+    const path = menuAsset();
+    if (path !== null) return f(path);
+  };
+  const enabled = () => hasVault() && menuAsset() !== null;
+  return [
+    {
+      id: 'asset.menu.open',
+      title: 'Open file',
+      enabled,
+      run: withAsset(openAsset),
+    },
+    {
+      id: 'asset.menu.openExternal',
+      title: 'Open file in its default app',
+      enabled,
+      run: withAsset(path => vault.openAsset(path)),
+    },
+    {
+      id: 'asset.menu.copyPath',
+      title: 'Copy path of file',
+      enabled,
+      run: withAsset(path => navigator.clipboard.writeText(`/${path}`)),
+    },
+    {
+      id: 'asset.menu.rename',
+      title: 'Rename file',
+      enabled,
+      run: withAsset(renameAssetPrompt),
+    },
+    {
+      id: 'asset.menu.move',
+      title: 'Move file to a folder',
+      enabled,
+      run: withAsset(moveAssetPrompt),
+    },
+    {
+      id: 'asset.menu.delete',
+      title: 'Delete file',
+      enabled,
+      run: withAsset(removeAsset),
+    },
+  ];
+}
+
 /** The active note's editor, if it's on screen. */
 const shownEditor = () => {
   const id = activeNote();
@@ -414,10 +585,12 @@ export function registerAppCommands(): () => void {
       run: () => newNote({ kind: 'unaddressed' }, 'New note'),
     },
     ...onNote('note', activeNote),
-    ...[...onNote('menu', menuTarget), ...onFolder()].map(command => ({
-      ...command,
-      contextMenu: true,
-    })),
+    ...[...onNote('menu', menuTarget), ...onFolder(), ...onAsset()].map(
+      command => ({
+        ...command,
+        contextMenu: true,
+      }),
+    ),
     {
       id: 'folder.new',
       title: 'New folder',

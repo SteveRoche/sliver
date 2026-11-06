@@ -21,6 +21,7 @@ import {
   paneSizes,
   previewFocus,
   previewLayout,
+  resolveConflict,
   sessionFor,
   setDragResizing,
   setGlobalSizes,
@@ -29,6 +30,7 @@ import {
   setSplitSizes,
 } from '../state/workspace';
 import type { NoteId } from '../vault/api';
+import { AssetView } from './AssetView';
 import { citationCard } from './citationCard';
 import { DebugPanel } from './DebugPanel';
 import { editorElement } from './editorHosts';
@@ -196,11 +198,18 @@ function NotePreview(props: { note: NoteId; jumps?: () => boolean }) {
 function PaneView(props: { pane: Pane }) {
   let slot!: HTMLDivElement;
   const note = () => paneNote(props.pane);
+  const asset = () =>
+    props.pane.tabs.find(t => t.key === props.pane.active)?.asset;
   const focused = () => focusedPane().id === props.pane.id;
-  const showEditor = () => props.pane.mode !== 'read';
+  const showEditor = () => props.pane.mode !== 'read' && !asset();
   const showPreview = () =>
-    props.pane.mode === 'read' ||
-    (props.pane.mode === 'edit' && previewLayout() === 'pane');
+    !asset() &&
+    (props.pane.mode === 'read' ||
+      (props.pane.mode === 'edit' && previewLayout() === 'pane'));
+  const conflict = () => {
+    const id = note();
+    return id ? sessionFor(id)?.conflict() : null;
+  };
 
   // Adopt the editors of this pane's notes (see `editorHosts`).
   createEffect(() => {
@@ -225,6 +234,29 @@ function PaneView(props: { pane: Pane }) {
       onFocusIn={() => focusPane(props.pane.id)}
     >
       <TabBar pane={props.pane} focused={focused()} />
+      <Show when={conflict()}>
+        {kind => (
+          <div class="pane-notice" role="alert">
+            <span>
+              {kind() === 'changed'
+                ? 'This note changed on disk while you were editing it.'
+                : 'This note was deleted on disk while you were editing it.'}
+            </span>
+            <button
+              type="button"
+              onClick={() => void resolveConflict(note() as NoteId, 'mine')}
+            >
+              {kind() === 'changed' ? 'Keep mine' : 'Restore it'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void resolveConflict(note() as NoteId, 'disk')}
+            >
+              {kind() === 'changed' ? 'Load from disk' : 'Close it'}
+            </button>
+          </div>
+        )}
+      </Show>
       <div
         class="pane-body"
         classList={{ 'with-preview': showEditor() && showPreview() }}
@@ -244,6 +276,13 @@ function PaneView(props: { pane: Pane }) {
             <EmptyTab />
           </Show>
         </div>
+        <Show when={asset()} keyed>
+          {path => (
+            <div class="pane-asset">
+              <AssetView path={path} />
+            </div>
+          )}
+        </Show>
         <Show when={showEditor() && showPreview()}>
           <Divider
             direction="row"

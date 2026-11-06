@@ -11,9 +11,10 @@
 
 use serde::Serialize;
 use typst_syntax::ast;
-use typst_syntax::{Lines, LinkedNode, SyntaxKind};
+use typst_syntax::{Lines, LinkedNode};
 
 use crate::header::string_literal;
+use crate::paths::relative_paths;
 
 /// The preambles' directory, relative to the vault root.
 pub const PREAMBLES_DIR: &str = ".sliver/preambles";
@@ -88,20 +89,6 @@ pub struct PreambleWarning {
     pub message: String,
 }
 
-/// Functions whose first argument is a path.
-const PATH_FUNCS: &[&str] = &[
-    "image",
-    "read",
-    "json",
-    "csv",
-    "yaml",
-    "toml",
-    "xml",
-    "cbor",
-    "plugin",
-    "bibliography",
-];
-
 pub fn preamble_warnings(text: &str) -> Vec<PreambleWarning> {
     let root = typst_syntax::parse(text);
     let lines = Lines::new(text.to_owned());
@@ -136,43 +123,14 @@ pub fn preamble_warnings(text: &str) -> Vec<PreambleWarning> {
         }
     }
 
-    let mut stack = vec![linked];
-    while let Some(node) = stack.pop() {
-        if let Some(path) = path_argument(&node)
-            && let Some(ast::Expr::Str(s)) = path.cast::<ast::Expr>()
-            && !s.get().starts_with('/')
-            && !s.get().starts_with('@')
-        {
-            warn(
-                &path,
-                "Relative paths resolve differently once the preamble is exported with a note; start the path at the vault root (`/...`).",
-            );
-        }
-        stack.extend(node.children());
+    for path in relative_paths(&linked) {
+        warn(
+            &path,
+            "Relative paths resolve differently once the preamble is exported with a note; start the path at the vault root (`/...`).",
+        );
     }
     out.sort_by_key(|w| w.from);
     out
-}
-
-/// The node holding the path of an import, an include or a call like `image(...)`.
-fn path_argument<'a>(node: &LinkedNode<'a>) -> Option<LinkedNode<'a>> {
-    match node.kind() {
-        SyntaxKind::ModuleImport | SyntaxKind::ModuleInclude => {
-            node.children().find(|c| c.kind() == SyntaxKind::Str)
-        }
-        SyntaxKind::FuncCall => {
-            let call = node.cast::<ast::FuncCall>()?;
-            let ast::Expr::Ident(callee) = call.callee() else {
-                return None;
-            };
-            if !PATH_FUNCS.contains(&callee.get().as_str()) {
-                return None;
-            }
-            let args = node.children().find(|c| c.kind() == SyntaxKind::Args)?;
-            args.children().find(|c| c.kind() == SyntaxKind::Str)
-        }
-        _ => None,
-    }
 }
 
 /// What "Restore default" puts back: the starter preamble, or the default

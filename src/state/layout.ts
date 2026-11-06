@@ -7,11 +7,22 @@ import type { NoteId } from '../vault/api';
  * a store's `produce`.
  */
 
-/** An editor tab; like in Obsidian it can be empty (Mod+T) until a note is opened in it. */
+/**
+ * An editor tab; like in Obsidian it can be empty (Mod+T) until a note is
+ * opened in it. A tab can show an image from the vault (`asset`, a vault
+ * path) instead of a note.
+ */
 export interface Tab {
   key: string;
   note: NoteId | null;
+  asset?: string;
 }
+
+/** A tab that shows nothing yet. */
+export const isEmptyTab = (tab: Tab) => tab.note === null && !tab.asset;
+
+/** A tab as saved: its note, its asset, or null when empty. */
+type SavedTab = NoteId | { asset: string } | null;
 
 /** What a pane shows of its note: editor and preview, preview only, or editor only. */
 export type ViewMode = 'edit' | 'read' | 'source';
@@ -153,7 +164,7 @@ export function removePane(state: { root: LayoutNode }, id: string) {
 export type SavedNode =
   | {
       kind: 'pane';
-      tabs: (NoteId | null)[];
+      tabs: SavedTab[];
       active: number;
       mode: ViewMode;
       sizes: number[];
@@ -169,7 +180,7 @@ export function save(node: LayoutNode): SavedNode {
   if (node.kind === 'pane') {
     return {
       kind: 'pane',
-      tabs: node.tabs.map(t => t.note),
+      tabs: node.tabs.map(t => (t.asset ? { asset: t.asset } : t.note)),
       active: node.tabs.findIndex(t => t.key === node.active),
       mode: node.mode,
       sizes: [...node.sizes],
@@ -184,23 +195,33 @@ export function save(node: LayoutNode): SavedNode {
 }
 
 /**
- * Rebuilds a saved layout. `keep` filters out notes that no longer exist;
- * panes left without tabs are dropped (unless it's the only one).
+ * Rebuilds a saved layout. `keep` filters out notes (and `keepAsset`
+ * assets) that no longer exist; panes left without tabs are dropped
+ * (unless it's the only one).
  */
 export function restore(
   saved: SavedNode,
   keep: (id: NoteId) => boolean,
+  keepAsset: (path: string) => boolean,
   newTabKey: () => string,
 ): LayoutNode {
   const build = (node: SavedNode): LayoutNode | null => {
     if (node.kind === 'pane') {
-      const tabs = node.tabs
-        .filter(id => id === null || keep(id))
-        .map(note => ({ key: newTabKey(), note }));
+      const kept = node.tabs.filter(tab =>
+        tab === null
+          ? true
+          : typeof tab === 'string'
+            ? keep(tab)
+            : typeof tab?.asset === 'string' && keepAsset(tab.asset),
+      );
+      const tabs: Tab[] = kept.map(tab =>
+        tab !== null && typeof tab === 'object'
+          ? { key: newTabKey(), note: null, asset: tab.asset }
+          : { key: newTabKey(), note: tab },
+      );
       if (tabs.length === 0) return null;
       const wanted = node.tabs[node.active];
-      const active =
-        tabs.find(t => t.note === wanted && wanted !== undefined) ?? tabs[0];
+      const active = tabs[kept.indexOf(wanted)] ?? tabs[0];
       return {
         ...newPane(tabs, active.key),
         mode: ['edit', 'read', 'source'].includes(node.mode)

@@ -5,9 +5,10 @@
 //! rebuilt from their headers on open and kept current by every write that
 //! goes through `Vault`.
 
+mod files;
 mod moves;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
@@ -27,6 +28,8 @@ use uuid::Uuid;
 
 use crate::Address;
 
+pub use files::{AssetNode, DiskChanges, Moved, PathPlan};
+use files::{Previous, Stamp, stamp_of};
 pub use moves::{AddressChange, LinkEdits, MovePlan};
 
 const META_DIR: &str = ".sliver";
@@ -130,6 +133,8 @@ pub struct FolderNode {
     pub warning: Option<String>,
     pub folders: Vec<FolderNode>,
     pub notes: Vec<TreeNode>,
+    /// Files that aren't notes, by name.
+    pub assets: Vec<AssetNode>,
 }
 
 /// Where a new note goes: a Zettelkasten address, or a folder without one.
@@ -168,6 +173,9 @@ pub enum VaultError {
     FolderNotFound(String),
     InvalidFolderName(String),
     FolderExists(String),
+    InvalidFileName(String),
+    FileExists(String),
+    FileNotFound(String),
     InvalidKindName(String),
     KindExists(String),
     KindNotFound(String),
@@ -199,6 +207,9 @@ impl fmt::Display for VaultError {
             Self::FolderNotFound(path) => write!(f, "folder {path:?} not found"),
             Self::InvalidFolderName(name) => write!(f, "{name:?} is not a valid folder name"),
             Self::FolderExists(name) => write!(f, "a folder named {name:?} already exists"),
+            Self::InvalidFileName(name) => write!(f, "{name:?} is not a valid file name"),
+            Self::FileExists(name) => write!(f, "a file named {name:?} already exists"),
+            Self::FileNotFound(path) => write!(f, "file {path:?} not found"),
             Self::InvalidKindName(name) => write!(f, "{name:?} is not a valid kind name"),
             Self::KindExists(name) => write!(f, "a kind named {name:?} already exists"),
             Self::KindNotFound(name) => write!(f, "there is no kind named {name:?}"),
@@ -244,6 +255,14 @@ pub struct Vault {
     duplicates: HashMap<Uuid, Vec<String>>,
     /// Kinds of notes: the files in the kind preambles' directory.
     kinds: BTreeSet<String>,
+    /// Every file that isn't a note (and isn't hidden), by vault path.
+    assets: BTreeMap<String, Stamp>,
+    /// Each note file as last read or written: its stamp and its text's hash,
+    /// so a rescan rereads only changed files and reports only real changes.
+    stamps: HashMap<Uuid, Stamp>,
+    hashes: HashMap<Uuid, u64>,
+    /// The preambles' contents as last read or written, likewise.
+    preambles_digest: u64,
 }
 
 impl Vault {
@@ -259,6 +278,10 @@ impl Vault {
             extra_zettelkasten: Vec::new(),
             duplicates: HashMap::new(),
             kinds: BTreeSet::new(),
+            assets: BTreeMap::new(),
+            stamps: HashMap::new(),
+            hashes: HashMap::new(),
+            preambles_digest: 0,
         }
     }
 
@@ -280,6 +303,7 @@ impl Vault {
         vault.zettelkasten = Some(DEFAULT_ZETTELKASTEN.to_owned());
         vault.write_theme_file()?;
         vault.write_common_preamble()?;
+        vault.preambles_digest = vault.digest_preambles();
         // Only a new vault gets it: an existing vault may have removed it on purpose.
         vault.atomic_write(
             &vault.root.join(template_file(None)),
@@ -296,7 +320,7 @@ impl Vault {
         }
         let mut vault = Self::empty(root);
         let root = vault.root.clone();
-        vault.scan(&root, "")?;
+        vault.scan(&root, "", &mut Previous::default())?;
         vault.scan_kinds()?;
         vault.reference_keys = bib_entries(&vault.references()?)
             .into_iter()
@@ -304,6 +328,7 @@ impl Vault {
             .collect();
         vault.write_theme_file()?;
         vault.write_common_preamble()?;
+        vault.preambles_digest = vault.digest_preambles();
         Ok(vault)
     }
 
@@ -333,9 +358,11 @@ impl Vault {
     }
 
     /// Indexes `dir` depth first in name order, so "first found" is stable.
-    /// Anything starting with a dot (`.sliver`, `.git`, markers) is skipped.
-    fn scan(&mut self, dir: &Path, folder: &str) -> Result<()> {
-        let mut entries = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
+    /// Anything starting with a dot (`.sliver`, `.git`, markers) is skipped,
+    /// and so is an entry that can't be read (it may be going away). Notes
+    /// unchanged since `previous` are taken from it instead of reread.
+    fn scan(&mut self, dir: &Path, folder: &str, previous: &mut Previous) -> Result<()> {
+        let mut entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let name = entry.file_name();
@@ -344,8 +371,8 @@ impl Vault {
                 continue;
             }
             let path = entry.path();
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
                 let sub = join_folder(folder, name);
                 self.folders.insert(sub.clone());
                 if path.join(ZETTELKASTEN_MARKER).is_file() {
@@ -355,14 +382,10 @@ impl Vault {
                         self.extra_zettelkasten.push(sub.clone());
                     }
                 }
-                self.scan(&path, &sub)?;
-            } else if kind.is_file()
-                && path.extension().and_then(|e| e.to_str()) == Some(EXTENSION)
-                && let Some(id) = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-            {
+                let _ = self.scan(&path, &sub, previous);
+            } else if !meta.is_file() {
+                continue;
+            } else if let Some(id) = note_id(&path) {
                 if self.notes.contains_key(&id) {
                     self.duplicates
                         .entry(id)
@@ -370,9 +393,45 @@ impl Vault {
                         .push(join_folder(folder, name));
                     continue;
                 }
-                self.index(id, folder, &fs::read_to_string(&path)?);
+                let _ = self.load_note(id, folder, &path, stamp_of(&meta), previous);
+            } else {
+                self.assets
+                    .insert(join_folder(folder, name), stamp_of(&meta));
             }
         }
+        Ok(())
+    }
+
+    fn load_note(
+        &mut self,
+        id: Uuid,
+        folder: &str,
+        path: &Path,
+        stamp: Stamp,
+        previous: &mut Previous,
+    ) -> Result<()> {
+        if previous.stamps.get(&id) == Some(&stamp)
+            && let Some(summary) = previous.notes.remove(&id)
+        {
+            self.notes.insert(
+                id,
+                NoteSummary {
+                    folder: folder.to_owned(),
+                    ..summary
+                },
+            );
+            self.links
+                .insert(id, previous.links.remove(&id).unwrap_or_default());
+            self.citations
+                .insert(id, previous.citations.remove(&id).unwrap_or_default());
+            if let Some(hash) = previous.hashes.get(&id) {
+                self.hashes.insert(id, *hash);
+            }
+        } else {
+            let text = fs::read_to_string(path)?;
+            self.index(id, folder, &text);
+        }
+        self.stamps.insert(id, stamp);
         Ok(())
     }
 
@@ -457,6 +516,7 @@ impl Vault {
                 notes.sort_by(|x, y| x.title.cmp(&y.title).then(x.id.cmp(&y.id)));
                 notes.into_iter().map(|n| self.leaf(n)).collect()
             },
+            assets: self.assets_in(path),
         }
     }
 
@@ -608,9 +668,7 @@ impl Vault {
 
     pub fn delete_note(&mut self, id: Uuid, mode: DeleteMode) -> Result<()> {
         remove_path(&self.note_path(id)?, mode)?;
-        self.notes.remove(&id);
-        self.links.remove(&id);
-        self.citations.remove(&id);
+        self.forget(id);
         Ok(())
     }
 
@@ -895,6 +953,7 @@ impl Vault {
             self.require_kind(kind)?;
         }
         self.atomic_write(&self.root.join(preamble_file(kind)), text.as_bytes())?;
+        self.preambles_digest = self.digest_preambles();
         Ok(preamble_warnings(text))
     }
 
@@ -920,6 +979,7 @@ impl Vault {
             starter.as_bytes(),
         )?;
         self.kinds.insert(name.to_owned());
+        self.preambles_digest = self.digest_preambles();
         Ok(())
     }
 
@@ -951,6 +1011,7 @@ impl Vault {
         for &id in &ids {
             self.set_kind(id, Some(to))?;
         }
+        self.preambles_digest = self.digest_preambles();
         Ok(ids)
     }
 
@@ -964,6 +1025,7 @@ impl Vault {
             remove_path(&template, mode)?;
         }
         self.kinds.remove(name);
+        self.preambles_digest = self.digest_preambles();
         Ok(())
     }
 
@@ -1041,7 +1103,9 @@ impl Vault {
 
     /// Renames a folder in place and returns its new path. Renaming the
     /// Zettelkasten is fine: its marker moves with it.
-    pub fn rename_folder(&mut self, path: &str, name: &str) -> Result<String> {
+    /// Paths in notes, preambles and templates that pointed into the folder
+    /// are rewritten (see [`Vault::plan_path_move`]).
+    pub fn rename_folder(&mut self, path: &str, name: &str) -> Result<Moved> {
         if path.is_empty() {
             return Err(VaultError::Refused(
                 "the vault root can't be renamed".into(),
@@ -1052,11 +1116,18 @@ impl Vault {
         self.check_free_name(&parent, name, Some(path))?;
         let new_path = join_folder(&parent, name);
         if new_path == path {
-            return Ok(new_path);
+            return Ok(Moved {
+                path: new_path,
+                changed: Vec::new(),
+            });
         }
         fs::rename(self.folder_dir(path), self.folder_dir(&new_path))?;
         let rebase = |f: &str| rebase_folder(f, path, &new_path).unwrap_or_else(|| f.to_owned());
         self.folders = self.folders.iter().map(|f| rebase(f)).collect();
+        self.assets = std::mem::take(&mut self.assets)
+            .into_iter()
+            .map(|(a, stamp)| (rebase(&a), stamp))
+            .collect();
         for note in self.notes.values_mut() {
             note.folder = rebase(&note.folder);
         }
@@ -1066,7 +1137,11 @@ impl Vault {
         for f in &mut self.extra_zettelkasten {
             *f = rebase(f);
         }
-        Ok(new_path)
+        let changed = self.rewrite_paths(path, &new_path)?;
+        Ok(Moved {
+            path: new_path,
+            changed,
+        })
     }
 
     /// Deletes a folder with everything in it and returns the ids of the
@@ -1096,11 +1171,10 @@ impl Vault {
             .map(|n| n.id)
             .collect();
         for id in &removed {
-            self.notes.remove(id);
-            self.links.remove(id);
-            self.citations.remove(id);
+            self.forget(*id);
         }
         self.folders.retain(|f| !inside(f));
+        self.assets.retain(|a, _| !inside(parent_folder(a)));
         self.extra_zettelkasten.retain(|f| !inside(f));
         Ok(removed)
     }
@@ -1129,6 +1203,7 @@ impl Vault {
         let to = self.file_path(folder, id);
         if from != to {
             fs::rename(&from, &to)?;
+            self.stamps.insert(id, stamp_of(&fs::metadata(&to)?));
             if let Some(note) = self.notes.get_mut(&id) {
                 note.folder = folder.to_owned();
             }
@@ -1138,7 +1213,17 @@ impl Vault {
 
     // --- files ---
 
+    /// Drops note `id` from the index.
+    fn forget(&mut self, id: Uuid) {
+        self.notes.remove(&id);
+        self.links.remove(&id);
+        self.citations.remove(&id);
+        self.stamps.remove(&id);
+        self.hashes.remove(&id);
+    }
+
     fn index(&mut self, id: Uuid, folder: &str, text: &str) -> &NoteSummary {
+        self.hashes.insert(id, files::hash_text(text));
         let root = typst_syntax::parse(text);
         let (header, header_error) = match header_in(&root) {
             Ok(header) => (header.unwrap_or_default(), None),
@@ -1178,7 +1263,9 @@ impl Vault {
     }
 
     fn write_file(&mut self, id: Uuid, folder: &str, text: &str) -> Result<NoteSummary> {
-        self.atomic_write(&self.file_path(folder, id), text.as_bytes())?;
+        let path = self.file_path(folder, id);
+        self.atomic_write(&path, text.as_bytes())?;
+        self.stamps.insert(id, stamp_of(&fs::metadata(&path)?));
         Ok(self.index(id, folder, text).clone())
     }
 
@@ -1286,19 +1373,30 @@ fn rebase_folder(path: &str, from: &str, to: &str) -> Option<String> {
 }
 
 /// A single path component that works on every desktop filesystem.
-fn validate_folder_name(name: &str) -> Result<()> {
-    let invalid = name.is_empty()
+fn valid_name(name: &str) -> bool {
+    !(name.is_empty()
         || name.starts_with('.')
         || name.ends_with(' ')
         || name.ends_with('.')
         || name.trim() != name
         || name.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
-        });
-    if invalid {
+        }))
+}
+
+fn validate_folder_name(name: &str) -> Result<()> {
+    if !valid_name(name) {
         return Err(VaultError::InvalidFolderName(name.to_owned()));
     }
     Ok(())
+}
+
+/// The uuid of a note file (`<uuid>.typ`), if `path` is one.
+fn note_id(path: &Path) -> Option<Uuid> {
+    if path.extension().and_then(|e| e.to_str()) != Some(EXTENSION) {
+        return None;
+    }
+    Uuid::parse_str(path.file_stem()?.to_str()?).ok()
 }
 
 /// Addressed notes in address order, then the rest by title; ties by id.
@@ -1683,10 +1781,16 @@ mod tests {
             Err(VaultError::Refused(_))
         ));
 
-        assert_eq!(vault.rename_folder("Projects", "Work").unwrap(), "Work");
+        assert_eq!(
+            vault.rename_folder("Projects", "Work").unwrap().path,
+            "Work"
+        );
         assert_eq!(vault.note(in_project.id).unwrap().folder, "Work/Sliver");
         assert_eq!(
-            vault.rename_folder("Zettelkasten", "Slip box").unwrap(),
+            vault
+                .rename_folder("Zettelkasten", "Slip box")
+                .unwrap()
+                .path,
             "Slip box"
         );
         assert_eq!(vault.zettelkasten().unwrap(), "Slip box");

@@ -39,7 +39,11 @@ import {
 import { overlayScrollbar } from './scrollbars';
 
 const tabLabel = (tab: Tab) =>
-  tab.note ? noteLabel(noteById(tab.note)) : 'New tab';
+  tab.note
+    ? noteLabel(noteById(tab.note))
+    : tab.asset
+      ? tab.asset.slice(tab.asset.lastIndexOf('/') + 1)
+      : 'New tab';
 
 /** The tab list's scrollbar is thin: it overlays the tabs' labels. */
 const TAB_SCROLLBAR_PX = 3;
@@ -380,7 +384,7 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
       <Show when={drag()?.detached ? drag() : null}>
         {d => (
           <div
-            class="tab-ghost"
+            class="drag-ghost"
             style={{ left: `${d().x + 12}px`, top: `${d().y + 8}px` }}
           >
             {d().label}
