@@ -19,7 +19,7 @@ use typst::text::{Font, FontBook, TextItem};
 use typst::utils::LazyHash;
 use typst::utils::PicoStr;
 use typst::{Library, LibraryExt, World, WorldExt};
-use typst_ide::{CompletionKind, IdeWorld, Jump};
+use typst_ide::{CompletionKind, IdeWorld, Jump, Tooltip};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
@@ -670,6 +670,42 @@ impl Engine {
     /// The function call whose parentheses hold `position` in `text` (the
     /// current contents of `path`), with its parameters and which one the
     /// cursor is on: signature help.
+    /// What hovering `position` in `text` (the editor's contents of `path`,
+    /// compiled as part of `main`) shows: a value, a function's or
+    /// parameter's docs, a label's text. `before` says the pointer is on
+    /// the character before `position`.
+    pub fn tooltip(
+        &self,
+        main: &str,
+        path: &str,
+        text: &str,
+        position: Position,
+        before: bool,
+    ) -> Result<Option<Hover>, InvalidPath> {
+        let main = file_id(main)?;
+        let id = file_id(path)?;
+        let source = Source::new(id, self.with_prefix(id, text));
+        let Some(cursor) = self.offset_in(&source, position) else {
+            return Ok(None);
+        };
+        let world = self.world_with(main, Some(source.clone()));
+        let side = if before { Side::Before } else { Side::After };
+        Ok(
+            typst_ide::tooltip(&world, self.documents.get(&main), &source, cursor, side).map(
+                |tooltip| match tooltip {
+                    Tooltip::Text(text) => Hover {
+                        code: false,
+                        text: text.into(),
+                    },
+                    Tooltip::Code(text) => Hover {
+                        code: true,
+                        text: text.into(),
+                    },
+                },
+            ),
+        )
+    }
+
     pub fn signature(
         &self,
         main: &str,
@@ -702,6 +738,13 @@ impl Engine {
             missing: Mutex::default(),
         }
     }
+}
+
+/// A hover tooltip: Typst code (e.g. a value) or text (Markdown docs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hover {
+    pub code: bool,
+    pub text: String,
 }
 
 /// A function's signature, for signature help.
@@ -1525,6 +1568,25 @@ mod tests {
         engine.set_prefix("/main.typ", "").unwrap();
         let out = engine.compile("/main.typ", true).unwrap();
         assert_eq!(out.diagnostics.len(), 1, "unknown variable: shout");
+    }
+
+    #[test]
+    fn hovers_show_values_and_docs() {
+        let mut engine = Engine::new();
+        let text = "#let x = 1 + 2\n#x #rect()";
+        engine.set_source("/main.typ", text).unwrap();
+        engine.compile("/main.typ", false).unwrap();
+        let at = |column| Position { line: 1, column };
+        let value = engine
+            .tooltip("/main.typ", "/main.typ", text, at(2), true)
+            .unwrap()
+            .unwrap();
+        assert!(value.code && value.text.contains('3'), "{value:?}");
+        let docs = engine
+            .tooltip("/main.typ", "/main.typ", text, at(6), true)
+            .unwrap()
+            .unwrap();
+        assert!(!docs.code && docs.text.contains("rectangle"), "{docs:?}");
     }
 
     #[test]

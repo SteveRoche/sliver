@@ -13,6 +13,7 @@ import Link from 'lucide-solid/icons/link';
 import Omega from 'lucide-solid/icons/omega';
 import Package from 'lucide-solid/icons/package';
 import Pi from 'lucide-solid/icons/pi';
+import Quote from 'lucide-solid/icons/quote';
 import SquareFunction from 'lucide-solid/icons/square-function';
 import Tag from 'lucide-solid/icons/tag';
 import TypeIcon from 'lucide-solid/icons/type';
@@ -27,9 +28,20 @@ export interface LinkCandidate {
   target: string;
 }
 
+export interface CitationCandidate {
+  key: string;
+  title: string;
+  byline: string;
+}
+
 export interface CompletionOptions {
   /** Notes `[[` can link to. */
   notes(): LinkCandidate[];
+  /**
+   * Zotero items matching what follows an `@`, for citing what
+   * `references.bib` doesn't have yet; none while Zotero isn't running.
+   */
+  zotero?(query: string): Promise<CitationCandidate[]>;
   /** Typst completions from the compiler (`typst-ide`). */
   typst(
     text: string,
@@ -58,7 +70,38 @@ function wikilinkSource(options: CompletionOptions) {
   };
 }
 
-type Kind = CompletionItem['kind'] | 'wikilink';
+/** An unfinished `@key` before the cursor (not after a word: `a@b` is text). */
+const OPEN_CITATION = /(?:^|[^\p{L}\p{N}_])@[\p{L}\p{N}_\-.:]*/u;
+
+/** Shorter queries would match most of a library. */
+const MIN_QUERY = 2;
+
+function zoteroSource(options: CompletionOptions) {
+  return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
+    const match = ctx.matchBefore(OPEN_CITATION);
+    if (!match || !options.zotero) return null;
+    const at = match.from + match.text.indexOf('@');
+    const query = ctx.state.sliceDoc(at + 1, ctx.pos);
+    if (inRaw(ctx.state, at) || (query.length < MIN_QUERY && !ctx.explicit)) {
+      return null;
+    }
+    const found = await options.zotero(query);
+    if (ctx.aborted || found.length === 0) return null;
+    return {
+      from: at + 1,
+      options: found.map(item => ({
+        label: item.key,
+        detail: item.byline,
+        info: item.title,
+        type: 'citation',
+      })),
+      // Zotero matched titles and authors too, which the key doesn't show.
+      filter: false,
+    };
+  };
+}
+
+type Kind = CompletionItem['kind'] | 'wikilink' | 'citation';
 
 const ICONS: Record<Kind, Component<{ size?: number }>> = {
   syntax: Code,
@@ -72,6 +115,7 @@ const ICONS: Record<Kind, Component<{ size?: number }>> = {
   font: ALargeSmall,
   symbol: Omega,
   wikilink: Link,
+  citation: Quote,
 };
 
 /** One rendered SVG per kind, cloned for each row of the menu. */
@@ -138,10 +182,17 @@ function typstSource(options: CompletionOptions) {
   };
 }
 
-/** Autocomplete for wikilink targets after `[[` and for Typst itself. */
+/**
+ * Autocomplete for wikilink targets after `[[`, for Typst itself, and for
+ * citation keys from the Zotero library after `@`.
+ */
 export function completion(options: CompletionOptions): Extension {
   return autocompletion({
-    override: [wikilinkSource(options), typstSource(options)],
+    override: [
+      wikilinkSource(options),
+      typstSource(options),
+      zoteroSource(options),
+    ],
     icons: false,
     addToOptions: [iconColumn],
   });

@@ -270,6 +270,22 @@ async function warn(text: string) {
   await message(text, { title: 'Zotero', kind: 'warning' });
 }
 
+/**
+ * Zotero items matching `query` that `references.bib` has no entry for yet
+ * (Typst's own completion offers those), for `@` completion. Citing one
+ * fetches its entry on the next save.
+ */
+export async function searchZotero(query: string) {
+  const items = await vault.zoteroSearch(query);
+  return items
+    .filter(item => !hasReference(item.citationKey))
+    .map(item => ({
+      key: item.citationKey,
+      title: item.title,
+      byline: item.byline,
+    }));
+}
+
 /** Selects `key`'s item in Zotero. */
 export async function openInZotero(key: string) {
   try {

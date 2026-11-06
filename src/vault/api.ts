@@ -123,6 +123,14 @@ export interface ZoteroPick {
   suppressAuthor: boolean;
 }
 
+/** A Zotero item found by `zoteroSearch`. */
+export interface ZoteroItem {
+  citationKey: string;
+  title: string;
+  /** E.g. `Bellotti et al. 2004`. */
+  byline: string;
+}
+
 export const vault = {
   create: (path: string) => invoke<FolderNode>('create_vault', { path }),
   open: (path: string) => invoke<FolderNode>('open_vault', { path }),
@@ -199,6 +207,9 @@ export const vault = {
   zoteroReady: () => invoke<boolean>('zotero_ready'),
   /** Opens Zotero's citation picker; the picks' entries are saved first. */
   zoteroPick: () => invoke<ZoteroPick[]>('zotero_pick'),
+  /** Items in the Zotero library matching `query`; none while Zotero isn't running. */
+  zoteroSearch: (query: string) =>
+    invoke<ZoteroItem[]>('zotero_search', { query }),
   openInZotero: (key: string) => invoke<void>('open_in_zotero', { key }),
 };
 

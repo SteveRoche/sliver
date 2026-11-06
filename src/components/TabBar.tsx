@@ -1,6 +1,13 @@
+import ArrowLeft from 'lucide-solid/icons/arrow-left';
+import ArrowRight from 'lucide-solid/icons/arrow-right';
 import BookOpen from 'lucide-solid/icons/book-open';
+import ChevronDown from 'lucide-solid/icons/chevron-down';
+import ChevronUp from 'lucide-solid/icons/chevron-up';
 import Code from 'lucide-solid/icons/code';
 import Columns2 from 'lucide-solid/icons/columns-2';
+import CornerDownRight from 'lucide-solid/icons/corner-down-right';
+import CornerLeftUp from 'lucide-solid/icons/corner-left-up';
+import Plus from 'lucide-solid/icons/plus';
 import X from 'lucide-solid/icons/x';
 import {
   batch,
@@ -12,11 +19,14 @@ import {
   Show,
 } from 'solid-js';
 import type { DropZone } from '../state/layout';
+import { canGo, canMove, go, moveAlong } from '../state/navigation';
 import {
   activateTab,
   closeTab,
   dropTab,
+  focusPane,
   moveTab,
+  newTab,
   noteById,
   noteLabel,
   type Pane,
@@ -30,6 +40,9 @@ import { overlayScrollbar } from './scrollbars';
 
 const tabLabel = (tab: Tab) =>
   tab.note ? noteLabel(noteById(tab.note)) : 'New tab';
+
+/** The tab list's scrollbar is thin: it overlays the tabs' labels. */
+const TAB_SCROLLBAR_PX = 3;
 
 /** Pixels the pointer must travel before a press becomes a drag. */
 const DRAG_THRESHOLD = 5;
@@ -92,6 +105,51 @@ function targetAt(x: number, y: number) {
   return { pane, zone };
 }
 
+/** Back and forward through the pane's notes, then the Folgezettel moves. */
+const NAVIGATION: {
+  label: string;
+  icon: Component<{ size?: number }>;
+  can: (pane: string) => boolean;
+  run: (pane: string) => void;
+}[] = [
+  {
+    label: 'Go back',
+    icon: ArrowLeft,
+    can: p => canGo(p, -1),
+    run: p => go(p, -1),
+  },
+  {
+    label: 'Go forward',
+    icon: ArrowRight,
+    can: p => canGo(p, 1),
+    run: p => go(p, 1),
+  },
+  {
+    label: 'Parent note',
+    icon: CornerLeftUp,
+    can: p => canMove(p, 'parent'),
+    run: p => moveAlong(p, 'parent'),
+  },
+  {
+    label: 'First next note',
+    icon: CornerDownRight,
+    can: p => canMove(p, 'next'),
+    run: p => moveAlong(p, 'next'),
+  },
+  {
+    label: 'Previous aside',
+    icon: ChevronUp,
+    can: p => canMove(p, 'previousAside'),
+    run: p => moveAlong(p, 'previousAside'),
+  },
+  {
+    label: 'Next aside',
+    icon: ChevronDown,
+    can: p => canMove(p, 'nextAside'),
+    run: p => moveAlong(p, 'nextAside'),
+  },
+];
+
 const MODES: {
   mode: ViewMode;
   label: string;
@@ -114,7 +172,7 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
   let bar!: HTMLDivElement;
   let list!: HTMLDivElement;
   const [drag, setDrag] = createSignal<Drag | null>(null);
-  onMount(() => onCleanup(overlayScrollbar(list)));
+  onMount(() => onCleanup(overlayScrollbar(list, TAB_SCROLLBAR_PX)));
   // Set for one frame when a drop is committed, so the tabs don't animate
   // from their shifted positions back to their (already moved) DOM slots.
   const [settling, setSettling] = createSignal(false);
@@ -208,6 +266,22 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
         settling: settling(),
       }}
     >
+      <nav class="pane-nav" aria-label="Navigation">
+        <For each={NAVIGATION}>
+          {item => (
+            <button
+              type="button"
+              class="icon-button"
+              aria-label={item.label}
+              title={item.label}
+              disabled={!item.can(props.pane.id)}
+              onClick={() => item.run(props.pane.id)}
+            >
+              <item.icon size={14} />
+            </button>
+          )}
+        </For>
+      </nav>
       <div ref={list} class="tab-list" role="tablist" aria-label="Open notes">
         <For each={props.pane.tabs}>
           {(tab, index) => {
@@ -261,6 +335,18 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
           }}
         </For>
       </div>
+      <button
+        type="button"
+        class="icon-button new-tab"
+        aria-label="New tab"
+        title="New tab"
+        onClick={() => {
+          focusPane(props.pane.id);
+          newTab();
+        }}
+      >
+        <Plus size={14} />
+      </button>
       <div class="pane-modes">
         <For
           each={MODES.filter(

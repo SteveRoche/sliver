@@ -11,7 +11,7 @@ mod tar;
 mod wasm;
 
 pub use engine::{
-    CitationMark, CompileOutput, CompletionItem, Completions, Diagnostic, Engine, InvalidPackage,
-    InvalidPath, PagePoint, ParamDoc, Position, RenderedBand, RenderedPage, Severity, Signature,
-    SourceLocation, TextRange, citation_styles,
+    CitationMark, CompileOutput, CompletionItem, Completions, Diagnostic, Engine, Hover,
+    InvalidPackage, InvalidPath, PagePoint, ParamDoc, Position, RenderedBand, RenderedPage,
+    Severity, Signature, SourceLocation, TextRange, citation_styles,
 };

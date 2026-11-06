@@ -142,6 +142,12 @@ export interface CitationMark {
   y: number;
 }
 
+/** What hovering shows: Typst code (e.g. a value) or Markdown docs. */
+export interface Hover {
+  code: boolean;
+  text: string;
+}
+
 /** The function call around the cursor, for signature help. */
 export interface Signature {
   name: string;
@@ -182,6 +188,17 @@ export interface Calls {
   signature: {
     args: { main: string; path: string; text: string; position: Position };
     result: Signature | null;
+  };
+  /** `before`: the pointer is on the character before `position`. */
+  tooltip: {
+    args: {
+      main: string;
+      path: string;
+      text: string;
+      position: Position;
+      before: boolean;
+    };
+    result: Hover | null;
   };
   jumpFromClick: {
     args: { main: string; page: number; x: number; y: number };

@@ -217,6 +217,17 @@ function handle(compiler: Compiler, req: Request): unknown {
         } satisfies Completions;
       });
     }
+    case 'tooltip': {
+      const found = compiler.tooltip(
+        req.main,
+        req.path,
+        req.text,
+        req.position.line,
+        req.position.column,
+        req.before,
+      );
+      return found ? using(found, h => ({ code: h.code, text: h.text })) : null;
+    }
     case 'signature': {
       const found = compiler.signature(
         req.main,

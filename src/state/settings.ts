@@ -39,6 +39,8 @@ export interface Settings {
   citationStyle: string;
   /** End each preview with the reference list of what the note cites. */
   showReferences: boolean;
+  /** Keybindings changed from their defaults, by command id; `""` is none. */
+  keybindings: Record<string, string>;
 }
 
 /** APA, the default citation style (Typst's full name; `apa` is its alias). */
@@ -61,6 +63,7 @@ const DEFAULTS: Settings = {
   kindFolders: {},
   citationStyle: DEFAULT_CITATION_STYLE,
   showReferences: true,
+  keybindings: {},
 };
 
 /** The allowed values of the settings that are a choice. */
@@ -80,7 +83,7 @@ function isValid(key: string, value: unknown): boolean {
   if (typeof value !== typeof DEFAULTS[k]) return false;
   const choices: readonly unknown[] | undefined = CHOICES[k];
   if (choices) return choices.includes(value);
-  if (k === 'kindFolders') {
+  if (k === 'kindFolders' || k === 'keybindings') {
     return (
       value !== null &&
       !Array.isArray(value) &&
@@ -131,6 +134,14 @@ export function setKindFolder(kind: string, folder: string | null) {
   const { [kind]: _, ...rest } = settings.kindFolders;
   updateSettings({
     kindFolders: folder === null ? rest : { ...rest, [kind]: folder },
+  });
+}
+
+/** Sets command `id`'s keybinding (`""` for none), or with null its default again. */
+export function setKeybinding(id: string, keybinding: string | null) {
+  const { [id]: _, ...rest } = settings.keybindings;
+  updateSettings({
+    keybindings: keybinding === null ? rest : { ...rest, [id]: keybinding },
   });
 }
 

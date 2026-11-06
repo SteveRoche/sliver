@@ -1,5 +1,6 @@
 import { Splitter, useSplitter } from '@ark-ui/solid';
 import { createEffect, For, type JSX, Show } from 'solid-js';
+import { keybindingFor } from '../commands/registry';
 import {
   citationsAt,
   openCitations,
@@ -356,9 +357,24 @@ function EmptyTab() {
     <div class="pane-message empty">
       <p>No note open.</p>
       <p>
-        <Keys keybinding="Mod+O" /> go to note &middot;{' '}
-        <Keys keybinding="Mod+P" /> commands &middot;{' '}
-        <Keys keybinding="Mod+N" /> new note
+        <For
+          each={[
+            { id: 'palette.notes', label: 'go to note' },
+            { id: 'palette.commands', label: 'commands' },
+            { id: 'note.new', label: 'new note' },
+          ]}
+        >
+          {(hint, i) => (
+            <Show when={keybindingFor(hint.id)}>
+              {keybinding => (
+                <>
+                  {i() > 0 && ' \u00b7 '}
+                  <Keys keybinding={keybinding()} /> {hint.label}
+                </>
+              )}
+            </Show>
+          )}
+        </For>
       </p>
     </div>
   );

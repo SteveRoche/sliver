@@ -85,6 +85,13 @@ pub struct CompletionList {
     pub details: Vec<String>,
 }
 
+/// A hover tooltip: Typst `code` (e.g. a value) or Markdown docs.
+#[wasm_bindgen(getter_with_clone)]
+pub struct HoverInfo {
+    pub code: bool,
+    pub text: String,
+}
+
 /// Signature help; parameter `i` is `paramNames[i]` and so on. Empty strings
 /// stand for missing docs and defaults; `paramFlags` holds `PARAM_*` bits.
 #[wasm_bindgen(getter_with_clone)]
@@ -303,6 +310,25 @@ impl Compiler {
             list.details.push(item.detail.unwrap_or_default());
         }
         Ok(Some(list))
+    }
+
+    /// See [`crate::Engine::tooltip`].
+    pub fn tooltip(
+        &self,
+        main: &str,
+        path: &str,
+        text: &str,
+        line: u32,
+        column: u32,
+        before: bool,
+    ) -> Result<Option<HoverInfo>, JsError> {
+        Ok(self
+            .0
+            .tooltip(main, path, text, Position { line, column }, before)?
+            .map(|hover| HoverInfo {
+                code: hover.code,
+                text: hover.text,
+            }))
     }
 
     pub fn signature(

@@ -3,8 +3,16 @@ import { openPalette, pick } from '../components/Palette';
 import { prompt } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
 import { menuFolder, menuTarget } from '../components/Sidebar';
+import { toggleWrap } from '../editor/format';
 import { insertCitation, refreshReferences } from '../state/citations';
 import { toggleDebug } from '../state/debug';
+import {
+  canGo,
+  canMove,
+  type FolgezettelMove,
+  go,
+  moveAlong,
+} from '../state/navigation';
 import { settings, updateSettings } from '../state/settings';
 import {
   active,
@@ -19,6 +27,7 @@ import {
   cycleTab,
   deleteFolder,
   deleteNote,
+  focusedPane,
   focusedTabs,
   inZettelkasten,
   kinds,
@@ -34,6 +43,7 @@ import {
   renameFolder,
   renameNote,
   saveNote,
+  sessionFor,
   setNoteKind,
   setPreviewLayout,
   setZettelkasten,
@@ -259,15 +269,11 @@ const hasVault = () => vaultRoot() !== null;
 const hasAddress = (id: NoteId | null) => !!id && !!noteById(id)?.address;
 
 /**
- * Note commands for one target: the active note (`note.*`, with keybindings)
- * or the sidebar's right-clicked note (`menu.*`, only enabled while its
- * context menu is open, so they stay out of the palette).
+ * Note commands for one target: the active note (`note.*`) or the
+ * sidebar's right-clicked note (`menu.*`, only enabled while its context
+ * menu is open).
  */
-function onNote(
-  idPrefix: string,
-  target: () => NoteId | null,
-  keybindings: boolean,
-): Command[] {
+function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
   const withTarget = (f: (id: NoteId) => unknown) => () => {
     const id = target();
     if (id) return f(id);
@@ -310,7 +316,7 @@ function onNote(
     {
       id: `${idPrefix}.rename`,
       title: 'Rename current note',
-      keybinding: keybindings ? 'F2' : undefined,
+      keybinding: 'F2',
       enabled: enabled(),
       run: withTarget(rename),
     },
@@ -364,6 +370,12 @@ function onFolder(): Command[] {
   ];
 }
 
+/** The active note's editor, if it's on screen. */
+const shownEditor = () => {
+  const id = activeNote();
+  return id ? sessionFor(id)?.shownView() : undefined;
+};
+
 /** Registers every app command; returns the unregister function. */
 export function registerAppCommands(): () => void {
   return registerCommands([
@@ -400,9 +412,11 @@ export function registerAppCommands(): () => void {
       enabled: hasVault,
       run: () => newNote({ kind: 'unaddressed' }, 'New note'),
     },
-    ...onNote('note', activeNote, true),
-    ...onNote('menu', menuTarget, false),
-    ...onFolder(),
+    ...onNote('note', activeNote),
+    ...[...onNote('menu', menuTarget), ...onFolder()].map(command => ({
+      ...command,
+      contextMenu: true,
+    })),
     {
       id: 'folder.new',
       title: 'New folder',
@@ -505,6 +519,48 @@ export function registerAppCommands(): () => void {
       enabled: () => hasVault() && layout.root.kind === 'split',
       run: closePane,
     },
+    ...[
+      { id: 'format.bold', title: 'Bold', keybinding: 'Mod+B', marker: '*' },
+      {
+        id: 'format.italic',
+        title: 'Italic',
+        keybinding: 'Mod+I',
+        marker: '_',
+      },
+    ].map(({ marker, ...command }) => ({
+      ...command,
+      enabled: () => shownEditor() !== undefined,
+      run: () => {
+        const view = shownEditor();
+        if (view) toggleWrap(view, marker);
+      },
+    })),
+    ...(
+      [
+        ['nav.back', 'Go back', 'Mod+[', -1],
+        ['nav.forward', 'Go forward', 'Mod+]', 1],
+      ] as const
+    ).map(([id, title, keybinding, direction]) => ({
+      id,
+      title,
+      keybinding,
+      enabled: () => canGo(focusedPane().id, direction),
+      run: () => go(focusedPane().id, direction),
+    })),
+    // Unbound by default: the obvious keys are taken (Alt+arrows move lines).
+    ...(
+      [
+        ['nav.parent', 'Go to parent note', 'parent'],
+        ['nav.next', 'Go to first next note', 'next'],
+        ['nav.previousAside', 'Go to previous aside', 'previousAside'],
+        ['nav.nextAside', 'Go to next aside', 'nextAside'],
+      ] as [string, string, FolgezettelMove][]
+    ).map(([id, title, move]) => ({
+      id,
+      title,
+      enabled: () => canMove(focusedPane().id, move),
+      run: () => moveAlong(focusedPane().id, move),
+    })),
     {
       id: 'citation.insert',
       title: 'Insert citation from Zotero',

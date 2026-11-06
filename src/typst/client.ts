@@ -5,6 +5,7 @@ import type {
   Completions,
   FromWorker,
   HostReply,
+  Hover,
   PackageHost,
   PagePoint,
   Position,
@@ -126,6 +127,17 @@ export class TypstClient {
     explicit: boolean,
   ): Promise<Completions | null> {
     return this.call('complete', { main, path, text, position, explicit });
+  }
+
+  /** What hovering `position` in `text` shows. */
+  tooltip(
+    main: string,
+    path: string,
+    text: string,
+    position: Position,
+    before: boolean,
+  ): Promise<Hover | null> {
+    return this.call('tooltip', { main, path, text, position, before });
   }
 
   /** Signature help for the call around `position` in `text`. */

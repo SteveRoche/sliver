@@ -121,6 +121,13 @@ const theme = EditorView.theme({
     textDecoration: 'none',
     color: 'var(--accent)',
   },
+  '.cm-typst-hover': {
+    maxWidth: '560px',
+    padding: '6px 10px',
+    fontSize: '13px',
+    lineHeight: '1.4',
+    whiteSpace: 'pre-wrap',
+  },
   '.cm-signature': {
     maxWidth: '560px',
     padding: '6px 10px',

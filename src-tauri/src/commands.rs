@@ -463,6 +463,22 @@ pub async fn zotero_ready() -> bool {
         .unwrap_or(false)
 }
 
+/// Quits the app, once the webview has saved unsaved edits (after Quit in
+/// the macOS menu).
+#[tauri::command]
+pub fn quit(app: AppHandle) {
+    app.exit(0);
+}
+
+/// Items in the Zotero library matching `query`, for `@` completion; none
+/// while Zotero isn't running.
+#[tauri::command]
+pub async fn zotero_search(query: String) -> Vec<zotero::Found> {
+    tauri::async_runtime::spawn_blocking(move || zotero::search(&query))
+        .await
+        .unwrap_or_default()
+}
+
 /// Opens Zotero's citation picker; the picked entries are added to
 /// `references.bib` before this returns. Brings the app back to the front.
 #[tauri::command]

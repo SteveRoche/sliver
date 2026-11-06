@@ -89,14 +89,6 @@
   transition: opacity 0.2s;
 }
 
-.overlay-thumb-y {
-  width: 8px;
-}
-
-.overlay-thumb-x {
-  height: 8px;
-}
-
 .overlay-thumb.visible {
   opacity: 0.5;
 }
@@ -381,6 +373,27 @@ button.primary {
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+.pane-nav {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-right: 1px solid var(--border);
+}
+
+.pane-nav .icon-button:disabled {
+  background: none;
+  color: var(--muted);
+  opacity: 0.4;
+}
+
+.new-tab {
+  flex: none;
+  align-self: center;
+  margin: 0 4px;
 }
 
 .pane-modes {
@@ -1443,6 +1456,32 @@ button.settings-nav-item.active {
 
 .citation-reason {
   color: var(--muted);
+}
+
+/* Plain, square: WebKit draws search fields rounded. */
+.setting-filter {
+  width: 100%;
+  margin-bottom: 8px;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: 0;
+}
+
+.keybinding-controls {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+button.keybinding-button {
+  min-width: 96px;
+  color: var(--muted);
+}
+
+button.keybinding-button.recording {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .setting-note {

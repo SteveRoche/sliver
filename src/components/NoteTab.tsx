@@ -10,6 +10,7 @@ import {
   hasReference,
   openInZotero,
   referenceEntries,
+  searchZotero,
 } from '../state/citations';
 import { settings } from '../state/settings';
 import {
@@ -71,6 +72,9 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
       (await session?.complete(text, position, explicit)) ?? null,
     signature: async (text, position) =>
       (await session?.signature(text, position)) ?? null,
+    zotero: searchZotero,
+    tooltip: async (text, position, before) =>
+      (await session?.tooltip(text, position, before)) ?? null,
   });
 
   const cites = citations({

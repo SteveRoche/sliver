@@ -27,6 +27,7 @@ import {
   kinds,
   preambleSignature,
   preambles,
+  preambleTooltip,
   renameKind,
   savePreamble,
 } from '../state/workspace';
@@ -126,6 +127,8 @@ function PreambleEditor(props: {
               completePreamble(props.path, text, position, explicit),
             signature: (text, position) =>
               preambleSignature(props.path, text, position),
+            tooltip: (text, position, before) =>
+              preambleTooltip(props.path, text, position, before),
           })}
           vim={settings.vim}
           lineNumbers={settings.lineNumbers}

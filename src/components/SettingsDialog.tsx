@@ -3,6 +3,7 @@ import { ask } from '@tauri-apps/plugin-dialog';
 import Eye from 'lucide-solid/icons/eye';
 import FileCode from 'lucide-solid/icons/file-code';
 import FileText from 'lucide-solid/icons/file-text';
+import Keyboard from 'lucide-solid/icons/keyboard';
 import Quote from 'lucide-solid/icons/quote';
 import RotateCcw from 'lucide-solid/icons/rotate-ccw';
 import SquarePen from 'lucide-solid/icons/square-pen';
@@ -29,6 +30,7 @@ import {
 } from '../state/settings';
 import { refreshLinks } from '../state/workspace';
 import { handleEditorEscape } from './Editor';
+import { KeybindingSettings } from './KeybindingSettings';
 import { PreambleSettings } from './PreambleSettings';
 import { MIN_PREVIEW_PX } from './Preview';
 import { withOverlayScrollbar } from './scrollbars';
@@ -47,6 +49,7 @@ type SectionId =
   | 'preview'
   | 'notes'
   | 'citations'
+  | 'keybindings'
   | 'preambles';
 
 const SECTIONS: {
@@ -59,6 +62,7 @@ const SECTIONS: {
   { id: 'preview', label: 'Preview', icon: Eye },
   { id: 'notes', label: 'Notes', icon: FileText },
   { id: 'citations', label: 'Citations', icon: Quote },
+  { id: 'keybindings', label: 'Keybindings', icon: Keyboard },
   { id: 'preambles', label: 'Preambles', icon: FileCode },
 ];
 
@@ -358,6 +362,9 @@ export function SettingsDialog() {
                       </button>
                     </div>
                   </SectionBody>
+                </Match>
+                <Match when={section() === 'keybindings'}>
+                  <KeybindingSettings />
                 </Match>
                 <Match when={section() === 'preambles'}>
                   <PreambleSettings />

@@ -10,7 +10,9 @@ use std::sync::Mutex;
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(menu::app_menu);
+    let builder = builder
+        .menu(menu::app_menu)
+        .on_menu_event(menu::on_menu_event);
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -55,8 +57,10 @@ pub fn run() {
             commands::citation_styles,
             commands::refresh_references,
             commands::zotero_ready,
+            commands::zotero_search,
             commands::zotero_pick,
             commands::open_in_zotero,
+            commands::quit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

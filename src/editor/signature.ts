@@ -17,7 +17,7 @@ const setSignature = StateEffect.define<{
 } | null>();
 
 /** Renders inline `code` in docs as <code>; everything else is plain text. */
-function appendDocs(parent: HTMLElement, docs: string) {
+export function appendDocs(parent: HTMLElement, docs: string) {
   const text = docs.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
   for (const [i, part] of text.split('`').entries()) {
     if (i % 2 === 1) {

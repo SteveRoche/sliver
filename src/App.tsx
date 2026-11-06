@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { createSignal, Match, onCleanup, onMount, Switch } from 'solid-js';
 import './App.css';
@@ -20,6 +22,12 @@ function App() {
     // Unsaved edits are written before the window goes away.
     const unlisten = getCurrentWindow().onCloseRequested(() => flushAll());
     onCleanup(() => void unlisten.then(f => f()));
+    // Quit in the macOS menu waits for this (or gives up after a while).
+    const unlistenQuit = listen('quit-requested', async () => {
+      await flushAll().catch(error => console.error('could not save:', error));
+      await invoke('quit');
+    });
+    onCleanup(() => void unlistenQuit.then(f => f()));
 
     try {
       const last = await vault.last();

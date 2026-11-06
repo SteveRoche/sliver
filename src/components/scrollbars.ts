@@ -14,8 +14,14 @@ const HIDE_AFTER_MS = 900;
 
 type Axis = 'x' | 'y';
 
-/** Adds overlay scrollbars to `el`; returns a cleanup function. */
-export function overlayScrollbar(el: HTMLElement): () => void {
+/**
+ * Adds overlay scrollbars to `el`; returns a cleanup function. `thickness`
+ * in px, thinner for slim containers like a tab bar.
+ */
+export function overlayScrollbar(
+  el: HTMLElement,
+  thickness = THICKNESS,
+): () => void {
   const host = el.parentElement;
   if (!host) return () => {};
   if (getComputedStyle(host).position === 'static') {
@@ -28,6 +34,7 @@ export function overlayScrollbar(el: HTMLElement): () => void {
   };
   for (const axis of ['x', 'y'] as const) {
     thumbs[axis].className = `overlay-thumb overlay-thumb-${axis}`;
+    thumbs[axis].style[axis === 'x' ? 'height' : 'width'] = `${thickness}px`;
     host.appendChild(thumbs[axis]);
   }
 
@@ -70,10 +77,10 @@ export function overlayScrollbar(el: HTMLElement): () => void {
       const offset = ((view - length) * scrolled) / range;
       if (axis === 'y') {
         thumb.style.height = `${length}px`;
-        thumb.style.transform = `translate(${left + el.clientWidth - THICKNESS}px, ${top + offset}px)`;
+        thumb.style.transform = `translate(${left + el.clientWidth - thickness}px, ${top + offset}px)`;
       } else {
         thumb.style.width = `${length}px`;
-        thumb.style.transform = `translate(${left + offset}px, ${top + el.clientHeight - THICKNESS}px)`;
+        thumb.style.transform = `translate(${left + offset}px, ${top + el.clientHeight - thickness}px)`;
       }
     }
   };

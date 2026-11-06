@@ -135,6 +135,70 @@ pub fn export(keys: &[String]) -> Result<String> {
     Ok(String::new())
 }
 
+/// An item found by [`search`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Found {
+    pub citation_key: String,
+    pub title: String,
+    /// E.g. `Bellotti et al. 2004`.
+    pub byline: String,
+}
+
+/// Searching as you type is capped: the menu shows a handful anyway.
+const SEARCH_LIMIT: usize = 30;
+
+/// Items matching `query` in Zotero's quick search (title, creators, year),
+/// with their citation keys. None when Zotero can't be reached.
+pub fn search(query: &str) -> Vec<Found> {
+    let agent = agent(Some(Duration::from_secs(2)));
+    let Ok(result) = rpc(&agent, "item.search", json!([query])) else {
+        return Vec::new();
+    };
+    result
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(found)
+        .take(SEARCH_LIMIT)
+        .collect()
+}
+
+/// A search result from a CSL-JSON item.
+fn found(item: &Value) -> Option<Found> {
+    let text = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or_default();
+    let citation_key = text("citation-key");
+    if citation_key.is_empty() {
+        return None;
+    }
+    let authors: Vec<&str> = item
+        .get("author")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.get("family").or_else(|| a.get("literal"))?.as_str())
+        .collect();
+    let author = match authors.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [one, two] => format!("{one} & {two}"),
+        [one, ..] => format!("{one} et al."),
+    };
+    let year = item
+        .pointer("/issued/date-parts/0/0")
+        .map(|y| y.as_str().map_or_else(|| y.to_string(), str::to_owned))
+        .unwrap_or_default();
+    Some(Found {
+        citation_key: citation_key.to_owned(),
+        title: text("title").to_owned(),
+        byline: [author, year]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    })
+}
+
 /// The link that selects the item with citation key `key` in Zotero. Zotero
 /// selects by item key, so the item is looked up first; without Zotero
 /// running, the link just starts it.
@@ -194,5 +258,14 @@ mod tests {
             Some("zotero://select/groups/42/items/ABCD1234")
         );
         assert_eq!(item_url("http://zotero.org/users/1"), None);
+        let item = found(&json!({
+            "citation-key": "bellotti2004",
+            "title": "What a to-do",
+            "author": [{"family": "Bellotti"}, {"family": "Dalal"}, {"family": "Good"}],
+            "issued": {"date-parts": [["2004", 4, 25]]},
+        }))
+        .unwrap();
+        assert_eq!(item.byline, "Bellotti et al. 2004");
+        assert!(found(&json!({"title": "No key"})).is_none());
     }
 }

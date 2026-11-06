@@ -14,6 +14,7 @@ import type {
   CompileResult,
   Completions,
   Diagnostic,
+  Hover,
   Page,
   PagePoint,
   Position,
@@ -71,6 +72,12 @@ export interface NoteSession {
   locate(position: Position): Promise<PagePoint[]>;
   /** Signature help for the call around `position` in the editor's `text`. */
   signature(text: string, position: Position): Promise<Signature | null>;
+  /** What hovering `position` in the editor's `text` shows. */
+  tooltip(
+    text: string,
+    position: Position,
+    before: boolean,
+  ): Promise<Hover | null>;
   /** Typst completions for the editor's current `text` at `position`. */
   complete(
     text: string,
@@ -93,6 +100,8 @@ export interface NoteSession {
   replaceText(text: string): void;
   /** Replaces the editor's selection with `text` (inserts at the cursor) and focuses it. */
   insert(text: string): void;
+  /** The note's editor while it's on screen. */
+  shownView(): EditorView | undefined;
   attachView(view: EditorView | undefined): void;
   /** The main file the preview compiles, once known. */
   mainPath(): string | undefined;
@@ -218,18 +227,21 @@ const index = createRoot(() =>
   createMemo(() => {
     const byId = new Map<NoteId, TreeNode>();
     const byAddress = new Map<string, NoteId>();
+    /** Each Zettelkasten note's parent in the address tree. */
+    const parents = new Map<NoteId, TreeNode>();
     /** Notes in sidebar order, depth first. */
     const notes: TreeNode[] = [];
     const folders: FolderNode[] = [];
     let zettelkasten: FolderNode | null = null;
-    const walkNotes = (nodes: TreeNode[]) => {
+    const walkNotes = (nodes: TreeNode[], parent?: TreeNode) => {
       for (const node of nodes) {
         byId.set(node.id, node);
+        if (parent) parents.set(node.id, parent);
         notes.push(node);
         if (node.address && !byAddress.has(node.address)) {
           byAddress.set(node.address, node.id);
         }
-        walkNotes(node.children);
+        walkNotes(node.children, node);
       }
     };
     const walkFolder = (folder: FolderNode) => {
@@ -241,11 +253,14 @@ const index = createRoot(() =>
       walkNotes(folder.notes);
     };
     walkFolder(tree());
-    return { byId, byAddress, notes, folders, zettelkasten };
+    return { byId, byAddress, parents, notes, folders, zettelkasten };
   }),
 );
 
 export const noteById = (id: NoteId) => index().byId.get(id);
+
+/** A Zettelkasten note's parent in the address tree (its nearest existing ancestor). */
+export const parentNote = (id: NoteId) => index().parents.get(id);
 
 /** Notes in sidebar order, for the quick switcher. */
 export const allNotes = () => index().notes;
@@ -408,6 +423,10 @@ function createSession(id: NoteId): NoteSession {
       if (!mainPath) return null;
       return typst.signature(mainPath, notePath(id), text, position);
     },
+    async tooltip(text, position, before) {
+      if (!mainPath) return null;
+      return typst.tooltip(mainPath, notePath(id), text, position, before);
+    },
     async complete(text, position, explicit) {
       if (!mainPath) return null;
       return typst.complete(mainPath, notePath(id), text, position, explicit);
@@ -445,6 +464,10 @@ function createSession(id: NoteId): NoteSession {
           insert: next.slice(start, next.length - end),
         },
       });
+    },
+    shownView() {
+      // Hidden tabs and reading view hide the editor with `display: none`.
+      return view?.dom.offsetParent ? view : undefined;
     },
     insert(text) {
       if (!view) return;
@@ -689,6 +712,33 @@ export function openNote(id: NoteId) {
       pane.tabs.push({ key, note: id });
       pane.active = key;
     }
+  });
+}
+
+/**
+ * Shows note `id` in pane `paneId`'s active tab instead of its current
+ * note, like following a link in a browser tab, so stepping through notes
+ * doesn't pile up tabs. A note open in a tab already is activated there.
+ */
+export async function navigate(paneId: string, id: NoteId) {
+  if (!noteById(id)) return;
+  const existing = tabOf(id);
+  if (existing) return activateTab(existing.key);
+  focusPane(paneId);
+  const pane = findPane(layout.root, paneId);
+  const tab = pane?.tabs.find(t => t.key === pane.active);
+  if (!tab) return openNote(id);
+  const key = tab.key;
+  const old = tab.note && sessions.get(tab.note);
+  if (old) {
+    await old.flush();
+    old.dispose();
+    sessions.delete(old.id);
+  }
+  sessions.set(id, createSession(id));
+  update(state => {
+    const found = paneOfTab(state.root, key)?.tabs.find(t => t.key === key);
+    if (found) found.note = id;
   });
 }
 
@@ -1178,6 +1228,16 @@ export async function preambleSignature(
 ): Promise<Signature | null> {
   const main = activeSession()?.mainPath();
   return main ? typst.signature(main, path, text, position) : null;
+}
+
+export async function preambleTooltip(
+  path: string,
+  text: string,
+  position: Position,
+  before: boolean,
+): Promise<Hover | null> {
+  const main = activeSession()?.mainPath();
+  return main ? typst.tooltip(main, path, text, position, before) : null;
 }
 
 /** The focused note's latest compile diagnostics located in `path`. */

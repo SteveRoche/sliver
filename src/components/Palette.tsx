@@ -2,7 +2,7 @@ import { Dialog } from '@ark-ui/solid';
 import Search from 'lucide-solid/icons/search';
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
-import { availableCommands } from '../commands/registry';
+import { availableCommands, keybindingOf } from '../commands/registry';
 import { allNotes, noteLabel, openNote } from '../state/workspace';
 import { Keys } from './Keys';
 import { withOverlayScrollbar } from './scrollbars';
@@ -97,7 +97,7 @@ function itemsFor(m: PaletteMode): Item[] {
     .map(command => ({
       key: command.id,
       label: command.title,
-      keybinding: command.keybinding,
+      keybinding: keybindingOf(command),
       run: command.run,
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
