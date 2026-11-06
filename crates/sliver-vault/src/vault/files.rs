@@ -110,6 +110,7 @@ impl Vault {
         };
         self.folders.clear();
         self.zettelkasten = None;
+        self.section_names.clear();
         self.extra_zettelkasten.clear();
         self.duplicates.clear();
         self.scan(&mut previous)?;

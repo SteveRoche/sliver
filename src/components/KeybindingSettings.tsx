@@ -139,7 +139,7 @@ export function KeybindingSettings() {
                   classList={{ recording: recording() === command }}
                   onClick={() => setRecording(command)}
                 >
-                  <Show when={recording() !== command} fallback="Press keys...">
+                  <Show when={recording() !== command} fallback="Press keys…">
                     <Show when={keybinding()} fallback="None">
                       {keys => <Keys keybinding={keys()} />}
                     </Show>

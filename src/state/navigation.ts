@@ -8,7 +8,8 @@ import {
   navigate,
   noteById,
   parentNote,
-  zettelkasten,
+  sequenceNotes,
+  sequenceOf,
 } from './workspace';
 
 /**
@@ -83,7 +84,9 @@ export function folgezettelTarget(
   const parent = parentNote(id);
   if (move === 'parent') return parent?.id;
   if (move === 'next') return noteById(id)?.children[0]?.id;
-  const siblings = parent?.children ?? zettelkasten()?.notes ?? [];
+  const sequence = sequenceOf(noteById(id)?.address ?? null);
+  const siblings =
+    parent?.children ?? (sequence === undefined ? [] : sequenceNotes(sequence));
   const i = siblings.findIndex(n => n.id === id);
   return siblings[i + (move === 'nextAside' ? 1 : -1)]?.id;
 }

@@ -12,6 +12,7 @@ import FolderOpen from 'lucide-solid/icons/folder-open';
 import FolderPen from 'lucide-solid/icons/folder-pen';
 import FolderPlus from 'lucide-solid/icons/folder-plus';
 import FolderX from 'lucide-solid/icons/folder-x';
+import Group from 'lucide-solid/icons/group';
 import Library from 'lucide-solid/icons/library';
 import Milestone from 'lucide-solid/icons/milestone';
 import Pencil from 'lucide-solid/icons/pencil';
@@ -19,6 +20,7 @@ import Plus from 'lucide-solid/icons/plus';
 import Shapes from 'lucide-solid/icons/shapes';
 import Trash2 from 'lucide-solid/icons/trash';
 import TriangleAlert from 'lucide-solid/icons/triangle-exclamation-point';
+import X from 'lucide-solid/icons/x';
 import {
   createMemo,
   createSignal,
@@ -39,16 +41,26 @@ import {
   activeNote,
   collapsedFolders,
   inZettelkasten,
+  isNoteAddress,
   isViewable,
   noteById,
   noteLabel,
   openAsset,
   openNote,
+  sectionLabel,
+  sections,
+  sequenceOf,
   setFolderCollapsed,
   tree,
   zettelkasten,
 } from '../state/workspace';
-import type { AssetNode, FolderNode, NoteId, TreeNode } from '../vault/api';
+import type {
+  AssetNode,
+  FolderNode,
+  NoteId,
+  SectionNode,
+  TreeNode,
+} from '../vault/api';
 import { overlayScrollbar } from './scrollbars';
 
 /** Row data for Ark's tree: folders and notes share one collection. */
@@ -69,6 +81,13 @@ type Node =
     }
   | {
       id: string;
+      kind: 'section';
+      section: SectionNode;
+      depth: number;
+      children: Node[];
+    }
+  | {
+      id: string;
       kind: 'asset';
       asset: AssetNode;
       depth: number;
@@ -78,6 +97,7 @@ type Node =
 const FOLDER_PREFIX = 'folder:';
 const folderId = (path: string) => FOLDER_PREFIX + path;
 const ASSET_PREFIX = 'asset:';
+const SECTION_PREFIX = 'section:';
 const assetId = (path: string) => ASSET_PREFIX + path;
 
 function noteNodes(notes: TreeNode[], depth: number): Node[] {
@@ -92,8 +112,31 @@ function noteNodes(notes: TreeNode[], depth: number): Node[] {
   }));
 }
 
+/** Where a Zettelkasten row sorts: by its (first) sequence; notes without an address last. */
+function sequenceKey(node: Node): number {
+  if (node.kind === 'section') return node.section.first;
+  if (node.kind === 'note') return sequenceOf(node.note.address) ?? Infinity;
+  return Infinity;
+}
+
 /** Subfolders indent like a file tree; trains of thought don't. */
 function folderContents(folder: FolderNode, depth: number): Node[] {
+  // The Zettelkasten's section headings, between the sequences outside
+  // them. A section's notes indent one level (a section is a grouping, like
+  // a folder), so the sequences after it don't look like part of it; the
+  // trains of thought within still don't indent.
+  const sectioned = [
+    ...folder.sections.map(
+      (section): Node => ({
+        id: SECTION_PREFIX + section.first,
+        kind: 'section',
+        section,
+        depth,
+        children: noteNodes(section.notes, depth + 1),
+      }),
+    ),
+    ...noteNodes(folder.notes, depth),
+  ].sort((a, b) => sequenceKey(a) - sequenceKey(b));
   return [
     ...folder.folders.map(
       (sub): Node => ({
@@ -104,7 +147,7 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
         children: folderContents(sub, depth + 1),
       }),
     ),
-    ...noteNodes(folder.notes, depth),
+    ...sectioned,
     ...folder.assets.map(
       (asset): Node => ({
         id: assetId(asset.path),
@@ -118,7 +161,9 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
 
 function noteBranchIds(nodes: Node[], out: string[] = []): string[] {
   for (const node of nodes) {
-    if (node.kind === 'note' && node.children) out.push(node.id);
+    if ((node.kind === 'note' && node.children) || node.kind === 'section') {
+      out.push(node.id);
+    }
     noteBranchIds(node.children ?? [], out);
   }
   return out;
@@ -128,8 +173,78 @@ function noteBranchIds(nodes: Node[], out: string[] = []): string[] {
 const [menuTarget, setMenuTarget] = createSignal<NoteId | null>(null);
 const [menuFolder, setMenuFolder] = createSignal<string | null>(null);
 const [menuAsset, setMenuAsset] = createSignal<string | null>(null);
+const [menuSection, setMenuSection] = createSignal<number | null>(null);
 
-export { menuAsset, menuFolder, menuTarget };
+export { menuAsset, menuFolder, menuSection, menuTarget };
+
+/**
+ * Zettelkasten notes marked with Shift- or Cmd/Ctrl-click, whose sequences
+ * can be made a section. A plain click or Escape clears them.
+ */
+const [marked, setMarked] = createSignal<ReadonlySet<NoteId>>(new Set());
+let markAnchor: NoteId | null = null;
+
+/** The notes "Make section" acts on: the marked ones, else the right-clicked one. */
+export function sectionCandidates(): NoteId[] {
+  if (marked().size > 0) return [...marked()];
+  const target = menuTarget();
+  return target && isMarkable(target) ? [target] : [];
+}
+
+export const clearMarks = () => setMarked(new Set<NoteId>());
+
+const isMarkable = (id: NoteId | undefined): id is NoteId =>
+  !!id && inZettelkasten(id) && isNoteAddress(noteById(id)?.address ?? null);
+
+/**
+ * Marking rows for a section: Cmd/Ctrl-click toggles a Zettelkasten note,
+ * Shift-click adds the rows from the last one marked. Runs in the capture
+ * phase, so such clicks never reach the tree (which would open the note).
+ */
+function rowMarking(tree: HTMLElement) {
+  const onClick = (event: MouseEvent) => {
+    const target = event.target as Element;
+    const id = target.closest<HTMLElement>('[data-note-id]')?.dataset.noteId;
+    const modified = event.shiftKey || event.metaKey || event.ctrlKey;
+    if (!modified) {
+      if (marked().size > 0) clearMarks();
+      markAnchor = isMarkable(id) ? id : null;
+      return;
+    }
+    if (!isMarkable(id) || target.closest('.fold-toggle')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const next = new Set(marked());
+    const rows = [...tree.querySelectorAll<HTMLElement>('[data-note-id]')]
+      .map(row => row.dataset.noteId)
+      .filter(isMarkable);
+    const from = markAnchor ? rows.indexOf(markAnchor) : -1;
+    const to = rows.indexOf(id);
+    if (event.shiftKey && from >= 0 && to >= 0) {
+      for (const row of rows.slice(
+        Math.min(from, to),
+        Math.max(from, to) + 1,
+      )) {
+        next.add(row);
+      }
+    } else if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    markAnchor = id;
+    setMarked(next);
+  };
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && marked().size > 0) clearMarks();
+  };
+  tree.addEventListener('click', onClick, { capture: true });
+  tree.addEventListener('keydown', onKey);
+  return () => {
+    tree.removeEventListener('click', onClick, { capture: true });
+    tree.removeEventListener('keydown', onKey);
+  };
+}
 
 /** How far the pointer moves before a press on a row becomes a drag. */
 const DRAG_PX = 5;
@@ -145,7 +260,7 @@ function treeDragging(tree: HTMLElement) {
     document
       .elementFromPoint(x, y)
       ?.closest<HTMLElement>(
-        '[data-folder-path], [data-note-id], [data-asset-path]',
+        '[data-folder-path], [data-note-id], [data-asset-path], [data-section]',
       );
   let marked: HTMLElement | null = null;
   const mark = (el: HTMLElement | null) => {
@@ -204,11 +319,13 @@ function treeDragging(tree: HTMLElement) {
       }
       target = over?.dataset.noteId
         ? { note: over.dataset.noteId }
-        : over?.dataset.folderPath !== undefined
-          ? { folder: over.dataset.folderPath }
-          : over?.dataset.assetPath !== undefined
-            ? { folder: parentPath(over.dataset.assetPath) }
-            : { folder: '' };
+        : over?.dataset.section !== undefined
+          ? { folder: zettelkasten()?.path ?? '' }
+          : over?.dataset.folderPath !== undefined
+            ? { folder: over.dataset.folderPath }
+            : over?.dataset.assetPath !== undefined
+              ? { folder: parentPath(over.dataset.assetPath) }
+              : { folder: '' };
       mark(over ?? null);
     };
     const onUp = () => {
@@ -257,7 +374,9 @@ export function Sidebar() {
           ? node.folder.name
           : node.kind === 'asset'
             ? node.asset.name
-            : noteLabel(node.note),
+            : node.kind === 'section'
+              ? sectionLabel(node.section)
+              : noteLabel(node.note),
       rootNode: {
         id: 'root',
         kind: 'folder',
@@ -268,7 +387,7 @@ export function Sidebar() {
     }),
   );
 
-  // Trains of thought start unfolded; ones created later unfold as they appear.
+  // Sections and trains of thought start unfolded; ones created later unfold as they appear.
   const [foldedNotes, setFoldedNotes] = createSignal<string[]>([]);
   const expanded = createMemo(() => {
     const folded = new Set(foldedNotes());
@@ -298,14 +417,17 @@ export function Sidebar() {
 
   const onContextMenu = (event: MouseEvent) => {
     const row = (event.target as Element).closest<HTMLElement>(
-      '[data-note-id], [data-folder-path], [data-asset-path]',
+      '[data-note-id], [data-folder-path], [data-asset-path], [data-section]',
     );
     setMenuTarget(row?.dataset.noteId ?? null);
     setMenuFolder(row?.dataset.folderPath ?? null);
     setMenuAsset(row?.dataset.assetPath ?? null);
+    const section = row?.dataset.section;
+    setMenuSection(section === undefined ? null : Number(section));
   };
 
   const targetNote = () => noteById(menuTarget() ?? '');
+  const targetSection = () => sections().find(s => s.first === menuSection());
   const targetFolder = () =>
     allSubfolders(tree()).find(f => f.path === menuFolder());
   const isEmpty = () =>
@@ -327,6 +449,7 @@ export function Sidebar() {
           if (tree) {
             onCleanup(overlayScrollbar(tree));
             onCleanup(treeDragging(tree));
+            onCleanup(rowMarking(tree));
           }
         })
       }
@@ -362,6 +485,7 @@ export function Sidebar() {
               setMenuTarget(null);
               setMenuFolder(null);
               setMenuAsset(null);
+              setMenuSection(null);
             });
           }
         }}
@@ -378,7 +502,13 @@ export function Sidebar() {
             selectedValue={selected()}
             onSelectionChange={details => {
               const id = details.selectedValue[0];
-              if (!id || id.startsWith(FOLDER_PREFIX)) return;
+              if (
+                !id ||
+                id.startsWith(FOLDER_PREFIX) ||
+                id.startsWith(SECTION_PREFIX)
+              ) {
+                return;
+              }
               if (id.startsWith(ASSET_PREFIX)) {
                 void openAsset(id.slice(ASSET_PREFIX.length));
               } else {
@@ -410,10 +540,10 @@ export function Sidebar() {
                 fallback={
                   <>
                     <Menu.Item value="note.new">
-                      <FilePlus size={14} /> New note
+                      <FilePlus size={14} /> New note…
                     </Menu.Item>
                     <Menu.Item value="folder.new">
-                      <FolderPlus size={14} /> New folder...
+                      <FolderPlus size={14} /> New folder…
                     </Menu.Item>
                   </>
                 }
@@ -423,6 +553,7 @@ export function Sidebar() {
                     <NoteMenu
                       addressed={!!note().address && inZettelkasten(note().id)}
                       filed={inZettelkasten(note().id)}
+                      sequences={sectionCandidates()}
                     />
                   )}
                 </Match>
@@ -431,6 +562,9 @@ export function Sidebar() {
                 </Match>
                 <Match when={menuAsset()}>
                   <AssetMenu />
+                </Match>
+                <Match when={targetSection()}>
+                  <SectionMenu />
                 </Match>
               </Switch>
             </Menu.Content>
@@ -445,34 +579,53 @@ function allSubfolders(folder: FolderNode): FolderNode[] {
   return folder.folders.flatMap(f => [f, ...allSubfolders(f)]);
 }
 
-function NoteMenu(props: { addressed: boolean; filed: boolean }) {
+function NoteMenu(props: {
+  addressed: boolean;
+  filed: boolean;
+  /** The notes whose sequences "Make section" would name. */
+  sequences: NoteId[];
+}) {
+  const range = () => {
+    const numbers = props.sequences
+      .map(id => sequenceOf(noteById(id)?.address ?? null))
+      .filter((n): n is number => n !== undefined);
+    const first = Math.min(...numbers);
+    const last = Math.max(...numbers);
+    return first === last ? `sequence ${first}` : `sequences ${first}–${last}`;
+  };
   return (
     <>
+      <Show when={props.sequences.length > 0}>
+        <Menu.Item value="menu.markSection">
+          <Group size={14} /> Make {range()} a section…
+        </Menu.Item>
+        <Menu.Separator class="menu-separator" />
+      </Show>
       <Show when={props.addressed}>
         <Menu.Item value="menu.next">
-          <CornerDownRight size={14} /> New next note
+          <CornerDownRight size={14} /> New next note…
         </Menu.Item>
         <Menu.Item value="menu.aside">
-          <ArrowDown size={14} /> New aside
+          <ArrowDown size={14} /> New aside…
         </Menu.Item>
         <Menu.Separator class="menu-separator" />
       </Show>
       <Menu.Item value="menu.moveToAddress" disabled={!zettelkasten()}>
         <Milestone size={14} />{' '}
-        {props.filed ? 'Move to address...' : 'File into Zettelkasten...'}
+        {props.filed ? 'Move to address…' : 'File into Zettelkasten…'}
       </Menu.Item>
       <Menu.Item value="menu.moveToFolder">
-        <FolderInput size={14} /> Move to folder...
+        <FolderInput size={14} /> Move to folder…
       </Menu.Item>
       <Menu.Item value="menu.changeKind">
-        <Shapes size={14} /> Change kind...
+        <Shapes size={14} /> Change kind…
       </Menu.Item>
       <Menu.Separator class="menu-separator" />
       <Menu.Item value="menu.rename">
-        <Pencil size={14} /> Rename...
+        <Pencil size={14} /> Rename…
       </Menu.Item>
       <Menu.Item value="menu.delete" class="danger">
-        <Trash2 size={14} /> Delete...
+        <Trash2 size={14} /> Delete
       </Menu.Item>
     </>
   );
@@ -483,11 +636,11 @@ function FolderMenu(props: { folder: FolderNode }) {
   return (
     <>
       <Menu.Item value="folder.menu.newNote">
-        <FilePlus size={14} /> New note
+        <FilePlus size={14} /> New note…
       </Menu.Item>
       <Show when={!isZettelkasten()}>
         <Menu.Item value="folder.menu.newFolder">
-          <FolderPlus size={14} /> New folder...
+          <FolderPlus size={14} /> New folder…
         </Menu.Item>
       </Show>
       <Show when={!zettelkasten()}>
@@ -497,13 +650,26 @@ function FolderMenu(props: { folder: FolderNode }) {
       </Show>
       <Menu.Separator class="menu-separator" />
       <Menu.Item value="folder.menu.rename">
-        <FolderPen size={14} /> Rename folder...
+        <FolderPen size={14} /> Rename folder…
       </Menu.Item>
       <Show when={!isZettelkasten()}>
         <Menu.Item value="folder.menu.delete" class="danger">
-          <FolderX size={14} /> Delete folder...
+          <FolderX size={14} /> Delete folder
         </Menu.Item>
       </Show>
+    </>
+  );
+}
+
+function SectionMenu() {
+  return (
+    <>
+      <Menu.Item value="section.menu.rename">
+        <Pencil size={14} /> Rename section…
+      </Menu.Item>
+      <Menu.Item value="section.menu.unmark">
+        <X size={14} /> Remove section heading
+      </Menu.Item>
     </>
   );
 }
@@ -522,13 +688,13 @@ function AssetMenu() {
       </Menu.Item>
       <Menu.Separator class="menu-separator" />
       <Menu.Item value="asset.menu.move">
-        <FolderInput size={14} /> Move to folder...
+        <FolderInput size={14} /> Move to folder…
       </Menu.Item>
       <Menu.Item value="asset.menu.rename">
-        <Pencil size={14} /> Rename...
+        <Pencil size={14} /> Rename…
       </Menu.Item>
       <Menu.Item value="asset.menu.delete" class="danger">
-        <Trash2 size={14} /> Delete...
+        <Trash2 size={14} /> Delete
       </Menu.Item>
     </>
   );
@@ -566,6 +732,15 @@ function NodeView(props: { node: Node; indexPath: number[] }) {
           {node => (
             <NoteView
               node={node() as Extract<Node, { kind: 'note' }>}
+              indexPath={props.indexPath}
+              style={depthStyle()}
+            />
+          )}
+        </Match>
+        <Match when={props.node.kind === 'section' && props.node}>
+          {node => (
+            <SectionView
+              node={node() as Extract<Node, { kind: 'section' }>}
               indexPath={props.indexPath}
               style={depthStyle()}
             />
@@ -667,12 +842,46 @@ function FolderView(props: {
   );
 }
 
+/** A Zettelkasten section: a heading over a run of sequences, whose row folds their notes. */
+function SectionView(props: {
+  node: Extract<Node, { kind: 'section' }>;
+  indexPath: number[];
+  style: JSX.CSSProperties;
+}) {
+  const section = () => props.node.section;
+  return (
+    <TreeView.Branch>
+      <TreeView.BranchControl
+        class="tree-item section-row"
+        style={props.style}
+        data-section={section().first}
+      >
+        <TreeView.BranchTrigger class="folder-toggle">
+          <span class="section-number">
+            {section().first === section().last
+              ? section().first
+              : `${section().first}–${section().last}`}
+          </span>
+          <span class="note-title section-name">{section().name}</span>
+        </TreeView.BranchTrigger>
+      </TreeView.BranchControl>
+      <Children
+        nodes={props.node.children}
+        indexPath={props.indexPath}
+        guideDepth={settings.indentGuides ? props.node.depth : undefined}
+      />
+    </TreeView.Branch>
+  );
+}
+
 function NoteView(props: {
   node: Extract<Node, { kind: 'note' }>;
   indexPath: number[];
   style: JSX.CSSProperties;
 }) {
   const note = () => props.node.note;
+  const rowClass = () =>
+    marked().has(note().id) ? 'tree-item marked' : 'tree-item';
   const title = () => (
     <>
       <span class="note-title">{note().title ?? 'Untitled'}</span>
@@ -686,7 +895,7 @@ function NoteView(props: {
       when={props.node.children}
       fallback={
         <TreeView.Item
-          class="tree-item"
+          class={rowClass()}
           style={props.style}
           data-note-id={note().id}
         >
@@ -702,7 +911,7 @@ function NoteView(props: {
       {children => (
         <TreeView.Branch>
           <TreeView.BranchControl
-            class="tree-item"
+            class={rowClass()}
             style={props.style}
             data-note-id={note().id}
           >

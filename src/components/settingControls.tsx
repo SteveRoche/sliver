@@ -147,7 +147,7 @@ export function FolderSetting(props: {
         ids={{ input: props.id }}
         defaultValue={props.value ? [props.value] : []}
         defaultInputValue={props.value}
-        placeholder="Search folders..."
+        placeholder="Search folders…"
         openOnClick
         inputBehavior="autohighlight"
         onOpenChange={details => {

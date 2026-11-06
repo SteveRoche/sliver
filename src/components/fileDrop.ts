@@ -6,6 +6,7 @@ import {
   importAttachments,
   noteById,
   noteOfView,
+  zettelkasten,
 } from '../state/workspace';
 
 /**
@@ -31,7 +32,7 @@ export function installFileDrop(): () => void {
     const sidebar = el?.closest('.sidebar-tree');
     if (!sidebar || !el) return null;
     const row = el.closest<HTMLElement>(
-      '[data-folder-path], [data-note-id], [data-asset-path]',
+      '[data-folder-path], [data-note-id], [data-asset-path], [data-section]',
     );
     return {
       kind: 'folder' as const,
@@ -77,8 +78,9 @@ export function installFileDrop(): () => void {
 /** The folder a sidebar row stands for: itself, or a note's or file's folder. */
 function folderOf(row: HTMLElement | null): string {
   if (!row) return '';
-  const { folderPath, noteId, assetPath } = row.dataset;
+  const { folderPath, noteId, assetPath, section } = row.dataset;
   if (folderPath !== undefined) return folderPath;
+  if (section !== undefined) return zettelkasten()?.path ?? '';
   if (noteId) return noteById(noteId)?.folder ?? '';
   if (assetPath) {
     return assetPath.includes('/')

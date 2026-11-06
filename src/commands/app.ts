@@ -1,8 +1,15 @@
-import { ask, open } from '@tauri-apps/plugin-dialog';
+import { ask, message, open } from '@tauri-apps/plugin-dialog';
 import { openPalette, pick } from '../components/Palette';
 import { prompt } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
-import { menuAsset, menuFolder, menuTarget } from '../components/Sidebar';
+import {
+  clearMarks,
+  menuAsset,
+  menuFolder,
+  menuSection,
+  menuTarget,
+  sectionCandidates,
+} from '../components/Sidebar';
 import { toggleWrap } from '../editor/format';
 import { triggerSignature } from '../editor/signature';
 import { insertCitation, refreshReferences } from '../state/citations';
@@ -34,6 +41,7 @@ import {
   inZettelkasten,
   kinds,
   layout,
+  markSection,
   moveAsset,
   moveToAddress,
   moveToFolder,
@@ -49,7 +57,12 @@ import {
   renameAsset,
   renameFolder,
   renameNote,
+  renameSection,
+  resolveTarget,
   saveNote,
+  sectionLabel,
+  sections,
+  sequenceOf,
   sessionFor,
   setNoteKind,
   setPreviewLayout,
@@ -57,10 +70,12 @@ import {
   splitFocused,
   togglePreview,
   toggleReading,
+  unmarkSection,
   vaultRoot,
   zettelkasten,
 } from '../state/workspace';
 import {
+  type AddressPlace,
   type NoteId,
   type NoteSummary,
   type Placement,
@@ -118,15 +133,16 @@ async function chooseAddress(id: NoteId | null): Promise<Placement | null> {
     n =>
       n.address &&
       inZettelkasten(n.id) &&
+      resolveTarget(n.address) === n.id &&
       // A note can't be filed after or beside itself or the notes after it.
       !(filed && subtreeOf && isUnder(n.address, subtreeOf)),
   );
-  const target = await pick<NoteId | null>('File after or beside...', [
-    { label: 'New top-level address', value: null },
+  const target = await pick<NoteId | null>('File after or beside…', [
+    { label: 'New sequence', value: null },
     ...targets.map(n => ({ label: noteLabel(n), value: n.id })),
   ]);
   if (!target) return null;
-  if (target.value === null) return { kind: 'top' };
+  if (target.value === null) return { kind: 'newSequence' };
   const of = target.value;
   const label = noteLabel(noteById(of));
   const how = await pick<'next' | 'aside'>('Next note or aside?', [
@@ -183,7 +199,7 @@ async function moveNoteToFolder(id: NoteId) {
   const choices = ['', ...allFolders().map(f => f.path)]
     .filter(path => path !== zk && path !== note?.folder)
     .map(path => ({ label: folderLabel(path), value: path }));
-  const choice = await pick('Move to folder...', choices);
+  const choice = await pick('Move to folder…', choices);
   if (choice) await moveNoteInto(id, choice.value);
 }
 
@@ -204,9 +220,9 @@ async function moveNoteInto(id: NoteId, folder: string) {
 export type DropTarget = { folder: string } | { note: NoteId };
 
 /**
- * Drops note `id` in the sidebar: onto the Zettelkasten, a new top-level
- * address; onto a Zettelkasten note, a next note or aside of it (asked);
- * onto another folder (or a note in one), into that folder.
+ * Drops note `id` in the sidebar: onto the Zettelkasten, a new sequence;
+ * onto a Zettelkasten note, a next note or aside of it (asked); onto
+ * another folder (or a note in one), into that folder.
  */
 export async function dropNote(id: NoteId, target: DropTarget) {
   const zk = zettelkasten()?.path;
@@ -226,7 +242,7 @@ export async function dropNote(id: NoteId, target: DropTarget) {
     return dropNote(id, { folder: onto.folder });
   }
   if (target.folder === zk) {
-    if (!inZettelkasten(id)) await fileAt(id, { kind: 'top' });
+    if (!inZettelkasten(id)) await fileAt(id, { kind: 'newSequence' });
     return;
   }
   if (noteById(id)?.folder !== target.folder) {
@@ -293,7 +309,7 @@ async function moveAssetPrompt(path: string) {
   const choices = ['', ...allFolders().map(f => f.path)]
     .filter(folder => folder !== parentOf(path))
     .map(folder => ({ label: folderLabel(folder), value: folder }));
-  const choice = await pick('Move file to folder...', choices);
+  const choice = await pick('Move file to folder…', choices);
   if (choice) await dropAsset(path, { folder: choice.value });
 }
 
@@ -375,11 +391,8 @@ export async function followBrokenLink(source: NoteId, raw: string) {
     // Fails without a Zettelkasten: then it's only a title.
     const place = await vault.placeForAddress(target).catch(() => null);
     if (place) {
-      const parent = place.of && noteById(place.of);
       if (place.address !== target) {
-        const where = parent
-          ? `the next note after ${noteLabel(parent)}`
-          : 'a new top-level address';
+        const where = placeLabel(place.placement);
         const choice = await pick<'address' | 'title'>(`No note ${target}`, [
           {
             label: `Create ${place.address}, ${where}, and link to it (${target} would leave a gap)`,
@@ -389,11 +402,11 @@ export async function followBrokenLink(source: NoteId, raw: string) {
         ]);
         if (!choice) return;
         if (choice.value === 'address') {
-          await linkedNoteAt(place.of, place.address, relink);
+          await linkedNoteAt(place, relink);
           return;
         }
       } else {
-        await linkedNoteAt(place.of, place.address, relink);
+        await linkedNoteAt(place, relink);
         return;
       }
     }
@@ -406,26 +419,36 @@ export async function followBrokenLink(source: NoteId, raw: string) {
   relink(await createNote(placement, target));
 }
 
-/** Asks for a title and creates the next note of `of` (top level without), expected at `address`. */
+/** "the next note after 1.2 Title", "an aside to ...", "a new sequence". */
+function placeLabel(placement: Placement): string {
+  switch (placement.kind) {
+    case 'next':
+      return `the next note after ${noteLabel(noteById(placement.of))}`;
+    case 'aside':
+      return `an aside to ${noteLabel(noteById(placement.of))}`;
+    default:
+      return 'a new sequence';
+  }
+}
+
+/** Asks for a title and creates a note at `place`. */
 async function linkedNoteAt(
-  of: NoteId | null,
-  address: string,
+  place: AddressPlace,
   relink: (note: NoteSummary) => void,
 ) {
   const title = await prompt({
-    title: `New note ${address}`,
+    title: `New note ${place.address}`,
     label: 'Title',
     confirm: 'Create',
   });
   if (title === null) return;
-  const placement: Placement = of ? { kind: 'next', of } : { kind: 'top' };
-  relink(await createNote(placement, title.trim()));
+  relink(await createNote(place.placement, title.trim()));
 }
 
 /** Asks for a kind, then creates a note in that kind's folder (else where Mod+N would). */
 async function newNoteOfKind() {
   const choice = await pick(
-    'New note of kind...',
+    'New note of kind…',
     kinds().map(kind => ({ label: kind, value: kind })),
   );
   if (!choice) return;
@@ -437,12 +460,55 @@ async function newNoteOfKind() {
 
 async function changeKind(id: NoteId) {
   const current = noteById(id)?.kind ?? null;
-  const choice = await pick<string | null>('Change note kind...', [
+  const choice = await pick<string | null>('Change note kind…', [
     { label: 'No kind', value: null },
     ...kinds().map(kind => ({ label: kind, value: kind })),
   ]);
   if (!choice || choice.value === current) return;
   await setNoteKind(id, choice.value);
+}
+
+const sectionAt = (first: number) => sections().find(s => s.first === first);
+
+async function renameSectionPrompt(first: number) {
+  const section = sectionAt(first);
+  const name = await prompt({
+    title: `Rename section ${section ? sectionLabel(section) : first}`,
+    label: 'Name',
+    initial: section?.name ?? '',
+    confirm: 'Rename',
+  });
+  if (name?.trim()) await renameSection(first, name.trim());
+}
+
+/**
+ * Names the sequences of the notes marked in the sidebar (or of the
+ * right-clicked note) as a section: the run from the lowest to the highest.
+ */
+async function markSectionPrompt() {
+  const numbers = sectionCandidates()
+    .map(id => sequenceOf(noteById(id)?.address ?? null))
+    .filter((n): n is number => n !== undefined);
+  if (numbers.length === 0) return;
+  const first = Math.min(...numbers);
+  const last = Math.max(...numbers);
+  const range =
+    first === last ? `sequence ${first}` : `sequences ${first}–${last}`;
+  const name = await prompt({
+    title: `Make ${range} a section`,
+    label: 'Name',
+    confirm: 'Make section',
+  });
+  if (!name?.trim()) return;
+  try {
+    await markSection(first, last, name.trim());
+    clearMarks();
+  } catch (error) {
+    await message(`Can't make ${range} a section: ${error}`, {
+      title: 'Make section',
+      kind: 'warning',
+    });
+  }
 }
 
 async function newFolder(parent: string) {
@@ -600,6 +666,29 @@ function onFolder(): Command[] {
   ];
 }
 
+/** Commands for the sidebar's right-clicked section; only enabled while its menu is open. */
+function onSection(): Command[] {
+  const withSection = (f: (first: number) => unknown) => () => {
+    const first = menuSection();
+    if (first !== null) return f(first);
+  };
+  const enabled = () => hasVault() && menuSection() !== null;
+  return [
+    {
+      id: 'section.menu.rename',
+      title: 'Rename section',
+      enabled,
+      run: withSection(renameSectionPrompt),
+    },
+    {
+      id: 'section.menu.unmark',
+      title: 'Remove section heading',
+      enabled,
+      run: withSection(unmarkSection),
+    },
+  ];
+}
+
 /** Commands for the sidebar's right-clicked file; only enabled while its menu is open. */
 function onAsset(): Command[] {
   const withAsset = (f: (path: string) => unknown) => () => {
@@ -690,12 +779,21 @@ export function registerAppCommands(): () => void {
       run: () => newNote({ kind: 'unaddressed' }, 'New note'),
     },
     ...onNote('note', activeNote),
-    ...[...onNote('menu', menuTarget), ...onFolder(), ...onAsset()].map(
-      command => ({
-        ...command,
-        contextMenu: true,
-      }),
-    ),
+    {
+      id: 'menu.markSection',
+      title: 'Make section from marked sequences',
+      enabled: () => hasVault() && sectionCandidates().length > 0,
+      run: markSectionPrompt,
+    },
+    ...[
+      ...onNote('menu', menuTarget),
+      ...onFolder(),
+      ...onSection(),
+      ...onAsset(),
+    ].map(command => ({
+      ...command,
+      contextMenu: true,
+    })),
     {
       id: 'folder.new',
       title: 'New folder',
@@ -912,12 +1010,12 @@ export function registerAppCommands(): () => void {
     },
     {
       id: 'vault.open',
-      title: 'Open another vault...',
+      title: 'Open another vault…',
       run: () => chooseAndOpenVault(false),
     },
     {
       id: 'vault.create',
-      title: 'Create a new vault...',
+      title: 'Create a new vault…',
       run: () => chooseAndOpenVault(true),
     },
   ]);

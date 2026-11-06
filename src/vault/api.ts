@@ -22,8 +22,10 @@ export interface TreeNode extends NoteSummary {
 }
 
 /**
- * A folder: subfolders, then notes. In the Zettelkasten the notes form the
- * address tree (unaddressed ones last); elsewhere they're a flat list.
+ * A folder: subfolders, then notes. In the Zettelkasten the notes of
+ * sequences inside a section are in `sections`; `notes` has the address
+ * trees of the other sequences, then the notes without a valid address.
+ * Elsewhere `notes` is a flat list and `sections` is empty.
  */
 export interface FolderNode {
   name: string;
@@ -34,6 +36,19 @@ export interface FolderNode {
   notes: TreeNode[];
   /** Files that aren't notes, by name. */
   assets: AssetNode[];
+  sections: SectionNode[];
+}
+
+/**
+ * A Zettelkasten section: a named heading over the consecutive sequences
+ * `first` to `last` (`4` for `4.1`, `4.2a`, ...), with their notes. It
+ * exists while they have notes.
+ */
+export interface SectionNode {
+  first: number;
+  last: number;
+  name: string;
+  notes: TreeNode[];
 }
 
 /** A file in the vault that isn't a note: an image, a PDF, data, ... */
@@ -74,7 +89,8 @@ export interface MovePlan {
 
 export type Placement =
   | { kind: 'unaddressed'; folder?: string }
-  | { kind: 'top' }
+  /** The first note of a new sequence after the last: `(last + 1).1`. */
+  | { kind: 'newSequence' }
   /** The next free sibling of `of`: `1.1a` -> `1.1b`. */
   | { kind: 'aside'; of: NoteId }
   /** One level deeper than `of`: `1.1a` -> `1.1a1`. */
@@ -83,9 +99,9 @@ export type Placement =
 export type DeleteMode = 'trash' | 'permanent';
 
 /** A wikilink in the editor's text; offsets are UTF-16, like CodeMirror's. */
-/** A new note's place for a link to an address: the next note of `of` (top level without it), at `address`. */
+/** A new note's place for a link to an address: `placement`, which gives it `address`. */
 export interface AddressPlace {
-  of: NoteId | null;
+  placement: Placement;
   address: string;
 }
 
@@ -214,6 +230,13 @@ export const vault = {
   /** Where a note created for a broken link to `target` goes, if it's an address (`place_for_address`). */
   placeForAddress: (target: string) =>
     invoke<AddressPlace | null>('place_for_address', { target }),
+  /** Names the sequences `first` to `last` as a section. */
+  markSection: (first: number, last: number, name: string) =>
+    invoke<void>('mark_section', { first, last, name }),
+  renameSection: (first: number, name: string) =>
+    invoke<void>('rename_section', { first, name }),
+  /** Removes a section's heading; its notes stay. */
+  unmarkSection: (first: number) => invoke<void>('unmark_section', { first }),
   planMove: (id: NoteId, placement: Placement) =>
     invoke<MovePlan>('plan_move', { id, placement }),
   /** Resolves to the ids of every note whose file changed. */

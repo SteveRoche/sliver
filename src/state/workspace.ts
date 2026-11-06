@@ -31,6 +31,7 @@ import {
   type Placement,
   type Preamble,
   type PreambleWarning,
+  type SectionNode,
   type TreeNode,
   vault,
 } from '../vault/api';
@@ -163,6 +164,7 @@ const EMPTY_ROOT: FolderNode = {
   folders: [],
   notes: [],
   assets: [],
+  sections: [],
 };
 
 const [vaultRoot, setVaultRoot] = createSignal<string | null>(null);
@@ -286,6 +288,8 @@ const index = createRoot(() =>
     const byAddress = new Map<string, NoteId>();
     /** Each Zettelkasten note's parent in the address tree. */
     const parents = new Map<NoteId, TreeNode>();
+    /** Each sequence's first-level notes (`4.1`, `4.2`; not `4.1a`), by number. */
+    const sequences = new Map<number, TreeNode[]>();
     /** Notes in sidebar order, depth first. */
     const notes: TreeNode[] = [];
     const folders: FolderNode[] = [];
@@ -296,7 +300,7 @@ const index = createRoot(() =>
         byId.set(node.id, node);
         if (parent) parents.set(node.id, parent);
         notes.push(node);
-        if (node.address && !byAddress.has(node.address)) {
+        if (isNoteAddress(node.address) && !byAddress.has(node.address)) {
           byAddress.set(node.address, node.id);
         }
         walkNotes(node.children, node);
@@ -309,10 +313,33 @@ const index = createRoot(() =>
         folders.push(sub);
         walkFolder(sub);
       }
+      for (const section of folder.sections) walkNotes(section.notes);
       walkNotes(folder.notes);
+      if (folder.kind === 'zettelkasten') {
+        const roots = [
+          ...folder.sections.flatMap(s => s.notes),
+          ...folder.notes,
+        ];
+        for (const root of roots) {
+          const sequence = sequenceOf(root.address);
+          if (sequence === undefined) continue;
+          const list = sequences.get(sequence) ?? [];
+          list.push(root);
+          sequences.set(sequence, list);
+        }
+      }
     };
     walkFolder(tree());
-    return { byId, byAddress, parents, notes, folders, assets, zettelkasten };
+    return {
+      byId,
+      byAddress,
+      parents,
+      sequences,
+      notes,
+      folders,
+      assets,
+      zettelkasten,
+    };
   }),
 );
 
@@ -320,6 +347,35 @@ export const noteById = (id: NoteId) => index().byId.get(id);
 
 /** A Zettelkasten note's parent in the address tree (its nearest existing ancestor). */
 export const parentNote = (id: NoteId) => index().parents.get(id);
+
+const NOTE_ADDRESS = /^[1-9]\d*\.[1-9]\d*(?:[a-z]+[1-9]\d*)*[a-z]*$/;
+
+/** Whether `address` is a note's (`4.1`, `4.1a`), not a bare sequence number or invalid. */
+export const isNoteAddress = (address: string | null): address is string =>
+  !!address && NOTE_ADDRESS.test(address);
+
+/** The sequence of a note address: `4` for `4.2a`. */
+export function sequenceOf(address: string | null): number | undefined {
+  return isNoteAddress(address)
+    ? Number(address.slice(0, address.indexOf('.')))
+    : undefined;
+}
+
+/** The first-level notes of sequence `number` (`4.1`, `4.2`), in order. */
+export const sequenceNotes = (number: number) =>
+  index().sequences.get(number) ?? [];
+
+/** The Zettelkasten's sections in order. */
+export const sections = (): SectionNode[] => zettelkasten()?.sections ?? [];
+
+/** `4–5 Writing`, or `4 Writing` for one sequence. */
+export function sectionLabel(section: SectionNode): string {
+  const range =
+    section.first === section.last
+      ? `${section.first}`
+      : `${section.first}–${section.last}`;
+  return `${range} ${section.name}`;
+}
 
 /** Notes in sidebar order, for the quick switcher. */
 export const allNotes = () => index().notes;
@@ -1240,6 +1296,23 @@ async function reloadChanged(ids: NoteId[]) {
 export async function moveToAddress(id: NoteId, placement: Placement) {
   await flushAll();
   await reloadChanged(await vault.applyMove(id, placement));
+}
+
+/** Names the sequences `first` to `last` as a section. */
+export async function markSection(first: number, last: number, name: string) {
+  await vault.markSection(first, last, name);
+  await refreshTree();
+}
+
+export async function renameSection(first: number, name: string) {
+  await vault.renameSection(first, name);
+  await refreshTree();
+}
+
+/** Removes a section's heading; its notes stay. */
+export async function unmarkSection(first: number) {
+  await vault.unmarkSection(first);
+  await refreshTree();
 }
 
 export async function moveToFolder(id: NoteId, folder: string) {

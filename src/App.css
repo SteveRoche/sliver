@@ -297,6 +297,12 @@ button.primary {
   pointer-events: none;
 }
 
+/* Zettelkasten notes marked (Shift- or Cmd-click) to make their sequences a section. */
+.tree-item.marked {
+  background: var(--selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 /* The note or file being dragged in the sidebar. */
 .tree-item.drag-source {
   opacity: 0.5;
@@ -375,6 +381,19 @@ button.primary {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A Zettelkasten section: a heading over its notes, not a note. */
+.section-number {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: inherit;
+  color: var(--muted);
+}
+
+.section-name {
+  font-weight: 600;
 }
 
 .note-warning {

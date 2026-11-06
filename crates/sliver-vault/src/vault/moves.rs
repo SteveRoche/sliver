@@ -41,6 +41,10 @@ impl Vault {
     /// Dry run of [`Vault::apply_move`].
     pub fn plan_move(&self, id: Uuid, placement: &Placement) -> Result<MovePlan> {
         let moves = self.address_moves(id, placement)?;
+        Ok(self.plan_of(moves))
+    }
+
+    fn plan_of(&self, moves: Vec<(Uuid, Option<String>, Address)>) -> MovePlan {
         let map = self.link_map(&moves);
         let mut link_edits: Vec<LinkEdits> = self
             .links
@@ -55,7 +59,7 @@ impl Vault {
             .filter(|edits| edits.count > 0)
             .collect();
         link_edits.sort_by_key(|e| e.id);
-        Ok(MovePlan {
+        MovePlan {
             moves: moves
                 .into_iter()
                 .map(|(id, from, to)| AddressChange {
@@ -65,7 +69,7 @@ impl Vault {
                 })
                 .collect(),
             link_edits,
-        })
+        }
     }
 
     /// Gives note `id` the address `placement` asks for, moving its file into
@@ -87,6 +91,7 @@ impl Vault {
             self.write_note(*note, &text)?;
             changed.push(*note);
         }
+        self.prune_sections()?;
         changed.extend(self.rewrite_links(&map)?);
         Ok(dedup(changed))
     }
@@ -112,6 +117,7 @@ impl Vault {
         }
         let text = set_address(&self.read_note(id)?, None)?;
         self.write_note(id, &text)?;
+        self.prune_sections()?;
         let mut changed = vec![id];
         if let Some(address) = unfiled {
             changed.extend(self.rewrite_links(&HashMap::from([(address, id.to_string())]))?);
@@ -227,7 +233,8 @@ fn dedup(mut ids: Vec<Uuid>) -> Vec<Uuid> {
 mod tests {
     use super::super::tests::TempDir;
     use super::*;
-    use crate::vault::{FolderNode, TreeNode};
+    use crate::vault::{DeleteMode, FolderNode, TreeNode};
+    use std::fs;
 
     fn addresses(tree: &[TreeNode]) -> Vec<String> {
         tree.iter()
@@ -257,12 +264,24 @@ mod tests {
         id
     }
 
+    /// Each section's address tree, then the notes without an address.
+    fn zk(tree: &FolderNode) -> Vec<String> {
+        let folder = zettelkasten(tree);
+        folder
+            .sections
+            .iter()
+            .flat_map(|s| addresses(&s.notes))
+            .chain(addresses(&folder.notes))
+            .collect()
+    }
+
     #[test]
     fn filing_assigns_an_address_and_moves_the_file() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
         vault.create_folder("", "Inbox").unwrap();
-        let one = note(&mut vault, Placement::Top, "");
+        let first = Placement::NewSequence;
+        let one = note(&mut vault, first, "");
         let fleeting = note(
             &mut vault,
             Placement::Unaddressed {
@@ -270,11 +289,12 @@ mod tests {
             },
             "",
         );
-        let linker = note(&mut vault, Placement::Top, &format!("[[{fleeting}]]"));
+        let second = Placement::NewSequence;
+        let linker = note(&mut vault, second, &format!("[[{fleeting}]]"));
 
         let next = Placement::Next { of: one };
         let plan = vault.plan_move(fleeting, &next).unwrap();
-        assert_eq!(plan.moves[0].to, "1.1");
+        assert_eq!(plan.moves[0].to, "1.1a");
         assert!(plan.link_edits.is_empty(), "uuid links need no rewrite");
 
         let changed = vault.apply_move(fleeting, &next).unwrap();
@@ -285,37 +305,39 @@ mod tests {
         assert_eq!(vault.backlinks(fleeting).unwrap()[0].id, linker);
 
         let reopened = Vault::open(&dir.0).unwrap();
-        assert_eq!(
-            addresses(&zettelkasten(&reopened.tree()).notes),
-            ["1[1.1]", "2"]
-        );
+        assert_eq!(zk(&reopened.tree()), ["1.1[1.1a]", "2.1"]);
     }
 
     #[test]
     fn readdressing_moves_the_subtree_and_rewrites_links() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let one = note(&mut vault, Placement::Top, "");
-        let one_one = note(&mut vault, Placement::Next { of: one }, "");
-        let child = note(&mut vault, Placement::Next { of: one_one }, "");
-        let two = note(&mut vault, Placement::Top, "");
-        // An orphan under 2.1 blocks it, so the move lands on 2.2.
-        let orphan = note(&mut vault, Placement::Top, "");
+        let first = Placement::NewSequence;
+        let one = note(&mut vault, first, "");
+        let one_a = note(&mut vault, Placement::Next { of: one }, "");
+        let child = note(&mut vault, Placement::Next { of: one_a }, "");
+        let second = Placement::NewSequence;
+        let two = note(&mut vault, second, "");
+        // An orphan under 2.1a blocks it, so the move lands on 2.1b.
+        let third = Placement::NewSequence;
+        let orphan = note(&mut vault, third, "");
         let text = vault
             .read_note(orphan)
             .unwrap()
-            .replace("\"3\"", "\"2.1a\"");
+            .replace("\"3.1\"", "\"2.1a1\"");
         vault.write_note(orphan, &text).unwrap();
+        // Sequence 3 went with its only note, so the next one is 3 again.
+        let fourth = Placement::NewSequence;
         let linker = note(
             &mut vault,
-            Placement::Top,
-            "[[1.1]] [[ 1.1a | the child ]] `[[1.1]]` [[1]]",
+            fourth,
+            "[[1.1a]] [[ 1.1a1 | the child ]] `[[1.1a]]` [[1]]",
         );
 
         let next = Placement::Next { of: two };
-        let plan = vault.plan_move(one_one, &next).unwrap();
+        let plan = vault.plan_move(one_a, &next).unwrap();
         let moved: Vec<_> = plan.moves.iter().map(|m| m.to.as_str()).collect();
-        assert_eq!(moved, ["2.2", "2.2a"]);
+        assert_eq!(moved, ["2.1b", "2.1b1"]);
         assert_eq!(
             plan.link_edits,
             vec![LinkEdits {
@@ -324,22 +346,19 @@ mod tests {
             }]
         );
 
-        let mut changed = vault.apply_move(one_one, &next).unwrap();
+        let mut changed = vault.apply_move(one_a, &next).unwrap();
         changed.sort();
-        let mut expected = vec![one_one, child, linker];
+        let mut expected = vec![one_a, child, linker];
         expected.sort();
         assert_eq!(changed, expected);
         assert!(
             vault
                 .read_note(linker)
                 .unwrap()
-                .ends_with("[[2.2]] [[ 2.2a | the child ]] `[[1.1]]` [[1]]")
+                .ends_with("[[2.1b]] [[ 2.1b1 | the child ]] `[[1.1a]]` [[1]]")
         );
-        assert_eq!(vault.resolve("2.2a"), Some(child));
-        assert_eq!(
-            addresses(&zettelkasten(&vault.tree()).notes),
-            ["1", "2[2.1a 2.2[2.2a]]", "3"]
-        );
+        assert_eq!(vault.resolve("2.1b1"), Some(child));
+        assert_eq!(zk(&vault.tree()), ["1.1", "2.1[2.1a1 2.1b[2.1b1]]", "3.1"]);
 
         assert!(matches!(
             vault.apply_move(one, &Placement::Next { of: one }),
@@ -356,9 +375,11 @@ mod tests {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
         vault.create_folder("", "Inbox").unwrap();
-        let one = note(&mut vault, Placement::Top, "");
+        let first = Placement::NewSequence;
+        let one = note(&mut vault, first, "");
         let child = note(&mut vault, Placement::Next { of: one }, "");
-        let linker = note(&mut vault, Placement::Top, "[[1|first]]");
+        let second = Placement::NewSequence;
+        let linker = note(&mut vault, second, "[[1.1|first]]");
 
         let changed = vault.move_to_folder(one, "Inbox").unwrap();
         assert_eq!(changed, vec![one, linker]);
@@ -370,11 +391,85 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!("[[{one}|first]]"))
         );
-        assert_eq!(vault.resolve("1.1"), Some(child));
-        assert_eq!(addresses(&zettelkasten(&vault.tree()).notes), ["1.1", "2"]);
+        assert_eq!(vault.resolve("1.1a"), Some(child));
+        assert_eq!(zk(&vault.tree()), ["1.1a", "2.1"]);
         assert!(matches!(
             vault.move_to_folder(child, "Zettelkasten"),
             Err(VaultError::Refused(_))
         ));
+    }
+
+    #[test]
+    fn sections_name_runs_of_sequences_until_they_empty() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        vault.create_folder("", "Inbox").unwrap();
+        let first = |vault: &mut Vault| note(vault, Placement::NewSequence, "");
+        let one = first(&mut vault);
+        let four: Vec<Uuid> = (2..=6).map(|_| first(&mut vault)).collect();
+        let four_b = note(&mut vault, Placement::Aside { of: four[2] }, "");
+        assert_eq!(vault.note(four_b).unwrap().address.as_deref(), Some("4.2"));
+
+        vault.mark_section(4, 5, "Writing").unwrap();
+        vault.mark_section(1, 1, "Probability").unwrap();
+        for (first, last) in [(5, 6), (3, 4), (8, 9), (0, 1), (3, 2)] {
+            assert!(
+                matches!(
+                    vault.mark_section(first, last, "X"),
+                    Err(VaultError::Refused(_))
+                ),
+                "{first}-{last}"
+            );
+        }
+        assert!(matches!(
+            vault.mark_section(2, 2, " "),
+            Err(VaultError::Refused(_))
+        ));
+
+        let shape = |vault: &Vault| {
+            let tree = vault.tree();
+            let zk = zettelkasten(&tree);
+            let sections: Vec<String> = zk
+                .sections
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}-{} {} {:?}",
+                        s.first,
+                        s.last,
+                        s.name,
+                        addresses(&s.notes)
+                    )
+                })
+                .collect();
+            (sections, addresses(&zk.notes))
+        };
+        assert_eq!(
+            shape(&vault),
+            (
+                vec![
+                    "1-1 Probability [\"1.1\"]".to_owned(),
+                    "4-5 Writing [\"4.1\", \"4.2\", \"5.1\"]".to_owned(),
+                ],
+                vec!["2.1".into(), "3.1".into(), "6.1".into()],
+            )
+        );
+        assert_eq!(shape(&Vault::open(&dir.0).unwrap()), shape(&vault));
+
+        vault.rename_section(4, "Drafts").unwrap();
+        // Emptying the end of a section trims it; emptying all of it removes it.
+        vault.delete_note(four[3], DeleteMode::Permanent).unwrap();
+        assert_eq!(shape(&vault).0[1], "4-4 Drafts [\"4.1\", \"4.2\"]");
+        vault.move_to_folder(one, "Inbox").unwrap();
+        assert_eq!(shape(&vault).0, ["4-4 Drafts [\"4.1\", \"4.2\"]"]);
+        let marker = fs::read_to_string(dir.0.join("Zettelkasten/.zettelkasten")).unwrap();
+        assert!(!marker.contains("Probability") && marker.contains("\"4\": \"Drafts\""));
+
+        vault.unmark_section(4).unwrap();
+        assert!(shape(&vault).0.is_empty());
+        assert_eq!(
+            fs::read_to_string(dir.0.join("Zettelkasten/.zettelkasten")).unwrap(),
+            ""
+        );
     }
 }

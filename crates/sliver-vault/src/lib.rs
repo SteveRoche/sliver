@@ -4,6 +4,7 @@ pub mod header;
 pub mod links;
 pub mod paths;
 pub mod preambles;
+pub mod sections;
 pub mod syntax;
 pub mod theme;
 mod vault;
@@ -28,5 +29,5 @@ pub use uuid::Uuid;
 pub use vault::{
     AddressChange, AddressPlace, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderKind,
     FolderNode, LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan, Placement,
-    Preamble, Reference, SETTINGS_FILE, Template, TreeNode, Vault, VaultError,
+    Preamble, Reference, SETTINGS_FILE, SectionNode, Template, TreeNode, Vault, VaultError,
 };

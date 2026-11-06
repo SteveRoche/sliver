@@ -29,7 +29,7 @@ const [request, setRequest] = createSignal<Request | null>(null);
 export function openPalette(mode: PaletteMode) {
   request()?.cancel?.();
   setRequest({
-    placeholder: mode === 'notes' ? 'Go to note...' : 'Run a command...',
+    placeholder: mode === 'notes' ? 'Go to note…' : 'Run a command…',
     items: () => itemsFor(mode),
   });
 }

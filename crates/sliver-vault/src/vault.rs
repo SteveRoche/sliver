@@ -135,26 +135,41 @@ pub struct FolderNode {
     pub notes: Vec<TreeNode>,
     /// Files that aren't notes, by name.
     pub assets: Vec<AssetNode>,
+    /// The Zettelkasten's sections in order, each with the address trees of
+    /// its sequences; empty for other folders. The Zettelkasten's `notes`
+    /// are the address trees of sequences outside any section, then the
+    /// notes without a valid address.
+    pub sections: Vec<SectionNode>,
 }
 
-/// Where [`Vault::place_for_address`] puts a note: the next note of `of`, or
-/// a new top-level number without it, at `address`.
+/// A Zettelkasten section: a named heading over the consecutive sequences
+/// `first..=last`, holding their notes. It exists while they have notes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SectionNode {
+    pub first: u32,
+    pub last: u32,
+    pub name: String,
+    pub notes: Vec<TreeNode>,
+}
+
+/// Where [`Vault::place_for_address`] puts a note: `placement`, which
+/// gives it `address`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AddressPlace {
-    pub of: Option<Uuid>,
+    pub placement: Placement,
     pub address: String,
 }
 
 /// Where a new note goes: a Zettelkasten address, or a folder without one.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Placement {
     Unaddressed {
         #[serde(default)]
         folder: String,
     },
-    /// The next free top-level number.
-    Top,
+    /// The first note of a new sequence, after the last: `(last + 1).1`.
+    NewSequence,
     /// An aside to `of`: its next free sibling, `1.1a` -> `1.1b`.
     Aside { of: Uuid },
     /// The next note after `of`, one level deeper: `1.1a` -> `1.1a1`.
@@ -257,6 +272,8 @@ pub struct Vault {
     /// Every folder (not the root), including empty ones.
     folders: BTreeSet<String>,
     zettelkasten: Option<String>,
+    /// The Zettelkasten's sections, from its marker.
+    section_names: crate::sections::Sections,
     /// Further folders with a marker; only the first one found counts.
     extra_zettelkasten: Vec<String>,
     /// Files whose uuid was already taken by an earlier file, per uuid.
@@ -283,6 +300,7 @@ impl Vault {
             reference_keys: BTreeSet::new(),
             folders: BTreeSet::new(),
             zettelkasten: None,
+            section_names: crate::sections::Sections::new(),
             extra_zettelkasten: Vec::new(),
             duplicates: HashMap::new(),
             kinds: BTreeSet::new(),
@@ -434,6 +452,9 @@ impl Vault {
                 if path.join(ZETTELKASTEN_MARKER).is_file() {
                     if self.zettelkasten.is_none() {
                         self.zettelkasten = Some(sub.clone());
+                        self.section_names = fs::read_to_string(path.join(ZETTELKASTEN_MARKER))
+                            .map(|text| crate::sections::parse_sections(&text))
+                            .unwrap_or_default();
                     } else {
                         self.extra_zettelkasten.push(sub.clone());
                     }
@@ -486,6 +507,94 @@ impl Vault {
         self.zettelkasten.as_deref() == Some(note.folder.as_str())
     }
 
+    /// Every sequence with notes, in number order.
+    pub fn sequences(&self) -> BTreeSet<u32> {
+        self.notes
+            .values()
+            .filter_map(|n| self.address_of(n))
+            .map(|a| a.sequence())
+            .collect()
+    }
+
+    /// Names the sequences `first..=last` as a section. At least one of
+    /// them must have notes, and the range can't overlap another section.
+    pub fn mark_section(&mut self, first: u32, last: u32, name: &str) -> Result<()> {
+        self.zettelkasten()?;
+        let name = section_name(name)?;
+        if first == 0 || first > last {
+            return Err(VaultError::Refused(format!(
+                "{first}-{last} isn't a range of sequences"
+            )));
+        }
+        if !self.sequences().iter().any(|n| (first..=last).contains(n)) {
+            return Err(VaultError::Refused(format!(
+                "sequences {first}-{last} have no notes"
+            )));
+        }
+        if let Some(other) = crate::sections::overlapping(&self.section_names, first, last) {
+            return Err(VaultError::Refused(format!(
+                "it overlaps the section starting at {other}"
+            )));
+        }
+        let mut sections = self.section_names.clone();
+        sections.insert(first, (last, name));
+        self.write_sections(sections)
+    }
+
+    /// Renames the section starting at sequence `first`.
+    pub fn rename_section(&mut self, first: u32, name: &str) -> Result<()> {
+        let name = section_name(name)?;
+        let mut sections = self.section_names.clone();
+        let Some(section) = sections.get_mut(&first) else {
+            return Err(VaultError::Refused(format!("no section starts at {first}")));
+        };
+        section.1 = name;
+        self.write_sections(sections)
+    }
+
+    /// Removes the heading of the section starting at `first`; its notes stay.
+    pub fn unmark_section(&mut self, first: u32) -> Result<()> {
+        let mut sections = self.section_names.clone();
+        if sections.remove(&first).is_none() {
+            return Err(VaultError::Refused(format!("no section starts at {first}")));
+        }
+        self.write_sections(sections)
+    }
+
+    /// Writes the marker with `sections`, each trimmed to the sequences in
+    /// it that have notes and dropped without any: an emptied section is gone.
+    fn write_sections(&mut self, sections: crate::sections::Sections) -> Result<()> {
+        let existing = self.sequences();
+        let sections: crate::sections::Sections = sections
+            .into_iter()
+            .filter_map(|(first, (last, name))| {
+                let mut inside = existing.range(first..=last);
+                let start = *inside.next()?;
+                let end = inside.next_back().copied().unwrap_or(start);
+                Some((start, (end, name)))
+            })
+            .collect();
+        if sections == self.section_names {
+            return Ok(());
+        }
+        let zettelkasten = self.zettelkasten()?.to_owned();
+        let path = self.folder_dir(&zettelkasten).join(ZETTELKASTEN_MARKER);
+        self.atomic_write(
+            &path,
+            crate::sections::format_sections(&sections).as_bytes(),
+        )?;
+        self.section_names = sections;
+        Ok(())
+    }
+
+    /// Drops or trims sections after notes left them.
+    fn prune_sections(&mut self) -> Result<()> {
+        if self.zettelkasten.is_none() {
+            return Ok(());
+        }
+        self.write_sections(self.section_names.clone())
+    }
+
     /// The note's address, if it parses and the note is in the Zettelkasten.
     fn address_of(&self, note: &NoteSummary) -> Option<Address> {
         if !self.in_zettelkasten(note) {
@@ -512,6 +621,11 @@ impl Vault {
             .collect();
         subfolders.sort_by_key(|f| (folder_name(f).to_lowercase(), *f));
         let notes = by_folder.get(path).map_or(&[][..], Vec::as_slice);
+        let (sections, loose) = if is_zettelkasten {
+            self.address_tree(notes)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let warning = if self.extra_zettelkasten.iter().any(|f| f == path) {
             Some(format!(
                 "Only one folder can be the Zettelkasten; this vault uses {:?}",
@@ -538,13 +652,14 @@ impl Vault {
                 .map(|f| self.folder_node(f, by_folder))
                 .collect(),
             notes: if is_zettelkasten {
-                self.address_tree(notes)
+                loose
             } else {
                 let mut notes = notes.to_vec();
                 notes.sort_by(|x, y| x.title.cmp(&y.title).then(x.id.cmp(&y.id)));
                 notes.into_iter().map(|n| self.leaf(n)).collect()
             },
             assets: self.assets_in(path),
+            sections,
         }
     }
 
@@ -556,6 +671,14 @@ impl Vault {
             ))
         } else if note.address.is_some() && !self.in_zettelkasten(note) {
             Some("Has an address but isn't in the Zettelkasten".to_owned())
+        } else if let Some(address) = &note.address
+            && self.address_of(note).is_none()
+        {
+            Some(if address.parse::<u32>().is_ok() {
+                format!("{address} is a sequence, not a note: its notes start at {address}.1")
+            } else {
+                format!("{address:?} isn't a valid address")
+            })
         } else if let Some(kind) = &note.kind
             && !self.kinds.contains(kind)
         {
@@ -572,9 +695,11 @@ impl Vault {
         }
     }
 
-    /// Addressed notes nested under their nearest existing ancestor in address
-    /// order, followed by unaddressed notes (and invalid addresses) by title.
-    fn address_tree(&self, notes: &[&NoteSummary]) -> Vec<TreeNode> {
+    /// The sections, each with its sequences' notes nested under their
+    /// nearest existing ancestor in address order; then the notes of
+    /// sequences outside any section the same way, and the notes without a
+    /// valid address by title.
+    fn address_tree(&self, notes: &[&NoteSummary]) -> (Vec<SectionNode>, Vec<TreeNode>) {
         let mut addressed: Vec<(Address, &NoteSummary)> = Vec::new();
         let mut loose: Vec<&NoteSummary> = Vec::new();
         for &note in notes {
@@ -627,11 +752,30 @@ impl Vault {
             }
             go(self, i, &addressed, &children)
         };
-        roots
-            .into_iter()
-            .map(build)
-            .chain(loose.into_iter().map(|note| self.leaf(note)))
-            .collect()
+        let mut sections: Vec<SectionNode> = self
+            .section_names
+            .iter()
+            .map(|(&first, (last, name))| SectionNode {
+                first,
+                last: *last,
+                name: name.clone(),
+                notes: Vec::new(),
+            })
+            .collect();
+        let mut outside = Vec::new();
+        for i in roots {
+            let sequence = addressed[i].0.sequence();
+            match sections
+                .iter_mut()
+                .find(|s| (s.first..=s.last).contains(&sequence))
+            {
+                Some(section) => section.notes.push(build(i)),
+                None => outside.push(build(i)),
+            }
+        }
+        sections.retain(|s| !s.notes.is_empty());
+        outside.extend(loose.into_iter().map(|note| self.leaf(note)));
+        (sections, outside)
     }
 
     pub fn read_note(&self, id: Uuid) -> Result<String> {
@@ -663,15 +807,16 @@ impl Vault {
         if let Some(kind) = &kind {
             self.require_kind(kind)?;
         }
-        let (folder, address) = match placement {
+        let (folder, address) = match &placement {
             Placement::Unaddressed { folder } => {
-                self.require_folder(&folder)?;
-                (folder, None)
+                self.require_folder(folder)?;
+                (folder.clone(), None)
             }
             placement => {
+                let zettelkasten = self.zettelkasten()?.to_owned();
                 let taken = self.taken_addresses(&HashSet::new());
-                let address = self.allocate(&placement, &taken)?;
-                (self.zettelkasten()?.to_owned(), Some(address.to_string()))
+                let address = self.allocate(placement, &taken)?;
+                (zettelkasten, Some(address.to_string()))
             }
         };
         let header = format_header(&NoteHeader {
@@ -698,7 +843,7 @@ impl Vault {
     pub fn delete_note(&mut self, id: Uuid, mode: DeleteMode) -> Result<()> {
         remove_path(&self.note_path(id)?, mode)?;
         self.forget(id);
-        Ok(())
+        self.prune_sections()
     }
 
     /// Addresses of every note except `except`, wherever they are: a stray
@@ -725,9 +870,9 @@ impl Vault {
                     "an unaddressed note has no place in the Zettelkasten".into(),
                 ));
             }
-            Placement::Top => {
-                let max = taken.iter().map(Address::top_number).max().unwrap_or(0);
-                Address::top(max + 1)
+            Placement::NewSequence => {
+                let last = taken.iter().map(Address::sequence).max().unwrap_or(0);
+                Address::first_in_sequence(last + 1)
             }
             Placement::Aside { of } => anchor(*of)?.next_sibling(),
             Placement::Next { of } => anchor(*of)?.first_child(),
@@ -738,37 +883,41 @@ impl Vault {
         Ok(candidate)
     }
 
-    /// Where a new note for a link to `target` goes, if `target` is an
-    /// address: as the next note of its nearest existing ancestor (the next
-    /// top-level number without one), at the address that allocation gives.
-    /// That's `target` itself only when it leaves no gap; notes are never
-    /// created at an address whose parent or earlier siblings are missing.
+    /// Where a new note for a link to `target` goes, if `target` is a note
+    /// address: the next note of its nearest existing ancestor, else an
+    /// aside to the last first-level note of its sequence, else a new
+    /// sequence, at the address that gives. That's `target` itself only
+    /// when it leaves no gap.
     pub fn place_for_address(&self, target: &str) -> Result<Option<AddressPlace>> {
         let Ok(address) = target.trim().parse::<Address>() else {
             return Ok(None);
         };
         self.zettelkasten()?;
+        let addressed: Vec<(Address, Uuid)> = self
+            .notes
+            .values()
+            .filter_map(|n| Some((self.address_of(n)?, n.id)))
+            .collect();
+        let mut placement = Placement::NewSequence;
         let mut ancestor = address.parent();
-        let of = loop {
-            let Some(candidate) = ancestor else {
-                break None;
-            };
-            if let Some(note) = self
-                .notes
-                .values()
-                .find(|n| self.address_of(n).as_ref() == Some(&candidate))
-            {
-                break Some(note.id);
+        while let Some(candidate) = ancestor {
+            if let Some((_, id)) = addressed.iter().find(|(a, _)| *a == candidate) {
+                placement = Placement::Next { of: *id };
+                break;
             }
             ancestor = candidate.parent();
-        };
-        let placement = match of {
-            Some(of) => Placement::Next { of },
-            None => Placement::Top,
-        };
+        }
+        if placement == Placement::NewSequence
+            && let Some((_, id)) = addressed
+                .iter()
+                .filter(|(a, _)| a.sequence() == address.sequence() && a.depth() == 2)
+                .max_by(|x, y| x.0.cmp(&y.0))
+        {
+            placement = Placement::Aside { of: *id };
+        }
         let taken = self.taken_addresses(&HashSet::new());
         let address = self.allocate(&placement, &taken)?.to_string();
-        Ok(Some(AddressPlace { of, address }))
+        Ok(Some(AddressPlace { placement, address }))
     }
 
     /// Resolves a wikilink target: an address first, then a uuid.
@@ -1262,6 +1411,7 @@ impl Vault {
         }
         fs::write(self.folder_dir(path).join(ZETTELKASTEN_MARKER), "")?;
         self.zettelkasten = Some(path.to_owned());
+        self.section_names.clear();
         Ok(())
     }
 
@@ -1429,6 +1579,17 @@ fn rebase_folder(path: &str, from: &str, to: &str) -> Option<String> {
 }
 
 /// A single path component that works on every desktop filesystem.
+/// A section's name, trimmed; one line, not empty.
+fn section_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(['\n', '\r']) {
+        return Err(VaultError::Refused(
+            "a section name is one line of text".into(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
 fn valid_name(name: &str) -> bool {
     !(name.is_empty()
         || name.starts_with('.')
@@ -1561,6 +1722,21 @@ mod tests {
             .unwrap()
     }
 
+    /// The first note of a new sequence (`1.1`, `2.1`, ...).
+    fn top_note(vault: &mut Vault, title: Option<String>) -> Result<NoteSummary> {
+        vault.create_note(title, Placement::NewSequence)
+    }
+
+    /// Each section's address tree, then the notes without an address.
+    fn zk_addresses(folder: &FolderNode) -> Vec<String> {
+        folder
+            .sections
+            .iter()
+            .flat_map(|s| addresses(&s.notes))
+            .chain(addresses(&folder.notes))
+            .collect()
+    }
+
     fn addresses(tree: &[TreeNode]) -> Vec<String> {
         tree.iter()
             .map(|node| {
@@ -1591,10 +1767,8 @@ mod tests {
     fn notes_round_trip_through_disk() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let note = vault
-            .create_note(Some("First".into()), Placement::Top)
-            .unwrap();
-        assert_eq!(note.address.as_deref(), Some("1"));
+        let note = top_note(&mut vault, Some("First".into())).unwrap();
+        assert_eq!(note.address.as_deref(), Some("1.1"));
 
         let body = format!("{}\n\nHello", vault.read_note(note.id).unwrap().trim_end());
         vault.write_note(note.id, &body).unwrap();
@@ -1616,49 +1790,30 @@ mod tests {
     fn places_link_notes_without_gaps() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let one = vault.create_note(None, Placement::Top).unwrap();
-        let one_one = vault
+        let one = top_note(&mut vault, None).unwrap();
+        let one_a = vault
             .create_note(None, Placement::Next { of: one.id })
             .unwrap();
         let place = |vault: &Vault, target: &str| vault.place_for_address(target).unwrap();
-        // The next note of an existing parent: exactly the target.
-        assert_eq!(
-            place(&vault, "1.1a"),
+        let at = |placement: Placement, address: &str| {
             Some(AddressPlace {
-                of: Some(one_one.id),
-                address: "1.1a".into()
+                placement,
+                address: address.into(),
             })
-        );
-        assert_eq!(
-            place(&vault, "2"),
-            Some(AddressPlace {
-                of: None,
-                address: "2".into()
-            })
-        );
-        // A missing parent, a skipped sibling and a skipped number each get
-        // the address that leaves no gap.
-        assert_eq!(
-            place(&vault, "1.1a1"),
-            Some(AddressPlace {
-                of: Some(one_one.id),
-                address: "1.1a".into()
-            })
-        );
-        assert_eq!(
-            place(&vault, "1.3"),
-            Some(AddressPlace {
-                of: Some(one.id),
-                address: "1.2".into()
-            })
-        );
-        assert_eq!(
-            place(&vault, "7.2"),
-            Some(AddressPlace {
-                of: None,
-                address: "2".into()
-            })
-        );
+        };
+        let next = Placement::Next { of: one_a.id };
+        let aside = Placement::Aside { of: one.id };
+        // Exactly the target where that leaves no gap.
+        assert_eq!(place(&vault, "1.1a1"), at(next.clone(), "1.1a1"));
+        assert_eq!(place(&vault, "1.2"), at(aside.clone(), "1.2"));
+        assert_eq!(place(&vault, "2.1"), at(Placement::NewSequence, "2.1"));
+        // A missing parent, a skipped sibling and a skipped sequence each get
+        // the place that leaves no gap.
+        assert_eq!(place(&vault, "1.1a1a"), at(next, "1.1a1"));
+        assert_eq!(place(&vault, "1.4"), at(aside, "1.2"));
+        assert_eq!(place(&vault, "7.2"), at(Placement::NewSequence, "2.1"));
+        // Sequence numbers and titles aren't note addresses.
+        assert_eq!(place(&vault, "1"), None);
         assert_eq!(place(&vault, "Some title"), None);
     }
 
@@ -1666,8 +1821,8 @@ mod tests {
     fn allocates_addresses_and_builds_the_tree() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let one = vault.create_note(None, Placement::Top).unwrap();
-        let two = vault.create_note(None, Placement::Top).unwrap();
+        let one = top_note(&mut vault, None).unwrap();
+        let two = top_note(&mut vault, None).unwrap();
         let one_one = vault
             .create_note(None, Placement::Next { of: one.id })
             .unwrap();
@@ -1677,7 +1832,7 @@ mod tests {
         let one_one_a = vault
             .create_note(None, Placement::Next { of: one_one.id })
             .unwrap();
-        // 1.2 is taken, so another aside to 1.1 moves on to 1.3.
+        // 1.1b is taken, so another aside to 1.1a moves on to 1.1c.
         let one_three = vault
             .create_note(None, Placement::Aside { of: one_one.id })
             .unwrap();
@@ -1690,15 +1845,27 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(two.address.as_deref(), Some("2"));
-        assert_eq!(one_two.address.as_deref(), Some("1.2"));
-        assert_eq!(one_one_a.address.as_deref(), Some("1.1a"));
-        assert_eq!(one_three.address.as_deref(), Some("1.3"));
+        let second = vault
+            .create_note(None, Placement::Aside { of: one.id })
+            .unwrap();
+        let in_two = vault
+            .create_note(None, Placement::Aside { of: two.id })
+            .unwrap();
+
+        assert_eq!(one.address.as_deref(), Some("1.1"));
+        assert_eq!(two.address.as_deref(), Some("2.1"));
+        assert_eq!(one_two.address.as_deref(), Some("1.1b"));
+        assert_eq!(one_one_a.address.as_deref(), Some("1.1a1"));
+        assert_eq!(one_three.address.as_deref(), Some("1.1c"));
+        assert_eq!(second.address.as_deref(), Some("1.2"));
+        assert_eq!(in_two.address.as_deref(), Some("2.2"));
         let tree = vault.tree();
         assert_eq!(
-            addresses(&zettelkasten(&tree).notes),
-            ["1[1.1[1.1a] 1.2 1.3]", "2"]
+            zk_addresses(zettelkasten(&tree)),
+            ["1.1[1.1a[1.1a1] 1.1b 1.1c]", "1.2", "2.1", "2.2"]
         );
+        assert!(zettelkasten(&tree).sections.is_empty());
+        assert_eq!(vault.sequences(), BTreeSet::from([1, 2]));
         assert_eq!(tree.notes.len(), 1, "the unaddressed note is in the root");
 
         let loose = vault.notes().find(|n| n.address.is_none()).unwrap().id;
@@ -1712,20 +1879,34 @@ mod tests {
     fn orphans_attach_to_nearest_ancestor_and_bad_headers_are_reported() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let root = vault.create_note(None, Placement::Top).unwrap();
-        let orphan = vault.create_note(None, Placement::Top).unwrap();
+        let root = top_note(&mut vault, None).unwrap();
+        let orphan = top_note(&mut vault, None).unwrap();
+        let section = top_note(&mut vault, None).unwrap();
         vault
-            .write_note(orphan.id, "#metadata((address: \"1.1a1\")) <note>")
+            .write_note(orphan.id, "#metadata((address: \"1.2a1\")) <note>")
+            .unwrap();
+        vault
+            .write_note(
+                section.id,
+                "#metadata((title: \"S\", address: \"3\")) <note>",
+            )
             .unwrap();
         let broken = vault
-            .write_note(root.id, "#metadata((title: 1 + 1, address: \"1\")) <note>")
+            .write_note(
+                root.id,
+                "#metadata((title: 1 + 1, address: \"1.1\")) <note>",
+            )
             .unwrap();
 
         assert!(broken.header_error.is_some());
+        let tree = vault.tree();
+        assert_eq!(zk_addresses(zettelkasten(&tree)), ["1.2a1", "-", "3"]);
+        let loose = &zettelkasten(&tree).notes;
         assert_eq!(
-            addresses(&zettelkasten(&vault.tree()).notes),
-            ["1.1a1", "-"]
+            loose[2].warning.as_deref(),
+            Some("3 is a sequence, not a note: its notes start at 3.1")
         );
+        assert_eq!(vault.sequences(), BTreeSet::from([1]));
     }
 
     #[test]
@@ -1830,7 +2011,7 @@ mod tests {
     fn resolves_links_and_computes_backlinks() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let a = vault.create_note(Some("A".into()), Placement::Top).unwrap();
+        let a = top_note(&mut vault, Some("A".into())).unwrap();
         let b = vault
             .create_note(Some("B".into()), Placement::Next { of: a.id })
             .unwrap();
@@ -1846,7 +2027,7 @@ mod tests {
             .write_note(
                 a.id,
                 &format!(
-                    "#metadata((address: \"1\")) <note>\n[[1.1]] and [[{}|loose one]] and [[9.9]]",
+                    "#metadata((address: \"1.1\")) <note>\n[[1.1a]] and [[{}|loose one]] and [[9.9]]",
                     loose.id
                 ),
             )
@@ -1854,11 +2035,12 @@ mod tests {
         vault
             .write_note(
                 b.id,
-                "#metadata((address: \"1.1\")) <note>\n[[1]] and `[[1.1]]`",
+                "#metadata((address: \"1.1a\")) <note>\n[[1.1]] and `[[1.1a]]`",
             )
             .unwrap();
 
-        assert_eq!(vault.resolve("1.1"), Some(b.id));
+        assert_eq!(vault.resolve("1.1a"), Some(b.id));
+        assert_eq!(vault.resolve("1"), None, "a section isn't a note");
         assert_eq!(vault.resolve(&loose.id.to_string()), Some(loose.id));
         assert_eq!(vault.resolve("9.9"), None);
         assert_eq!(vault.links_from(a.id).unwrap().len(), 3);
@@ -1875,14 +2057,14 @@ mod tests {
     fn preview_renders_wikilinks_as_note_links() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let a = vault.create_note(Some("A".into()), Placement::Top).unwrap();
+        let a = top_note(&mut vault, Some("A".into())).unwrap();
         let b = vault
             .create_note(Some("Quote \" title".into()), Placement::Next { of: a.id })
             .unwrap();
         vault
             .write_note(
                 a.id,
-                "#metadata((title: \"A\", address: \"1\")) <note>\n[[1.1]] [[1.1|custom]] [[9.9]] `[[1.1]]`",
+                "#metadata((title: \"A\", address: \"1.1\")) <note>\n[[1.1a]] [[1.1a|custom]] [[9.9]] [[1]] `[[1.1a]]`",
             )
             .unwrap();
 
@@ -1951,7 +2133,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let filed = vault.create_note(None, Placement::Top).unwrap();
+        let filed = top_note(&mut vault, None).unwrap();
         assert!(
             dir.0
                 .join(format!("Projects/Sliver/{}.typ", in_project.id))
@@ -1999,7 +2181,7 @@ mod tests {
             ["Inbox", "Slip box", "Work", "Work/Sliver"]
         );
         assert_eq!(reopened.zettelkasten().unwrap(), "Slip box");
-        assert_eq!(addresses(&zettelkasten(&tree).notes), ["1"]);
+        assert_eq!(zk_addresses(zettelkasten(&tree)), ["1.1"]);
         assert_eq!(reopened.note(in_project.id).unwrap().folder, "Inbox");
         assert_eq!(
             reopened.read_note(in_project.id).unwrap(),
@@ -2021,7 +2203,7 @@ mod tests {
                 },
             )
             .unwrap();
-        vault.create_note(None, Placement::Top).unwrap();
+        top_note(&mut vault, None).unwrap();
 
         assert!(matches!(
             vault.delete_folder("Zettelkasten", DeleteMode::Permanent),
@@ -2045,7 +2227,7 @@ mod tests {
         fs::write(dir.0.join(format!(".git/{}.typ", Uuid::new_v4())), "").unwrap();
         let mut vault = Vault::open(&dir.0).unwrap();
         assert!(matches!(
-            vault.create_note(None, Placement::Top),
+            top_note(&mut vault, None),
             Err(VaultError::NoZettelkasten)
         ));
         assert_eq!(folder_paths(&vault.tree()), ["Zettelkasten"]);
@@ -2057,12 +2239,8 @@ mod tests {
             Err(VaultError::Refused(_))
         ));
         assert_eq!(
-            vault
-                .create_note(None, Placement::Top)
-                .unwrap()
-                .address
-                .as_deref(),
-            Some("1")
+            top_note(&mut vault, None).unwrap().address.as_deref(),
+            Some("1.1")
         );
     }
 
@@ -2160,11 +2338,11 @@ mod tests {
             fs::read_to_string(dir.0.join(THEME_FILE)).unwrap(),
             crate::theme_library(false)
         );
-        let themed = vault.create_note(None, Placement::Top).unwrap().id;
+        let themed = top_note(&mut vault, None).unwrap().id;
         vault
             .write_note(themed, "#metadata((title: \"Themed\")) <note>\nSome text")
             .unwrap();
-        let plain = vault.create_note(None, Placement::Top).unwrap().id;
+        let plain = top_note(&mut vault, None).unwrap().id;
         vault
             .write_note(
                 plain,

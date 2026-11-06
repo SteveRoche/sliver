@@ -178,6 +178,32 @@ pub async fn plan_move(
     with_vault(&open, |vault| vault.plan_move(id, &placement))
 }
 
+/// Names the Zettelkasten sequences `first..=last` as a section.
+#[tauri::command]
+pub async fn mark_section(
+    open: State<'_, OpenVault>,
+    first: u32,
+    last: u32,
+    name: String,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.mark_section(first, last, &name))
+}
+
+#[tauri::command]
+pub async fn rename_section(
+    open: State<'_, OpenVault>,
+    first: u32,
+    name: String,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.rename_section(first, &name))
+}
+
+/// Removes a section's heading; its notes stay.
+#[tauri::command]
+pub async fn unmark_section(open: State<'_, OpenVault>, first: u32) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.unmark_section(first))
+}
+
 /// Where a note created for a link to `target` goes, if it's an address.
 #[tauri::command]
 pub async fn place_for_address(
