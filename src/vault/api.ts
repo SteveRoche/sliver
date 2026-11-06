@@ -94,6 +94,15 @@ export interface PreambleWarning {
   message: string;
 }
 
+/** What new notes start with below their header: the default (`kind` null) or a kind's. */
+export interface Template {
+  kind: string | null;
+  /** As Typst sees it, with the vault as root. */
+  path: string;
+  /** Empty if the file doesn't exist yet. */
+  text: string;
+}
+
 /** Shared Typst code: the common preamble (`kind` null) or a kind's. */
 export interface Preamble {
   kind: string | null;
@@ -136,8 +145,13 @@ export const vault = {
   open: (path: string) => invoke<FolderNode>('open_vault', { path }),
   last: () => invoke<string | null>('last_vault'),
   tree: () => invoke<FolderNode>('list_tree'),
-  createNote: (placement: Placement, title?: string, kind?: string) =>
-    invoke<NoteSummary>('create_note', { placement, title, kind }),
+  /** `body` goes below the header, e.g. an expanded template. */
+  createNote: (
+    placement: Placement,
+    title?: string,
+    kind?: string,
+    body?: string,
+  ) => invoke<NoteSummary>('create_note', { placement, title, kind, body }),
   readNote: (id: NoteId) => invoke<string>('read_note', { id }),
   writeNote: (id: NoteId, text: string) =>
     invoke<NoteSummary>('write_note', { id, text }),
@@ -171,6 +185,14 @@ export const vault = {
     invoke<SourceFile>('theme_library', { dark }),
   /** The wrapper main that includes note `id` with wikilinks applied. */
   previewMain: (id: NoteId) => invoke<PreviewMain>('preview_main', { id }),
+  /** What "Restore default" puts back in a preamble or (`template`) a note template. */
+  defaultText: (kind: string | null, template: boolean) =>
+    invoke<string>('default_text', { kind, template }),
+  listTemplates: () => invoke<Template[]>('list_templates'),
+  saveTemplate: (kind: string | null, text: string) =>
+    invoke<void>('save_template', { kind, text }),
+  /** What a new note of `kind` starts with: its kind's template, else the default. */
+  noteTemplate: (kind?: string) => invoke<string>('note_template', { kind }),
   listPreambles: () => invoke<Preamble[]>('list_preambles'),
   savePreamble: (kind: string | null, text: string) =>
     invoke<PreambleWarning[]>('save_preamble', { kind, text }),

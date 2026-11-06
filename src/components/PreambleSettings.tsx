@@ -2,6 +2,7 @@ import type { EditorView } from '@codemirror/view';
 import { ask } from '@tauri-apps/plugin-dialog';
 import Pencil from 'lucide-solid/icons/pencil';
 import Plus from 'lucide-solid/icons/plus';
+import RotateCcw from 'lucide-solid/icons/rotate-ccw';
 import Trash from 'lucide-solid/icons/trash';
 import {
   createEffect,
@@ -32,7 +33,7 @@ import {
   savePreamble,
 } from '../state/workspace';
 import type { Diagnostic, Position } from '../typst/protocol';
-import type { PreambleWarning } from '../vault/api';
+import { type PreambleWarning, type Template, vault } from '../vault/api';
 import { Editor } from './Editor';
 import { SelectSetting } from './settingControls';
 
@@ -54,15 +55,16 @@ const asDiagnostics = (text: string, warnings: PreambleWarning[]) =>
   );
 
 /**
- * Edits one preamble. It saves once typing pauses (whatever the notes'
- * autosave setting: there is no Mod+S here) and when it closes; each save
- * recompiles the visible note's preview with it.
+ * Edits one preamble or template. It saves once typing pauses (whatever the
+ * notes' autosave setting: there is no Mod+S here) and when it closes; a
+ * preamble's save recompiles the visible note's preview with it.
  */
 function PreambleEditor(props: {
   path: string;
-  kind: string | null;
   initial: string;
   warnings: PreambleWarning[];
+  /** Writes the text; resolves to its warnings. */
+  save: (text: string) => Promise<PreambleWarning[]>;
 }) {
   let view: EditorView | undefined;
   let saved = props.initial;
@@ -92,7 +94,7 @@ function PreambleEditor(props: {
     if (text === undefined) return;
     pending = undefined;
     try {
-      setWarnings(await savePreamble(props.kind, text));
+      setWarnings(await props.save(text));
       saved = text;
       setError(null);
     } catch (e) {
@@ -149,10 +151,22 @@ const NO_FOLDER = '\u0000';
 
 type NameForm = { mode: 'new' } | { mode: 'rename'; kind: string };
 
-/** The settings section for preambles: shared Typst code for notes. */
+/**
+ * The settings section for preambles (shared Typst code for notes) and
+ * templates (what new notes start with), common and per kind.
+ */
 export function PreambleSettings() {
-  /** The kind whose preamble is shown; null is the common one. */
+  /** The kind whose files are shown; null is the common ones. */
   const [selected, setSelected] = createSignal<string | null>(null);
+  const [file, setFile] = createSignal<'preamble' | 'template'>('preamble');
+  const [templates, setTemplates] = createSignal<Template[]>([]);
+  createEffect(on(kinds, () => void vault.listTemplates().then(setTemplates)));
+  const currentTemplate = () => templates().find(t => t.kind === selected());
+  const saveTemplate = async (kind: string | null, text: string) => {
+    await vault.saveTemplate(kind, text);
+    setTemplates(list => list.map(t => (t.kind === kind ? { ...t, text } : t)));
+    return [];
+  };
   const [form, setForm] = createSignal<NameForm | null>(null);
   const [formError, setFormError] = createSignal<string | null>(null);
   let nameInput: HTMLInputElement | undefined;
@@ -163,9 +177,35 @@ export function PreambleSettings() {
   });
 
   const current = () => preambles().find(p => p.kind === selected());
-  // Keyed by path, so saving (which replaces the preamble object) doesn't
-  // remount the editor.
-  const currentPath = createMemo(() => current()?.path);
+  /** Bumped by "Restore default", to remount the editor with the new text. */
+  const [restored, setRestored] = createSignal(0);
+  // Keyed by path, so saving (which replaces the preamble or template
+  // object) doesn't remount the editor.
+  const editorKey = createMemo(
+    () => {
+      const path =
+        file() === 'preamble' ? current()?.path : currentTemplate()?.path;
+      return path ? { path, restored: restored() } : undefined;
+    },
+    undefined,
+    { equals: (a, b) => a?.path === b?.path && a?.restored === b?.restored },
+  );
+
+  const restoreDefault = async () => {
+    const kind = selected();
+    const template = file() === 'template';
+    const what = `${kind === null ? 'the common' : `kind "${kind}"'s`} ${template ? 'template' : 'preamble'}`;
+    const ok = await ask(
+      `Replace ${what} with the default? Its current text is lost.`,
+      { title: 'Restore default', kind: 'warning', okLabel: 'Restore' },
+    );
+    if (!ok) return;
+    await flushEditor?.();
+    const text = await vault.defaultText(kind, template);
+    if (template) await saveTemplate(kind, text);
+    else await savePreamble(kind, text);
+    setRestored(n => n + 1);
+  };
 
   const openForm = (next: NameForm) => {
     setFormError(null);
@@ -192,7 +232,7 @@ export function PreambleSettings() {
     const verb =
       settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
     const ok = await ask(
-      `${verb}: the preamble of kind "${kind}"? ${count} note(s) of this kind keep it in their header and only get the common preamble.`,
+      `${verb}: the preamble and template of kind "${kind}"? ${count} note(s) of this kind keep it in their header and only get the common preamble.`,
       { title: 'Delete kind', kind: 'warning', okLabel: verb },
     );
     if (!ok) return;
@@ -202,15 +242,47 @@ export function PreambleSettings() {
 
   return (
     <section class="settings-section preamble-settings">
-      <h3 class="settings-section-title">Preambles</h3>
-      <p class="setting-description preamble-intro">
-        Typst code shared by notes. Its definitions (imports, <code>#let</code>)
-        are available in notes without importing them, and its{' '}
-        <code>template</code> styles the whole note. The common preamble applies
-        to every note; a kind's applies to the notes with that <code>kind</code>{' '}
-        in their header.
-      </p>
+      <h3 class="settings-section-title">Templates</h3>
+      <Show
+        when={file() === 'template'}
+        fallback={
+          <p class="setting-description preamble-intro">
+            A preamble is Typst code shared by notes. Its definitions (imports,{' '}
+            <code>#let</code>) are available in notes without importing them,
+            and its <code>template</code> styles the whole note. The common
+            preamble applies to every note; a kind's applies to the notes with
+            that <code>kind</code> in their header.
+          </p>
+        }
+      >
+        <p class="setting-description preamble-intro">
+          A template is what a new note starts with below its header: the common
+          one, or its kind's if that isn't empty. <code>{'{{title}}'}</code>{' '}
+          becomes the note's title, <code>{'{{date}}'}</code> and{' '}
+          <code>{'{{time}}'}</code> the date and time it was created, and{' '}
+          <code>{'{{date:dddd, D MMMM YYYY}}'}</code> formats them:{' '}
+          <code>YYYY</code> <code>MM</code> <code>MMMM</code> <code>DD</code>{' '}
+          <code>dddd</code> <code>HH</code> <code>hh</code> <code>mm</code>{' '}
+          <code>ss</code> <code>A</code> and shorter forms; text in{' '}
+          <code>[brackets]</code> stays as it is.
+        </p>
+      </Show>
       <div class="preamble-toolbar">
+        <fieldset class="segmented" aria-label="File">
+          <For each={['preamble', 'template'] as const}>
+            {f => (
+              <button
+                type="button"
+                class="segment"
+                classList={{ active: file() === f }}
+                aria-pressed={file() === f}
+                onClick={() => setFile(f)}
+              >
+                {f === 'preamble' ? 'Preamble' : 'Template'}
+              </button>
+            )}
+          </For>
+        </fieldset>
         <select
           class="setting-select"
           aria-label="Preamble"
@@ -224,6 +296,17 @@ export function PreambleSettings() {
         </select>
         <button type="button" onClick={() => openForm({ mode: 'new' })}>
           <Plus size={14} /> New kind
+        </button>
+        <button
+          type="button"
+          title={
+            file() === 'template'
+              ? "Replace this template with the default (a kind's is empty, so the common one applies)"
+              : 'Replace this preamble with the default'
+          }
+          onClick={() => void restoreDefault()}
+        >
+          <RotateCcw size={14} /> Restore default
         </button>
         <Show when={selected()}>
           {kind => (
@@ -291,15 +374,26 @@ export function PreambleSettings() {
           />
         )}
       </Show>
-      <Show when={currentPath()} keyed>
-        {path => {
+      <Show when={editorKey()} keyed>
+        {({ path }) => {
+          const kind = untrack(selected);
+          if (untrack(file) === 'template') {
+            return (
+              <PreambleEditor
+                path={path}
+                initial={untrack(currentTemplate)?.text ?? ''}
+                warnings={[]}
+                save={text => saveTemplate(kind, text)}
+              />
+            );
+          }
           const preamble = untrack(current);
           return (
             <PreambleEditor
               path={path}
-              kind={preamble?.kind ?? null}
               initial={preamble?.text ?? ''}
               warnings={preamble?.warnings ?? []}
+              save={text => savePreamble(kind, text)}
             />
           );
         }}

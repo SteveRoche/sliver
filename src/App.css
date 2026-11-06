@@ -177,13 +177,17 @@ button.primary {
 
 /* --- layout --- */
 
-/* Holds the editors' tooltips (see `tooltipHost` in Editor.tsx). */
+/*
+ * Holds the editors' tooltips (see `tooltipHost` in Editor.tsx). No height,
+ * but the window's width: tooltips are positioned inside it, and a narrower
+ * box would squeeze them to their narrowest.
+ */
 .tooltip-layer {
   position: fixed;
   top: 0;
   left: 0;
   z-index: 50;
-  width: 0;
+  width: 100vw;
   height: 0;
 }
 
@@ -391,9 +395,13 @@ button.primary {
 }
 
 .new-tab {
+  position: sticky;
+  right: 0;
+  display: flex;
   flex: none;
-  align-self: center;
-  margin: 0 4px;
+  align-items: center;
+  padding: 0 4px;
+  background: var(--pane-bg);
 }
 
 .pane-modes {
@@ -807,11 +815,28 @@ button.primary {
   border: 1px solid var(--border);
 }
 
-.diagnostics .error {
+/* An error or warning: its icon beside its message and hints. */
+.diagnostics li,
+.cm-diagnostic {
+  display: flex;
+  gap: 6px;
+}
+
+.severity-icon {
+  display: inline-flex;
+  flex: none;
+  /* Centred on the first line of the message. */
+  height: 1.4em;
+  align-items: center;
+}
+
+.severity-icon.error,
+.error > div > .diagnostic-message {
   color: var(--error);
 }
 
-.diagnostics .warning {
+.severity-icon.warning,
+.warning > div > .diagnostic-message {
   color: var(--warning);
 }
 
@@ -1005,6 +1030,24 @@ button.settings-nav-item.active {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Two buttons joined into one control: one of them is on. */
+.segmented {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.segment + .segment {
+  margin-left: -1px;
+}
+
+.segment.active {
+  background: var(--selected);
+  color: var(--fg);
 }
 
 .preamble-toolbar button.danger:hover {
@@ -1367,7 +1410,7 @@ button.settings-nav-item.active {
 }
 
 .cm-diagnostic-tooltip {
-  max-width: 480px;
+  max-width: min(640px, 90vw);
   padding: 6px 10px;
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 13px;
@@ -1376,16 +1419,6 @@ button.settings-nav-item.active {
 
 .cm-diagnostic + .cm-diagnostic {
   margin-top: 6px;
-}
-
-.cm-diagnostic.error {
-  border-left: 2px solid var(--error);
-  padding-left: 6px;
-}
-
-.cm-diagnostic.warning {
-  border-left: 2px solid var(--warning);
-  padding-left: 6px;
 }
 
 .cm-diagnostic-hint {

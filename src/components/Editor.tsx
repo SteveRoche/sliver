@@ -34,7 +34,7 @@ let tooltipLayer: HTMLElement | undefined;
  * Where editor tooltips go: outside the panes, so they aren't clipped. Each
  * editor puts a container carrying its theme classes in here, and the theme
  * makes those `height: 100%`; directly in the body they would stack below
- * the app and let the window scroll, so the layer has no size.
+ * the app and let the window scroll, so the layer has no height.
  */
 function tooltipHost() {
   if (!tooltipLayer) {
@@ -122,14 +122,14 @@ const theme = EditorView.theme({
     color: 'var(--accent)',
   },
   '.cm-typst-hover': {
-    maxWidth: '560px',
+    maxWidth: 'min(640px, 90vw)',
     padding: '6px 10px',
     fontSize: '13px',
     lineHeight: '1.4',
     whiteSpace: 'pre-wrap',
   },
   '.cm-signature': {
-    maxWidth: '560px',
+    maxWidth: 'min(640px, 90vw)',
     padding: '6px 10px',
     fontSize: '13px',
     lineHeight: '1.4',

@@ -20,11 +20,12 @@ pub use links::{
     LINK_SCHEME, LINKS_PATH, LinkDisplay, WikiLink, link_library, links_in, page_path,
     preview_main, preview_main_path,
 };
-pub use preambles::{PreambleWarning, preamble_path};
+pub use preambles::{PreambleWarning, default_text, preamble_path};
 pub use syntax::{Analysis, CitationRange, LinkRange, analyze};
 pub use theme::{THEME_PATH, theme_library};
 pub use uuid::Uuid;
 pub use vault::{
     AddressChange, CitationStyle, DeleteMode, FolderKind, FolderNode, LinkEdits, MovePlan,
-    NotePreview, NoteSummary, Placement, Preamble, Reference, TreeNode, Vault, VaultError,
+    NotePreview, NoteSummary, Placement, Preamble, Reference, Template, TreeNode, Vault,
+    VaultError,
 };

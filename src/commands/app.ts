@@ -4,6 +4,7 @@ import { prompt } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
 import { menuFolder, menuTarget } from '../components/Sidebar';
 import { toggleWrap } from '../editor/format';
+import { triggerSignature } from '../editor/signature';
 import { insertCitation, refreshReferences } from '../state/citations';
 import { toggleDebug } from '../state/debug';
 import {
@@ -562,6 +563,17 @@ export function registerAppCommands(): () => void {
       run: () => moveAlong(focusedPane().id, move),
     })),
     {
+      id: 'editor.signatureHelp',
+      title: 'Show parameter hints',
+      keybinding: 'Mod+Shift+Space',
+      enabled: () => shownEditor() !== undefined,
+      run: () => {
+        const view = shownEditor();
+        view?.dispatch({ effects: triggerSignature.of(null) });
+        view?.focus();
+      },
+    },
+    {
       id: 'citation.insert',
       title: 'Insert citation from Zotero',
       keybinding: 'Mod+Shift+C',
@@ -588,7 +600,7 @@ export function registerAppCommands(): () => void {
     },
     {
       id: 'settings.preambles',
-      title: 'Edit preambles (shared Typst code)',
+      title: 'Edit templates and preambles',
       enabled: hasVault,
       run: () => openSettings('preambles'),
     },
@@ -597,6 +609,12 @@ export function registerAppCommands(): () => void {
       title: 'Toggle Vim key bindings',
       enabled: hasVault,
       run: () => updateSettings({ vim: !settings.vim }),
+    },
+    {
+      id: 'editor.toggleLineNumbers',
+      title: 'Toggle line numbers',
+      enabled: hasVault,
+      run: () => updateSettings({ lineNumbers: !settings.lineNumbers }),
     },
     {
       id: 'links.toggleDisplay',

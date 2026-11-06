@@ -5,6 +5,7 @@ import {
   EditorView,
   hoverTooltip,
 } from '@codemirror/view';
+import { severityIconNode } from '../components/SeverityIcon';
 import type { Diagnostic } from '../typst/protocol';
 
 interface Squiggle {
@@ -108,13 +109,18 @@ const tooltip = hoverTooltip((view, pos, side) => {
       for (const { diagnostic } of found) {
         const item = document.createElement('div');
         item.className = `cm-diagnostic ${diagnostic.severity}`;
-        item.textContent = diagnostic.message;
+        const body = document.createElement('div');
+        const message = document.createElement('div');
+        message.className = 'diagnostic-message';
+        message.textContent = diagnostic.message;
+        body.appendChild(message);
         for (const hint of diagnostic.hints) {
           const line = document.createElement('div');
           line.className = 'cm-diagnostic-hint';
           line.textContent = `hint: ${hint}`;
-          item.appendChild(line);
+          body.appendChild(line);
         }
+        item.append(severityIconNode(diagnostic.severity), body);
         dom.appendChild(item);
       }
       return { dom };

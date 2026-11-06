@@ -9,6 +9,7 @@ import {
   type ZoteroPick,
 } from '../vault/api';
 import { DEFAULT_CITATION_STYLE, settings } from './settings';
+import { escapeMarkup as markup } from './templates';
 import { isPreviewDark } from './theme';
 import { activeNote, invalidatePreviews, sessionFor } from './workspace';
 
@@ -210,9 +211,6 @@ const LOCATOR_LABELS: Record<string, string> = {
   part: 'pt.',
   'sub verbo': 's.v.',
 };
-
-/** Escapes text for Typst markup. */
-const markup = (text: string) => text.replace(/[\\[\]*_#$@<>`~]/g, '\\$&');
 
 /** Keys `@key` can name: label characters, not ending in `.` or `:`. */
 const REF_KEY = /^[\p{L}\p{N}_\-.:]*[\p{L}\p{N}_-]$/u;

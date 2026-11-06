@@ -63,7 +63,7 @@ const SECTIONS: {
   { id: 'notes', label: 'Notes', icon: FileText },
   { id: 'citations', label: 'Citations', icon: Quote },
   { id: 'keybindings', label: 'Keybindings', icon: Keyboard },
-  { id: 'preambles', label: 'Preambles', icon: FileCode },
+  { id: 'preambles', label: 'Templates', icon: FileCode },
 ];
 
 const [open, setOpen] = createSignal(false);
@@ -126,7 +126,7 @@ export function SettingsDialog() {
                 class="settings-nav-item settings-restore"
                 onClick={async () => {
                   const ok = await ask(
-                    'Restore every setting of this vault to its default?',
+                    'Restore every setting of this vault to its default? Templates and preambles are kept as they are; each has its own "Restore default" in the Templates section.',
                     {
                       title: 'Restore defaults',
                       kind: 'warning',

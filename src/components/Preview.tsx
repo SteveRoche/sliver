@@ -11,6 +11,7 @@ import { isPreviewDark } from '../state/theme';
 import { resizing, setPreviewWidth } from '../state/workspace';
 import type { Diagnostic, Page, PagePoint } from '../typst/protocol';
 import type { NoteId } from '../vault/api';
+import { SeverityIcon } from './SeverityIcon';
 import { withOverlayScrollbar } from './scrollbars';
 import { CITE_SCHEME, LINK_SCHEME } from './wikilinks';
 
@@ -466,20 +467,25 @@ export function Preview(props: PreviewProps) {
           <For each={props.diagnostics}>
             {d => (
               <li class={d.severity}>
-                <Show when={preambleName(d.path)}>
-                  {name => <span class="location">In {name()}</span>}
-                </Show>
-                <Show when={d.range}>
-                  {range => (
-                    <span class="location">
-                      {range().start.line + 1}:{range().start.column + 1}
-                    </span>
-                  )}
-                </Show>
-                {d.message}
-                <For each={d.hints}>
-                  {hint => <div class="hint">hint: {hint}</div>}
-                </For>
+                <SeverityIcon severity={d.severity} />
+                <div>
+                  <span class="diagnostic-message">
+                    <Show when={preambleName(d.path)}>
+                      {name => <span class="location">In {name()}</span>}
+                    </Show>
+                    <Show when={d.range}>
+                      {range => (
+                        <span class="location">
+                          {range().start.line + 1}:{range().start.column + 1}
+                        </span>
+                      )}
+                    </Show>
+                    {d.message}
+                  </span>
+                  <For each={d.hints}>
+                    {hint => <div class="hint">hint: {hint}</div>}
+                  </For>
+                </div>
               </li>
             )}
           </For>

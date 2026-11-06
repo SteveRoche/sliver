@@ -78,6 +78,7 @@ function eventKey(event: KeyboardEvent): string {
   const code = event.code;
   if (code.startsWith('Key')) return code.slice(3).toLowerCase();
   if (code.startsWith('Digit')) return code.slice(5);
+  if (code === 'Space') return 'space';
   return CODE_KEYS[code] ?? event.key.toLowerCase();
 }
 
@@ -95,7 +96,13 @@ export function eventKeybinding(event: KeyboardEvent): string | null {
   ].filter((p): p is string => p !== false);
   if (parts.length === 0 && !/^F\d+$/.test(event.key)) return null;
   const key = eventKey(event);
-  return [...parts, key.length === 1 ? key.toUpperCase() : event.key].join('+');
+  const name =
+    key.length === 1
+      ? key.toUpperCase()
+      : key === 'space'
+        ? 'Space'
+        : event.key;
+  return [...parts, name].join('+');
 }
 
 /** A keybinding in one spelling, to compare two: `Ctrl` on other platforms is `Mod`. */

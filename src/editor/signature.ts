@@ -1,6 +1,12 @@
-import { type Extension, StateEffect, StateField } from '@codemirror/state';
 import {
-  type EditorView,
+  type Extension,
+  Prec,
+  StateEffect,
+  StateField,
+  type Transaction,
+} from '@codemirror/state';
+import {
+  EditorView,
   showTooltip,
   type Tooltip,
   ViewPlugin,
@@ -71,31 +77,59 @@ function render(signature: Signature): HTMLElement {
   return dom;
 }
 
-const signatureField = StateField.define<Tooltip | null>({
-  create: () => null,
+/** Shows signature help at the cursor, e.g. from a keybinding. */
+export const triggerSignature = StateEffect.define<null>();
+
+/**
+ * Whether signature help is on (it turns on when `(` is typed or it's
+ * triggered, and off when the cursor leaves the call), and its tooltip.
+ */
+const signatureField = StateField.define<{
+  active: boolean;
+  tooltip: Tooltip | null;
+}>({
+  create: () => ({ active: false, tooltip: null }),
   update(value, tr) {
     for (const effect of tr.effects) {
+      if (effect.is(triggerSignature)) return { ...value, active: true };
       if (effect.is(setSignature)) {
         const found = effect.value;
-        return (
-          found && {
+        return {
+          active: found !== null,
+          tooltip: found && {
             pos: found.pos,
             above: true,
             create: () => ({ dom: render(found.signature) }),
-          }
-        );
+          },
+        };
       }
     }
-    if (!value || !tr.docChanged) return value;
-    return { ...value, pos: tr.changes.mapPos(value.pos) };
+    const opened = tr.isUserEvent('input') && insertsParen(tr);
+    const active = value.active || opened;
+    if (!value.tooltip || !tr.docChanged) return { ...value, active };
+    return {
+      active,
+      tooltip: { ...value.tooltip, pos: tr.changes.mapPos(value.tooltip.pos) },
+    };
   },
-  provide: field => showTooltip.from(field),
+  provide: field => showTooltip.from(field, value => value.tooltip),
 });
 
+/** Whether `tr` typed an opening parenthesis. */
+function insertsParen(tr: Transaction) {
+  let found = false;
+  tr.changes.iterChanges((_from, _to, _fromB, _toB, inserted) => {
+    if (inserted.toString().includes('(')) found = true;
+  });
+  return found;
+}
+
 /**
- * Signature help: while the cursor is inside a function call's parentheses,
- * a tooltip shows the function's parameters with their types, highlights
- * the one being written, and gives its documentation (or the function's).
+ * Signature help: once `(` is typed (or it's triggered, `triggerSignature`),
+ * a tooltip shows the called function's parameters with their types,
+ * highlights the one being written, and gives its documentation (or the
+ * function's). It follows edits and moves while the cursor stays in the
+ * call, and goes away when it leaves the call, on Escape, or on blur.
  */
 export function signatureHelp(
   fetch: (text: string, position: Position) => Promise<Signature | null>,
@@ -108,7 +142,11 @@ export function signatureHelp(
       constructor(private view: EditorView) {}
 
       update(update: ViewUpdate) {
+        const active = update.state.field(signatureField).active;
+        const turnedOn =
+          active && !update.startState.field(signatureField).active;
         if (
+          !turnedOn &&
           !update.docChanged &&
           !update.selectionSet &&
           !update.focusChanged
@@ -121,6 +159,7 @@ export function signatureHelp(
           this.clear();
           return;
         }
+        if (!active) return;
         this.timer = setTimeout(() => void this.fetch(request), DELAY_MS);
       }
 
@@ -140,7 +179,7 @@ export function signatureHelp(
       }
 
       private clear() {
-        if (this.view.state.field(signatureField)) {
+        if (this.view.state.field(signatureField).active) {
           queueMicrotask(() =>
             this.view.dispatch({ effects: setSignature.of(null) }),
           );
@@ -153,5 +192,15 @@ export function signatureHelp(
       }
     },
   );
-  return [signatureField, plugin];
+  // Escape closes the tooltip and goes on (to Vim, or the completion menu),
+  // so it's seen before Vim's own key handling.
+  const closeOnEscape = EditorView.domEventHandlers({
+    keydown(event, view) {
+      if (event.key === 'Escape' && view.state.field(signatureField).active) {
+        view.dispatch({ effects: setSignature.of(null) });
+      }
+      return false;
+    },
+  });
+  return [signatureField, plugin, Prec.highest(closeOnEscape)];
 }

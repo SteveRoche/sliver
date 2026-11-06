@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use sliver_vault::{
     CitationOptions, CitationStyle, DeleteMode, FolderNode, LinkDisplay, MovePlan, NoteSummary,
-    Placement, Preamble, PreambleWarning, Reference, Uuid, Vault,
+    Placement, Preamble, PreambleWarning, Reference, Template, Uuid, Vault,
 };
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Manager, State};
@@ -80,9 +80,10 @@ pub async fn create_note(
     title: Option<String>,
     placement: Placement,
     kind: Option<String>,
+    body: Option<String>,
 ) -> CommandResult<NoteSummary> {
     with_vault(&open, |vault| {
-        vault.create_note_of_kind(title, placement, kind)
+        vault.create_note_of_kind(title, placement, kind, body.as_deref().unwrap_or(""))
     })
 }
 
@@ -249,6 +250,38 @@ pub async fn preview_main(open: State<'_, OpenVault>, id: Uuid) -> CommandResult
             prefix: preview.prefix,
         })
     })
+}
+
+/// The default text of a preamble or (with `template`) a note template,
+/// common (`kind` `None`) or a kind's.
+#[tauri::command]
+pub fn default_text(kind: Option<String>, template: bool) -> String {
+    sliver_vault::default_text(kind.as_deref(), template)
+}
+
+/// The default note template, then one per kind of note.
+#[tauri::command]
+pub async fn list_templates(open: State<'_, OpenVault>) -> CommandResult<Vec<Template>> {
+    with_vault(&open, |vault| vault.templates())
+}
+
+/// Saves a note template (`kind` `None` is the default one).
+#[tauri::command]
+pub async fn save_template(
+    open: State<'_, OpenVault>,
+    kind: Option<String>,
+    text: String,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.save_template(kind.as_deref(), &text))
+}
+
+/// What a new note of `kind` starts with, placeholders unexpanded.
+#[tauri::command]
+pub async fn note_template(
+    open: State<'_, OpenVault>,
+    kind: Option<String>,
+) -> CommandResult<String> {
+    with_vault(&open, |vault| vault.note_template(kind.as_deref()))
 }
 
 /// The common preamble, then one per kind of note.

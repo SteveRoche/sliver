@@ -334,19 +334,22 @@ export function TabBar(props: { pane: Pane; focused: boolean }) {
             );
           }}
         </For>
+        {/* After the last tab; sticky, so it stays in view when the tabs overflow. */}
+        <div class="new-tab">
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="New tab"
+            title="New tab"
+            onClick={() => {
+              focusPane(props.pane.id);
+              newTab();
+            }}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
       </div>
-      <button
-        type="button"
-        class="icon-button new-tab"
-        aria-label="New tab"
-        title="New tab"
-        onClick={() => {
-          focusPane(props.pane.id);
-          newTab();
-        }}
-      >
-        <Plus size={14} />
-      </button>
       <div class="pane-modes">
         <For
           each={MODES.filter(

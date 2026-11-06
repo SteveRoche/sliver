@@ -57,6 +57,7 @@ import {
   settings,
   updateSettings,
 } from './settings';
+import { expandTemplate } from './templates';
 import { isPreviewDark } from './theme';
 
 /** One open editor tab: its text, live preview and autosave. */
@@ -1011,7 +1012,14 @@ export async function createNote(
   title: string,
   kind?: string,
 ) {
-  const note = await vault.createNote(placement, title || undefined, kind);
+  const template = await vault.noteTemplate(kind);
+  const body = expandTemplate(template, { title, now: new Date() });
+  const note = await vault.createNote(
+    placement,
+    title || undefined,
+    kind,
+    body,
+  );
   await refreshTree();
   openNote(note.id);
   return note;

@@ -34,6 +34,22 @@ pub fn preamble_path(kind: Option<&str>) -> String {
     format!("/{}", preamble_file(kind))
 }
 
+/// Note templates: what a new note starts with below its header, by
+/// default (`default.typ`) or for a kind (`kinds/<kind>.typ`).
+pub const TEMPLATES_DIR: &str = ".sliver/templates";
+
+/// The default template a new vault starts with.
+pub const DEFAULT_TEMPLATE: &str = "= {{title}}\n";
+
+/// Where the template for `kind` (or the default one, for `None`) lives,
+/// relative to the vault root.
+pub fn template_file(kind: Option<&str>) -> String {
+    match kind {
+        None => format!("{TEMPLATES_DIR}/default.typ"),
+        Some(kind) => format!("{TEMPLATES_DIR}/kinds/{kind}.typ"),
+    }
+}
+
 /// The hidden lines put before a note's source: one wildcard import per
 /// preamble path. Whole lines, so positions in the note only shift by lines.
 pub fn note_prefix(paths: &[String]) -> String {
@@ -156,6 +172,16 @@ fn path_argument<'a>(node: &LinkedNode<'a>) -> Option<LinkedNode<'a>> {
             args.children().find(|c| c.kind() == SyntaxKind::Str)
         }
         _ => None,
+    }
+}
+
+/// What "Restore default" puts back: the starter preamble, or the default
+/// template (a kind's template is empty, so the default one applies).
+pub fn default_text(kind: Option<&str>, template: bool) -> String {
+    match (template, kind) {
+        (false, kind) => starter(kind),
+        (true, None) => DEFAULT_TEMPLATE.to_owned(),
+        (true, Some(_)) => String::new(),
     }
 }
 

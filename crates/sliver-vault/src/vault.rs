@@ -20,7 +20,7 @@ use crate::header::{HeaderError, NoteHeader, format_header, header_in, set_kind,
 use crate::links::{LinkDisplay, LinkTarget, WikiLink, link_library, links_in};
 use crate::preambles::{
     COMMON_FILE, KINDS_DIR, PreambleWarning, defines_template, note_prefix, preamble_file,
-    preamble_path, preamble_warnings,
+    preamble_path, preamble_warnings, template_file,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -66,6 +66,17 @@ pub struct Preamble {
     pub text: String,
     pub exists: bool,
     pub warnings: Vec<PreambleWarning>,
+}
+
+/// A note template as the settings view edits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Template {
+    /// `None` for the default template.
+    pub kind: Option<String>,
+    /// As Typst sees it, with the vault as root.
+    pub path: String,
+    /// Empty if the file doesn't exist yet.
+    pub text: String,
 }
 
 /// An entry of `references.bib`.
@@ -268,6 +279,11 @@ impl Vault {
         vault.zettelkasten = Some(DEFAULT_ZETTELKASTEN.to_owned());
         vault.write_theme_file()?;
         vault.write_common_preamble()?;
+        // Only a new vault gets it: an existing vault may have removed it on purpose.
+        vault.atomic_write(
+            &vault.root.join(template_file(None)),
+            crate::preambles::DEFAULT_TEMPLATE.as_bytes(),
+        )?;
         Ok(vault)
     }
 
@@ -543,15 +559,17 @@ impl Vault {
         title: Option<String>,
         placement: Placement,
     ) -> Result<NoteSummary> {
-        self.create_note_of_kind(title, placement, None)
+        self.create_note_of_kind(title, placement, None, "")
     }
 
-    /// Like [`Vault::create_note`], with `kind` in the new note's header.
+    /// Like [`Vault::create_note`], with `kind` in the new note's header and
+    /// `body` (e.g. an expanded template) below it.
     pub fn create_note_of_kind(
         &mut self,
         title: Option<String>,
         placement: Placement,
         kind: Option<String>,
+        body: &str,
     ) -> Result<NoteSummary> {
         if let Some(kind) = &kind {
             self.require_kind(kind)?;
@@ -573,7 +591,13 @@ impl Vault {
             tags: Vec::new(),
             kind,
         });
-        self.write_file(Uuid::new_v4(), &folder, &format!("{header}\n\n"))
+        let body = body.trim_matches('\n');
+        let text = if body.is_empty() {
+            format!("{header}\n\n")
+        } else {
+            format!("{header}\n\n{body}\n")
+        };
+        self.write_file(Uuid::new_v4(), &folder, &text)
     }
 
     pub fn rename_note(&mut self, id: Uuid, title: &str) -> Result<NoteSummary> {
@@ -755,6 +779,48 @@ impl Vault {
         Ok(styles)
     }
 
+    // --- templates ---
+
+    /// The default template, then one per kind.
+    pub fn templates(&mut self) -> Result<Vec<Template>> {
+        self.scan_kinds()?;
+        let kinds: Vec<Option<String>> = std::iter::once(None)
+            .chain(self.kinds.iter().cloned().map(Some))
+            .collect();
+        kinds
+            .into_iter()
+            .map(|kind| {
+                let file = template_file(kind.as_deref());
+                Ok(Template {
+                    text: self.read_optional(&file)?.unwrap_or_default(),
+                    path: format!("/{file}"),
+                    kind,
+                })
+            })
+            .collect()
+    }
+
+    pub fn save_template(&mut self, kind: Option<&str>, text: &str) -> Result<()> {
+        if let Some(kind) = kind {
+            self.require_kind(kind)?;
+        }
+        self.atomic_write(&self.root.join(template_file(kind)), text.as_bytes())
+    }
+
+    /// What a new note of `kind` starts with (placeholders unexpanded): the
+    /// kind's template, or the default one where it has none (or it's blank).
+    pub fn note_template(&self, kind: Option<&str>) -> Result<String> {
+        if let Some(kind) = kind
+            && let Some(text) = self.read_optional(&template_file(Some(kind)))?
+            && !text.trim().is_empty()
+        {
+            return Ok(text);
+        }
+        Ok(self
+            .read_optional(&template_file(None))?
+            .unwrap_or_default())
+    }
+
     // --- preambles ---
 
     /// Rereads which kinds exist; their files may change outside the app.
@@ -869,6 +935,10 @@ impl Vault {
             self.root.join(preamble_file(Some(from))),
             self.root.join(preamble_file(Some(to))),
         )?;
+        let template = self.root.join(template_file(Some(from)));
+        if template.exists() {
+            fs::rename(template, self.root.join(template_file(Some(to))))?;
+        }
         self.kinds.remove(from);
         self.kinds.insert(to.to_owned());
         let ids: Vec<Uuid> = self
@@ -888,6 +958,10 @@ impl Vault {
         self.scan_kinds()?;
         self.require_kind(name)?;
         remove_path(&self.root.join(preamble_file(Some(name))), mode)?;
+        let template = self.root.join(template_file(Some(name)));
+        if template.exists() {
+            remove_path(&template, mode)?;
+        }
         self.kinds.remove(name);
         Ok(())
     }
@@ -1729,6 +1803,7 @@ mod tests {
                     folder: String::new(),
                 },
                 Some("Literature".into()),
+                "",
             )
             .unwrap();
         assert_eq!(note.kind.as_deref(), Some("Literature"));
@@ -1889,5 +1964,50 @@ mod tests {
             .unwrap();
         let (_, messages) = render(&vault, note.id);
         assert!(messages.is_empty(), "{messages:?}");
+    }
+
+    #[test]
+    fn templates_fall_back_to_the_default_and_follow_their_kind() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        vault.create_kind("Paper").unwrap();
+        assert_eq!(vault.note_template(Some("Paper")).unwrap(), "= {{title}}\n");
+        vault.save_template(None, "").unwrap();
+        assert_eq!(vault.note_template(Some("Paper")).unwrap(), "");
+        vault.save_template(None, "= {{title}}\n").unwrap();
+        assert_eq!(vault.note_template(Some("Paper")).unwrap(), "= {{title}}\n");
+        vault
+            .save_template(Some("Paper"), "Read on {{date}}.")
+            .unwrap();
+        assert_eq!(
+            vault.note_template(Some("Paper")).unwrap(),
+            "Read on {{date}}."
+        );
+        assert_eq!(vault.templates().unwrap().len(), 2);
+
+        vault.rename_kind("Paper", "Article").unwrap();
+        assert_eq!(
+            vault.note_template(Some("Article")).unwrap(),
+            "Read on {{date}}."
+        );
+        vault.delete_kind("Article", DeleteMode::Permanent).unwrap();
+        assert!(!dir.0.join(template_file(Some("Article"))).exists());
+
+        let note = vault
+            .create_note_of_kind(
+                Some("A".into()),
+                Placement::Unaddressed {
+                    folder: String::new(),
+                },
+                None,
+                "= A\n\nBody.\n",
+            )
+            .unwrap();
+        assert!(
+            vault
+                .read_note(note.id)
+                .unwrap()
+                .ends_with("<note>\n\n= A\n\nBody.\n")
+        );
     }
 }
