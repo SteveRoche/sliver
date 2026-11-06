@@ -86,7 +86,7 @@ export function KeybindingSettings() {
   return (
     <SectionBody title="Keybindings">
       <input
-        class="setting-filter"
+        class="setting-select setting-filter"
         type="search"
         placeholder="Filter commands"
         value={filter()}
