@@ -16,6 +16,8 @@ interface CompileStats {
   diagnostics: Diagnostic[];
   /** Packages being fetched; their "not found" errors are left out. */
   loadingPackages: string[];
+  /** Vault files being loaded (images, data); a recompile follows. */
+  loadingFiles: string[];
   /** Compile (parse, evaluate, layout) and SVG render times in the worker. */
   compileMs: number;
   renderMs: number;

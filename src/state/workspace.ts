@@ -238,6 +238,36 @@ const visibleNotes = createRoot(() =>
   }),
 );
 
+/**
+ * Resolves once every preview on screen has its first pages (or a compile
+ * that failed with nothing left loading), or after `timeoutMs` at the latest.
+ */
+export function firstPreviews(timeoutMs: number): Promise<void> {
+  return new Promise(resolve => {
+    createRoot(dispose => {
+      const done = () => {
+        clearTimeout(timer);
+        dispose();
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      createEffect(() => {
+        const ready = [...visibleNotes()].every(id => {
+          const session = sessions.get(id);
+          const result = session?.result();
+          if (!session || !result) return false;
+          return (
+            session.pages().length > 0 ||
+            (result.loadingPackages.length === 0 &&
+              result.loadingFiles.length === 0)
+          );
+        });
+        if (ready) queueMicrotask(done);
+      });
+    });
+  });
+}
+
 const index = createRoot(() =>
   createMemo(() => {
     const byId = new Map<NoteId, TreeNode>();
@@ -405,6 +435,7 @@ function createSession(id: NoteId): NoteSession {
             { severity: 'error', message: error.message, hints: [] },
           ],
           loadingPackages: [],
+          loadingFiles: [],
           compileMs: 0,
           renderMs: 0,
         }),

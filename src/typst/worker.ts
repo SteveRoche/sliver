@@ -196,6 +196,7 @@ function toCompile(compiler: Compiler, out: Compiled): WorkerCompile {
           : { page: out.anchorPage, x: 0, y: out.anchorY },
       diagnostics,
       loadingPackages,
+      loadingFiles: loadingVaultFiles,
       compileMs: out.compileMs,
       renderMs: out.renderMs,
     };
