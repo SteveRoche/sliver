@@ -650,7 +650,12 @@ export function registerAppCommands(): () => void {
       title: 'Toggle reading view',
       keybinding: 'Mod+E',
       enabled: hasVault,
-      run: toggleReading,
+      run: () => {
+        const wasReading = focusedPane().mode === 'read';
+        toggleReading();
+        // Back to editing, the editor takes the keys (Vim keeps its mode).
+        if (wasReading) requestAnimationFrame(() => shownEditor()?.focus());
+      },
     },
     {
       id: 'view.togglePreviewLayout',
