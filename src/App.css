@@ -936,15 +936,19 @@ button.primary {
 
 /* --- dialogs, palette, menu --- */
 
+/* Above the app's own layers (scrollbar thumbs, drop overlays, the debug
+   panel), below tooltips and cards, which a dialog's editor shows too. */
 .dialog-backdrop {
   position: fixed;
   inset: 0;
+  z-index: 20;
   background: rgb(0 0 0 / 0.3);
 }
 
 .dialog-positioner {
   position: fixed;
   inset: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: center;
