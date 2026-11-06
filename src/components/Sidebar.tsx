@@ -583,14 +583,24 @@ function NodeView(props: { node: Node; indexPath: number[] }) {
   );
 }
 
+/** A branch's rows, rendered only while it's unfolded: folded ones cost nothing. */
 function Children(props: { nodes: Node[]; indexPath: number[] }) {
   return (
     <TreeView.BranchContent class="tree-children">
-      <For each={props.nodes}>
-        {(child, index) => (
-          <NodeView node={child} indexPath={[...props.indexPath, index()]} />
+      <TreeView.NodeContext>
+        {node => (
+          <Show when={node().expanded}>
+            <For each={props.nodes}>
+              {(child, index) => (
+                <NodeView
+                  node={child}
+                  indexPath={[...props.indexPath, index()]}
+                />
+              )}
+            </For>
+          </Show>
         )}
-      </For>
+      </TreeView.NodeContext>
     </TreeView.BranchContent>
   );
 }

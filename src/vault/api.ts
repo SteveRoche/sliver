@@ -214,6 +214,9 @@ export const vault = {
   /** `/.sliver/links.typ`: the link table and `wikilinks` show rule. */
   linkLibrary: (showAddresses: boolean) =>
     invoke<SourceFile>('link_library', { showAddresses }),
+  /** Note `id`'s link table: the notes its link `targets` name. */
+  linkTable: (id: NoteId, targets: string[]) =>
+    invoke<SourceFile>('link_table', { id, targets }),
   analyze: (text: string) => invoke<Analysis>('analyze', { text }),
   /** `/.sliver/theme.typ` with the light or dark theme's colours. */
   themeLibrary: (dark: boolean) =>

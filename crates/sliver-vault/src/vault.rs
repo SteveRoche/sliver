@@ -18,7 +18,7 @@ use crate::citations::{
     REFERENCES_FILE, STYLES_DIR, bib_entries, citations_in, entry_title, merge_references,
 };
 use crate::header::{HeaderError, NoteHeader, format_header, header_in, set_kind, set_title};
-use crate::links::{LinkDisplay, LinkTarget, WikiLink, link_library, links_in};
+use crate::links::{LinkTarget, WikiLink, link_table, links_in};
 use crate::preambles::{
     COMMON_FILE, KINDS_DIR, PreambleWarning, defines_template, note_prefix, preamble_file,
     preamble_path, preamble_warnings, template_file,
@@ -319,8 +319,7 @@ impl Vault {
             return Err(VaultError::NotAVault(root));
         }
         let mut vault = Self::empty(root);
-        let root = vault.root.clone();
-        vault.scan(&root, "", &mut Previous::default())?;
+        vault.scan(&mut Previous::default())?;
         vault.scan_kinds()?;
         vault.reference_keys = bib_entries(&vault.references()?)
             .into_iter()
@@ -357,11 +356,60 @@ impl Vault {
         Ok(())
     }
 
-    /// Indexes `dir` depth first in name order, so "first found" is stable.
+    /// Indexes the vault: walks it depth first in name order (so "first
+    /// found" is stable), then reads and parses the notes in parallel.
     /// Anything starting with a dot (`.sliver`, `.git`, markers) is skipped,
     /// and so is an entry that can't be read (it may be going away). Notes
     /// unchanged since `previous` are taken from it instead of reread.
-    fn scan(&mut self, dir: &Path, folder: &str, previous: &mut Previous) -> Result<()> {
+    fn scan(&mut self, previous: &mut Previous) -> Result<()> {
+        let mut found = Vec::new();
+        let mut seen = HashSet::new();
+        let root = self.root.clone();
+        self.walk(&root, "", &mut seen, &mut found)?;
+        let mut fresh = Vec::new();
+        for note in found {
+            if previous.stamps.get(&note.id) == Some(&note.stamp)
+                && let Some(summary) = previous.notes.remove(&note.id)
+            {
+                let id = note.id;
+                self.notes.insert(
+                    id,
+                    NoteSummary {
+                        folder: note.folder,
+                        ..summary
+                    },
+                );
+                self.links
+                    .insert(id, previous.links.remove(&id).unwrap_or_default());
+                self.citations
+                    .insert(id, previous.citations.remove(&id).unwrap_or_default());
+                if let Some(hash) = previous.hashes.get(&id) {
+                    self.hashes.insert(id, *hash);
+                }
+                self.stamps.insert(id, note.stamp);
+            } else {
+                fresh.push(note);
+            }
+        }
+        let parsed = parse_all(&fresh);
+        for (note, parsed) in fresh.into_iter().zip(parsed) {
+            if let Some(parsed) = parsed {
+                self.insert_parsed(parsed);
+                self.stamps.insert(note.id, note.stamp);
+            }
+        }
+        Ok(())
+    }
+
+    /// Records `dir`'s folders, markers and assets, and lists its notes in
+    /// `found` (a uuid already `seen` is a duplicate).
+    fn walk(
+        &mut self,
+        dir: &Path,
+        folder: &str,
+        seen: &mut HashSet<Uuid>,
+        found: &mut Vec<FoundNote>,
+    ) -> Result<()> {
         let mut entries: Vec<_> = fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
@@ -382,56 +430,28 @@ impl Vault {
                         self.extra_zettelkasten.push(sub.clone());
                     }
                 }
-                let _ = self.scan(&path, &sub, previous);
+                let _ = self.walk(&path, &sub, seen, found);
             } else if !meta.is_file() {
                 continue;
             } else if let Some(id) = note_id(&path) {
-                if self.notes.contains_key(&id) {
+                if !seen.insert(id) {
                     self.duplicates
                         .entry(id)
                         .or_default()
                         .push(join_folder(folder, name));
                     continue;
                 }
-                let _ = self.load_note(id, folder, &path, stamp_of(&meta), previous);
+                found.push(FoundNote {
+                    id,
+                    folder: folder.to_owned(),
+                    path,
+                    stamp: stamp_of(&meta),
+                });
             } else {
                 self.assets
                     .insert(join_folder(folder, name), stamp_of(&meta));
             }
         }
-        Ok(())
-    }
-
-    fn load_note(
-        &mut self,
-        id: Uuid,
-        folder: &str,
-        path: &Path,
-        stamp: Stamp,
-        previous: &mut Previous,
-    ) -> Result<()> {
-        if previous.stamps.get(&id) == Some(&stamp)
-            && let Some(summary) = previous.notes.remove(&id)
-        {
-            self.notes.insert(
-                id,
-                NoteSummary {
-                    folder: folder.to_owned(),
-                    ..summary
-                },
-            );
-            self.links
-                .insert(id, previous.links.remove(&id).unwrap_or_default());
-            self.citations
-                .insert(id, previous.citations.remove(&id).unwrap_or_default());
-            if let Some(hash) = previous.hashes.get(&id) {
-                self.hashes.insert(id, *hash);
-            }
-        } else {
-            let text = fs::read_to_string(path)?;
-            self.index(id, folder, &text);
-        }
-        self.stamps.insert(id, stamp);
         Ok(())
     }
 
@@ -747,18 +767,24 @@ impl Vault {
         Ok(sources)
     }
 
-    /// Source of `/.sliver/links.typ` for the preview; see [`link_library`].
-    pub fn link_library(&self, display: LinkDisplay) -> String {
-        let mut notes: Vec<&NoteSummary> = self.notes.values().collect();
-        notes.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
-        link_library(
-            notes.into_iter().map(|n| LinkTarget {
-                id: n.id.to_string(),
-                title: n.title.as_deref(),
-                address: n.address.as_deref(),
-            }),
-            display,
-        )
+    /// Source of a note's link table for `targets` (as written in its
+    /// links); see [`link_table`].
+    pub fn link_table(&self, targets: &[String]) -> String {
+        let mut seen = HashSet::new();
+        link_table(targets.iter().filter_map(|target| {
+            if !seen.insert(target.as_str()) {
+                return None;
+            }
+            let note = self.notes.get(&self.resolve(target)?)?;
+            Some((
+                target.as_str(),
+                LinkTarget {
+                    id: note.id.to_string(),
+                    title: note.title.as_deref(),
+                    address: note.address.as_deref(),
+                },
+            ))
+        }))
     }
 
     // --- citations ---
@@ -1223,28 +1249,16 @@ impl Vault {
     }
 
     fn index(&mut self, id: Uuid, folder: &str, text: &str) -> &NoteSummary {
-        self.hashes.insert(id, files::hash_text(text));
-        let root = typst_syntax::parse(text);
-        let (header, header_error) = match header_in(&root) {
-            Ok(header) => (header.unwrap_or_default(), None),
-            Err(err) => (NoteHeader::default(), Some(err.to_string())),
-        };
-        self.links.insert(id, links_in(&root));
-        self.citations
-            .insert(id, citations_in(&root).into_iter().map(|c| c.key).collect());
-        self.notes.insert(
-            id,
-            NoteSummary {
-                id,
-                title: header.title,
-                address: header.address,
-                tags: header.tags,
-                header_error,
-                folder: folder.to_owned(),
-                kind: header.kind,
-            },
-        );
+        self.insert_parsed(parse_note(id, folder, text));
         &self.notes[&id]
+    }
+
+    fn insert_parsed(&mut self, parsed: ParsedNote) {
+        let id = parsed.summary.id;
+        self.hashes.insert(id, parsed.hash);
+        self.links.insert(id, parsed.links);
+        self.citations.insert(id, parsed.citations);
+        self.notes.insert(id, parsed.summary);
     }
 
     fn folder_dir(&self, folder: &str) -> PathBuf {
@@ -1389,6 +1403,81 @@ fn validate_folder_name(name: &str) -> Result<()> {
         return Err(VaultError::InvalidFolderName(name.to_owned()));
     }
     Ok(())
+}
+
+/// A note file the walk found, before it's read.
+struct FoundNote {
+    id: Uuid,
+    folder: String,
+    path: PathBuf,
+    stamp: Stamp,
+}
+
+/// What the index keeps of a note, from its text.
+struct ParsedNote {
+    summary: NoteSummary,
+    links: Vec<WikiLink>,
+    citations: BTreeSet<String>,
+    hash: u64,
+}
+
+/// Parses a note's text (its header, wikilinks and citations).
+fn parse_note(id: Uuid, folder: &str, text: &str) -> ParsedNote {
+    let root = typst_syntax::parse(text);
+    let (header, header_error) = match header_in(&root) {
+        Ok(header) => (header.unwrap_or_default(), None),
+        Err(err) => (NoteHeader::default(), Some(err.to_string())),
+    };
+    ParsedNote {
+        summary: NoteSummary {
+            id,
+            title: header.title,
+            address: header.address,
+            tags: header.tags,
+            header_error,
+            folder: folder.to_owned(),
+            kind: header.kind,
+        },
+        links: links_in(&root),
+        citations: citations_in(&root).into_iter().map(|c| c.key).collect(),
+        hash: files::hash_text(text),
+    }
+}
+
+/// Below this many notes, parsing on one thread is about as fast.
+const PARALLEL_MIN: usize = 64;
+
+/// Reads and parses `notes` on every core, in order; `None` for a file that
+/// can't be read. Parsing every note's whole text is most of opening a vault.
+fn parse_all(notes: &[FoundNote]) -> Vec<Option<ParsedNote>> {
+    let parse = |note: &FoundNote| {
+        let text = fs::read_to_string(&note.path).ok()?;
+        Some(parse_note(note.id, &note.folder, &text))
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if notes.len() < PARALLEL_MIN || threads < 2 {
+        return notes.iter().map(parse).collect();
+    }
+    let chunk = notes.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = notes
+            .chunks(chunk)
+            .map(|part| {
+                (
+                    part.len(),
+                    scope.spawn(move || part.iter().map(parse).collect()),
+                )
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|(len, handle)| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| (0..len).map(|_| None).collect::<Vec<_>>())
+            })
+            .collect()
+    })
 }
 
 /// The uuid of a note file (`<uuid>.typ`), if `path` is one.
@@ -1573,7 +1662,22 @@ mod tests {
     fn render_themed(vault: &Vault, id: Uuid, dark: bool) -> (String, Vec<String>) {
         let mut engine = sliver_typst::Engine::new();
         engine
-            .set_source(crate::LINKS_PATH, &vault.link_library(LinkDisplay::Title))
+            .set_source(
+                crate::LINKS_PATH,
+                &crate::link_library(crate::LinkDisplay::Title),
+            )
+            .unwrap();
+        let targets: Vec<String> = vault
+            .links_from(id)
+            .unwrap()
+            .iter()
+            .map(|l| l.target.clone())
+            .collect();
+        engine
+            .set_source(
+                &crate::link_table_path(&id.to_string()),
+                &vault.link_table(&targets),
+            )
             .unwrap();
         engine
             .set_source(

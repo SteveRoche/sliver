@@ -41,6 +41,7 @@ pub fn run() {
             commands::apply_move,
             commands::backlinks,
             commands::link_library,
+            commands::link_table,
             commands::preview_main,
             commands::default_text,
             commands::list_templates,

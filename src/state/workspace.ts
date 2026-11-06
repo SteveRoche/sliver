@@ -33,7 +33,12 @@ import {
   type TreeNode,
   vault,
 } from '../vault/api';
-import { loadCitations, syncReferences, unloadCitations } from './citations';
+import {
+  checkDeferredReferences,
+  loadCitations,
+  syncReferences,
+  unloadCitations,
+} from './citations';
 import { recordCompile } from './debug';
 import {
   type DropZone,
@@ -118,6 +123,8 @@ export interface NoteSession {
   mainPath(): string | undefined;
   /** Refetches the wrapper main and prefix (after its kind or a preamble changed); doesn't recompile. */
   reloadMain(): Promise<void>;
+  /** Resends the note's link table (after titles or addresses changed); doesn't recompile. */
+  refreshLinks(): Promise<void>;
   refresh(): void;
   dispose(discard?: boolean): void;
 }
@@ -341,6 +348,25 @@ export function resolveTarget(target: string): NoteId | undefined {
 export const sessionFor = (id: NoteId) => sessions.get(id);
 
 const notePath = (id: NoteId) => `/notes/${id}.typ`;
+
+/** Same pattern as the `wikilinks` show rule (`link_library`). */
+const WIKILINK = /\[\[([^[\]\n]+)\]\]/g;
+
+/** The targets `text` links to, as the show rule sees them: sorted, once each. */
+function linkTargets(text: string): string[] {
+  const targets = new Set<string>();
+  for (const match of text.matchAll(WIKILINK)) {
+    const target = match[1].split('|')[0].trim();
+    if (target) targets.add(target);
+  }
+  return [...targets].sort();
+}
+
+/**
+ * Resolves once the vault's shared files (links rule, preambles, theme,
+ * citations) have reached the compiler; notes compile only after that.
+ */
+let vaultSources: Promise<unknown> = Promise.resolve();
 /** Must match `sliver_vault::preview_main_path`. */
 const previewMainPath = (id: NoteId) => `/.sliver/view/${id}.typ`;
 
@@ -383,11 +409,31 @@ function createSession(id: NoteId): NoteSession {
   );
   let latestText: string | undefined;
 
+  // The note's link table covers only the targets its text links to, so it
+  // stays small whatever the vault's size; it's resent when they change.
+  let tableFor: string | undefined;
+  let tableSent: Promise<void> = Promise.resolve();
+  const sendLinkTable = (text: string, force = false) => {
+    const targets = linkTargets(text);
+    const key = targets.join('\n');
+    if (!force && key === tableFor) return tableSent;
+    tableFor = key;
+    tableSent = tableSent
+      .then(async () => {
+        const table = await vault.linkTable(id, targets);
+        if (!disposed) await typst.setSource(table.path, table.text);
+      })
+      .catch(error => console.warn(`could not update ${id}'s links:`, error));
+    return tableSent;
+  };
+
   const text = (async () => {
     const [main, source] = await Promise.all([
       vault.previewMain(id),
       vault.readNote(id),
     ]);
+    latestText ??= source;
+    const table = sendLinkTable(source);
     // Checked after each step: a closed tab has already removed its files.
     if (disposed) return source;
     await typst.setPrefix(notePath(id), main.prefix);
@@ -440,6 +486,9 @@ function createSession(id: NoteId): NoteSession {
           renderMs: 0,
         }),
     });
+    await table;
+    await vaultSources;
+    if (disposed) return source;
     preview.update(source);
     return source;
   })();
@@ -504,7 +553,8 @@ function createSession(id: NoteId): NoteSession {
     },
     edit(next) {
       latestText = next;
-      preview?.update(next);
+      // A new link target needs its table entry before the compile.
+      void sendLinkTable(next).then(() => preview?.update(next));
       saver.update(next);
       setDirty(true);
     },
@@ -547,6 +597,9 @@ function createSession(id: NoteId): NoteSession {
     },
     mainPath: () => mainPath,
     reloadMain,
+    refreshLinks() {
+      return sendLinkTable(this.currentText(), true);
+    },
     refresh() {
       preview?.refresh();
     },
@@ -560,6 +613,7 @@ function createSession(id: NoteId): NoteSession {
       void typst.removeSource(notePath(id));
       void typst.removeSource(previewMainPath(id));
       void typst.removeSource(pagePath(id));
+      void typst.removeSource(`/.sliver/links/${id}.typ`);
       pageWidths.delete(id);
       stalePreviews.delete(id);
     },
@@ -585,13 +639,22 @@ export async function openVault(path: string, create = false) {
   const nodes = create ? await vault.create(path) : await vault.open(path);
   setTree(nodes);
   await loadSettings();
-  await loadLinks();
-  await loadPreambles();
-  await sendTheme();
-  await loadCitations();
+  // Fetched together; open notes load meanwhile and compile once these are in.
+  const shared = Promise.all([
+    loadLinks(),
+    loadPreambles(),
+    sendTheme(),
+    loadCitations(),
+  ]);
+  vaultSources = shared.catch(() => undefined);
   await restoreWorkspace();
   // Last, so the workspace mounts with the restored tabs and pane sizes.
   setVaultRoot(path);
+  await shared;
+  // Off the startup path: checks that only matter if something's wrong.
+  void firstPreviews(3000)
+    .then(checkDeferredReferences)
+    .catch(error => console.warn('could not check references:', error));
   // Picks up edits made in Zotero; previews use the vault's copy meanwhile.
   void syncReferences(true).catch(error =>
     console.warn('could not refresh references:', error),
@@ -617,10 +680,11 @@ async function closeVault() {
 
 async function refreshTree() {
   setTree(await vault.tree());
-  await loadLinks();
+  await Promise.all([...sessions.values()].map(s => s.refreshLinks()));
+  invalidatePreviews();
 }
 
-/** Regenerates `links.typ` so open previews show current titles. */
+/** Regenerates `links.typ` after the link display setting changed. */
 export async function refreshLinks() {
   if (vaultRoot()) await loadLinks();
 }

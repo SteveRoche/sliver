@@ -199,26 +199,35 @@ pub struct SourceFile {
     text: String,
 }
 
-/// The generated `/.sliver/links.typ` (link table + `wikilinks` show rule).
+/// The generated `/.sliver/links.typ` (the `wikilinks` show rule).
 #[tauri::command]
-pub async fn link_library(
-    open: State<'_, OpenVault>,
-    show_addresses: Option<bool>,
-) -> CommandResult<SourceFile> {
+pub async fn link_library(show_addresses: Option<bool>) -> SourceFile {
     let display = if show_addresses.unwrap_or(false) {
         LinkDisplay::Address
     } else {
         LinkDisplay::Title
     };
+    SourceFile {
+        path: sliver_vault::LINKS_PATH.to_owned(),
+        text: sliver_vault::link_library(display),
+    }
+}
+
+/// Note `id`'s link table, for the targets its text links to now.
+#[tauri::command]
+pub async fn link_table(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    targets: Vec<String>,
+) -> CommandResult<SourceFile> {
     with_vault(&open, |vault| {
         Ok(SourceFile {
-            path: sliver_vault::LINKS_PATH.to_owned(),
-            text: vault.link_library(display),
+            path: sliver_vault::link_table_path(&id.to_string()),
+            text: vault.link_table(&targets),
         })
     })
 }
 
-/// Highlighting and wikilink ranges for the editor. Doesn't need a vault.
 #[tauri::command]
 pub async fn analyze(text: String) -> sliver_vault::Analysis {
     sliver_vault::analyze(&text)

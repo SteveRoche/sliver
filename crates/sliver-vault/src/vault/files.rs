@@ -112,8 +112,7 @@ impl Vault {
         self.zettelkasten = None;
         self.extra_zettelkasten.clear();
         self.duplicates.clear();
-        let root = self.root.clone();
-        self.scan(&root, "", &mut previous)?;
+        self.scan(&mut previous)?;
         self.scan_kinds()?;
         self.reference_keys = crate::citations::bib_entries(&self.references()?)
             .into_iter()
