@@ -33,7 +33,8 @@ const META_DIR: &str = ".sliver";
 const TMP_DIR: &str = ".sliver/tmp";
 const PKG_DIR: &str = ".sliver/pkg";
 const WORKSPACE_FILE: &str = ".sliver/workspace.json";
-const SETTINGS_FILE: &str = ".sliver/settings.json";
+/// The vault's settings, relative to its root.
+pub const SETTINGS_FILE: &str = ".sliver/settings.json";
 const THEME_FILE: &str = ".sliver/theme.typ";
 const ZETTELKASTEN_MARKER: &str = ".zettelkasten";
 const DEFAULT_ZETTELKASTEN: &str = "Zettelkasten";

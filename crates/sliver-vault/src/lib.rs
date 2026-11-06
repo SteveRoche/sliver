@@ -26,6 +26,6 @@ pub use theme::{THEME_PATH, theme_library};
 pub use uuid::Uuid;
 pub use vault::{
     AddressChange, CitationStyle, DeleteMode, FolderKind, FolderNode, LinkEdits, MovePlan,
-    NotePreview, NoteSummary, Placement, Preamble, Reference, Template, TreeNode, Vault,
-    VaultError,
+    NotePreview, NoteSummary, Placement, Preamble, Reference, SETTINGS_FILE, Template, TreeNode,
+    Vault, VaultError,
 };

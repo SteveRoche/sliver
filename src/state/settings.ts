@@ -93,7 +93,22 @@ function isValid(key: string, value: unknown): boolean {
   return typeof value !== 'number' || Number.isFinite(value);
 }
 
-const [settings, setStore] = createStore<Settings>({ ...DEFAULTS });
+declare global {
+  interface Window {
+    /** The last vault's theme, set by the backend before the page loads. */
+    __SLIVER_THEME__?: string;
+  }
+}
+
+/** The defaults, in the last vault's theme until a vault's settings load. */
+const startup: Settings = {
+  ...DEFAULTS,
+  ...(isValid('theme', window.__SLIVER_THEME__)
+    ? { theme: window.__SLIVER_THEME__ as Settings['theme'] }
+    : {}),
+};
+
+const [settings, setStore] = createStore<Settings>(startup);
 /** True while a vault is open, so there's somewhere to save to. */
 let loaded = false;
 
@@ -121,7 +136,8 @@ export async function loadSettings() {
 
 export function resetSettings() {
   loaded = false;
-  setStore({ ...DEFAULTS });
+  // Keeps the theme: a vault is about to open, and switching meanwhile flashes.
+  setStore({ ...DEFAULTS, theme: settings.theme });
 }
 
 /** Puts every setting of the open vault back to its default. */

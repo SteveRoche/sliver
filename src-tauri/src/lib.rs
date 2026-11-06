@@ -2,6 +2,7 @@ mod commands;
 #[cfg(target_os = "macos")]
 mod menu;
 mod state;
+mod window;
 mod zotero;
 
 use std::sync::Mutex;
@@ -18,6 +19,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(commands::OpenVault(Mutex::new(None)))
+        .setup(|app| Ok(window::create(app)?))
         .invoke_handler(tauri::generate_handler![
             commands::create_vault,
             commands::open_vault,

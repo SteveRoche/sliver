@@ -36,6 +36,7 @@ function App() {
       console.warn('could not reopen the last vault:', error);
     } finally {
       setStarting(false);
+      document.getElementById('startup')?.remove();
     }
   });
 

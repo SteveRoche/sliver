@@ -186,12 +186,14 @@ pub fn default_text(kind: Option<&str>, template: bool) -> String {
 }
 
 /// The starter text of a new preamble. The common one sets the preview's
-/// defaults: a tighter page margin and a larger font than Typst's.
+/// defaults: a tighter page margin and a larger font than Typst's, and more
+/// room below level-one headings (a note's title, in the default template).
 pub fn starter(kind: Option<&str>) -> String {
     let (scope, styles) = match kind {
         None => (
             "every note".to_owned(),
-            "  set page(margin: 12pt)\n  set text(size: 12pt)\n",
+            "  set page(margin: 12pt)\n  set text(size: 12pt)\n  \
+             show heading.where(level: 1): set block(below: 1.2em)\n",
         ),
         Some(kind) => (format!("every note of kind {}", string_literal(kind)), ""),
     };
