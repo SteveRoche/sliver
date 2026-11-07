@@ -1246,6 +1246,7 @@ export async function createNote(
   placement: Placement,
   title: string,
   kind?: string,
+  open = true,
 ) {
   const template = await vault.noteTemplate(kind);
   const { body, cursor } = expandTemplate(template, {
@@ -1261,7 +1262,7 @@ export async function createNote(
   // The body ends the note's text (see `create_note_of_kind`).
   if (cursor !== null) startCursors.set(note.id, body.length - cursor);
   await refreshTree();
-  openNote(note.id);
+  if (open) openNote(note.id);
   return note;
 }
 

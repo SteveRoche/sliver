@@ -129,6 +129,7 @@ async function linkToNewNote(
     changes: { from: pending.from, to: pending.to, insert },
     selection: { anchor: pending.from + insert.length },
   });
+  view.focus();
 }
 
 const NEW_NOTE_LABEL = 'New note';

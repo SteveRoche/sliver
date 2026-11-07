@@ -417,17 +417,17 @@ export async function followBrokenLink(source: NoteId, raw: string) {
 }
 
 /** Creates a note titled `title` where new notes go, asking for an address in the Zettelkasten. */
-async function noteWhereNewNotesGo(source: NoteId, title: string) {
+async function noteWhereNewNotesGo(source: NoteId, title: string, open = true) {
   const folder = newNoteFolder(source);
   let placement: Placement | null = { kind: 'unaddressed', folder };
   if (folder === zettelkasten()?.path) placement = await chooseAddress(null);
-  return placement && createNote(placement, title);
+  return placement && createNote(placement, title, undefined, open);
 }
 
 /**
  * Create a new note in `[[` completion in note `source`: asks for a
  * title (starting from what was typed) and creates the note where new
- * notes go. Resolves to the note, or null when cancelled.
+ * notes go, without opening it. Resolves to the note, or null when cancelled.
  */
 export async function newLinkedNote(source: NoteId, query: string) {
   const title = await prompt({
@@ -437,7 +437,8 @@ export async function newLinkedNote(source: NoteId, query: string) {
     confirm: 'Create',
   });
   if (title === null) return null;
-  return noteWhereNewNotesGo(source, title.trim());
+  // Stays on the linking note.
+  return noteWhereNewNotesGo(source, title.trim(), false);
 }
 
 /** "the next note after 1.2 Title", "an aside to ...", "a new sequence". */
