@@ -1,6 +1,6 @@
 import type { EditorView } from '@codemirror/view';
 import { createEffect, createResource, Match, on, Switch } from 'solid-js';
-import { followBrokenLink } from '../commands/app';
+import { followBrokenLink, newLinkedNote } from '../commands/app';
 import { pasteImages } from '../editor/attachments';
 import { citations, refreshCitations } from '../editor/citations';
 import { setDiagnostics } from '../editor/diagnostics';
@@ -72,6 +72,10 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
 
   const editing = typstEditing({
     notes: linkCandidates,
+    newNote: async query => {
+      const note = await newLinkedNote(props.id, query);
+      return note && (note.address ?? note.id);
+    },
     complete: async (text, position, explicit) =>
       (await session?.complete(text, position, explicit)) ?? null,
     signature: async (text, position) =>

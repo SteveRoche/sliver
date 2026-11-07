@@ -109,12 +109,33 @@ const theme = EditorView.theme({
     fontSize: '13px',
     maxHeight: '16em',
   },
-  '.cm-tooltip.cm-tooltip-autocomplete > ul > li': {
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > li, .cm-new-note-footer': {
     padding: '2px 8px',
+    lineHeight: '18px',
   },
-  '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-    backgroundColor: 'var(--selected)',
-    color: 'var(--fg)',
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected], .cm-new-note-footer[aria-selected]':
+    {
+      backgroundColor: 'var(--selected)',
+      color: 'var(--fg)',
+    },
+  // Five rows of 22px.
+  '.cm-tooltip.cm-link-menu > ul': { maxHeight: '110px' },
+  // Shown by the footer instead. Positioned against the tooltip, at the
+  // list's top, so selecting it never scrolls the list.
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-new-note-option': {
+    position: 'absolute',
+    top: '0',
+    height: '0',
+    padding: '0',
+    visibility: 'hidden',
+  },
+  '.cm-new-note-footer': {
+    listStyle: 'none',
+    borderTop: '1px solid var(--border)',
+    fontFamily: 'var(--mono)',
+    fontSize: '13px',
+    whiteSpace: 'nowrap',
+    cursor: 'pointer',
   },
   '.cm-completionDetail': { color: 'var(--muted)', fontStyle: 'normal' },
   '.cm-completionMatchedText': {

@@ -32,6 +32,8 @@ export interface TypstEditingOptions {
   ): Promise<Hover | null>;
   /** Notes `[[` can link to; none by default. */
   notes?: () => LinkCandidate[];
+  /** Creates a note from `[[` completion, resolving to its link target. */
+  newNote?: (query: string) => Promise<string | null>;
   /** Zotero items for `@` completion; none by default. */
   zotero?: (query: string) => Promise<CitationCandidate[]>;
   /** Warn about paths that don't start at the vault root (in notes). */
@@ -47,6 +49,7 @@ export const typstEditing = (options: TypstEditingOptions): Extension => [
   diagnostics(),
   completion({
     notes: options.notes ?? (() => []),
+    newNote: options.newNote,
     zotero: options.zotero,
     typst: options.complete,
   }),
