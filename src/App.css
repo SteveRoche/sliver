@@ -1008,6 +1008,12 @@ button.primary {
   margin-top: 12px;
 }
 
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
 .field input,
 .setting-select {
   padding: 6px 8px;
@@ -1215,6 +1221,11 @@ button.settings-nav-item.active {
 .setting-select {
   flex-shrink: 0;
   max-width: 280px;
+}
+
+.field-inline .setting-select {
+  flex: 1;
+  max-width: none;
 }
 
 .setting-number {
