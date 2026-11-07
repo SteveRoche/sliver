@@ -1,6 +1,6 @@
 import { ask, message, open } from '@tauri-apps/plugin-dialog';
 import { openPalette, pick } from '../components/Palette';
-import { prompt } from '../components/Prompt';
+import { prompt, promptWithChoice } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
 import {
   clearMarks,
@@ -341,7 +341,13 @@ function newNoteFolder(current: NoteId | null): string {
 
 /** Mod+N: a note where the vault's settings say new notes go. */
 async function newNoteDefault(kind?: string) {
-  await newNoteIn(newNoteFolder(activeNote()), kind);
+  const result = await promptWithChoice({
+    title: kind ? `New note (${kind})` : 'New note',
+    label: 'Title',
+    confirm: 'Create',
+    choice: folderChoice(newNoteFolder(activeNote())),
+  });
+  if (result) await noteInFolder(result.choice, result.text.trim(), true, kind);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -417,28 +423,48 @@ export async function followBrokenLink(source: NoteId, raw: string) {
 }
 
 /** Creates a note titled `title` where new notes go, asking for an address in the Zettelkasten. */
-async function noteWhereNewNotesGo(source: NoteId, title: string, open = true) {
-  const folder = newNoteFolder(source);
+async function noteWhereNewNotesGo(source: NoteId, title: string) {
+  return noteInFolder(newNoteFolder(source), title);
+}
+
+/** Creates a note titled `title` in `folder`, asking for an address in the Zettelkasten. */
+async function noteInFolder(
+  folder: string,
+  title: string,
+  open = true,
+  kind?: string,
+) {
   let placement: Placement | null = { kind: 'unaddressed', folder };
   if (folder === zettelkasten()?.path) placement = await chooseAddress(null);
-  return placement && createNote(placement, title, undefined, open);
+  return placement && createNote(placement, title, kind, open);
 }
+
+/** The "In:" folder dropdown of the new-note prompts, starting at `initial`. */
+const folderChoice = (initial: string) => ({
+  label: 'In:',
+  options: ['', ...allFolders().map(f => f.path)].map(path => ({
+    label: folderLabel(path),
+    value: path,
+  })),
+  initial,
+});
 
 /**
  * Create a new note in `[[` completion in note `source`: asks for a
- * title (starting from what was typed) and creates the note where new
- * notes go, without opening it. Resolves to the note, or null when cancelled.
+ * title (starting from what was typed) and a folder, and creates the note without opening it.
+ * Resolves to the note, or null when cancelled.
  */
 export async function newLinkedNote(source: NoteId, query: string) {
-  const title = await prompt({
+  const result = await promptWithChoice({
     title: 'New linked note',
     label: 'Title',
     initial: query.trim(),
     confirm: 'Create',
+    choice: folderChoice(newNoteFolder(source)),
   });
-  if (title === null) return null;
+  if (result === null) return null;
   // Stays on the linking note.
-  return noteWhereNewNotesGo(source, title.trim(), false);
+  return noteInFolder(result.choice, result.text.trim(), false);
 }
 
 /** "the next note after 1.2 Title", "an aside to ...", "a new sequence". */
