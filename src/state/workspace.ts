@@ -9,7 +9,11 @@ import {
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { linksAt } from '../editor/analysis';
-import { forgetActiveLink, savedText } from '../editor/wikilinks';
+import {
+  forgetActiveLink,
+  retargetLinks,
+  savedText,
+} from '../editor/wikilinks';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -673,14 +677,12 @@ function createSession(id: NoteId): NoteSession {
     },
     retarget(from, to) {
       if (!view) return;
-      const changes = linksAt(view.state)
-        .filter(link => sameTarget(link.target, from))
-        .map(link => ({
-          from: link.targetFrom,
-          to: link.targetTo,
-          insert: to,
-        }));
-      if (changes.length > 0) view.dispatch({ changes });
+      const links = linksAt(view.state).filter(link =>
+        sameTarget(link.target, from),
+      );
+      if (links.length > 0) {
+        view.dispatch(retargetLinks(view.state, links, to));
+      }
     },
     sourceTarget(target) {
       if (!view) return undefined;

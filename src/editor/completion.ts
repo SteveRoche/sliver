@@ -14,6 +14,7 @@ import {
   type Extension,
   StateEffect,
   StateField,
+  type TransactionSpec,
 } from '@codemirror/state';
 import { type EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import ALargeSmall from 'lucide-solid/icons/a-large-small';
@@ -33,6 +34,7 @@ import { type Component, createRoot } from 'solid-js';
 import { overlayScrollbar } from '../components/scrollbars';
 import type { CompletionItem, Completions, Position } from '../typst/protocol';
 import { inRaw } from './analysis';
+import { linkTarget } from './wikilinks';
 
 export interface LinkCandidate {
   label: string;
@@ -114,7 +116,8 @@ async function linkToNewNote(
 ) {
   const query = view.state.sliceDoc(from, to);
   const rest = linkRest(view.state, to);
-  const end = rest.closed ? rest.end + (rest.bar ? 0 : 2) : to;
+  // Up to the `|` before custom text, else past the `]]`.
+  const end = rest.close === null ? to : rest.bar ? rest.end : rest.close;
   const id = ++pendingIds;
   view.dispatch({
     effects: addPending.of({ id, from: from - 2, to: end }),
@@ -125,28 +128,63 @@ async function linkToNewNote(
   view.dispatch({ effects: removePending.of(id) });
   // Unless the link's text was deleted meanwhile.
   if (target === null || !pending || pending.to - pending.from < 2) return;
-  // Before a `|`, the link's custom text and `]]` stay.
-  const insert = rest.bar ? `[[${target}` : `[[${target}]]`;
-  view.dispatch({
-    changes: { from: pending.from, to: pending.to, insert },
-    selection: { anchor: pending.from + insert.length },
-  });
+  // The pending range ends where the target's replacement does.
+  completeLink(view, target, pending.from + 2, pending.to, undefined);
   view.focus();
 }
 
 /**
  * What follows the cursor in a link being completed: the rest of its
- * target, which the completion replaces too (`end`), and whether `]]` or
- * `|` (`bar`) comes next (`closed`). Outside a closed link, `end` is the
- * cursor.
+ * target, which the completion replaces too (`end`), whether custom text
+ * comes next (`bar`), and where the link's `]]` ends (`close`), or null
+ * when the link isn't closed: then `end` is the cursor.
  */
 function linkRest(state: EditorState, at: number) {
   const line = state.doc.lineAt(at);
   const rest = state.sliceDoc(at, line.to);
   const word = /^[^[\]|\n]*/.exec(rest)?.[0] ?? '';
-  const bar = rest.startsWith('|', word.length);
-  const closed = bar || rest.startsWith(']]', word.length);
-  return { end: closed ? at + word.length : at, closed, bar };
+  const closing = /^(?:\|[^[\]\n]*)?\]\]/.exec(rest.slice(word.length));
+  if (!closing) return { end: at, bar: false, close: null };
+  return {
+    end: at + word.length,
+    bar: closing[0].startsWith('|'),
+    close: at + word.length + closing[0].length,
+  };
+}
+
+/**
+ * Puts `target` into the link being completed: the text after `[[` at
+ * `from` up to `to` and the rest of the target, closing the link if it
+ * isn't. One undoable step that also records which note the link names
+ * (`linkTarget`), so undo goes back to the typed text and forgets it.
+ */
+function completeLink(
+  view: EditorView,
+  target: string,
+  from: number,
+  to: number,
+  annotations: TransactionSpec['annotations'],
+) {
+  const { state } = view;
+  const rest = linkRest(state, to);
+  const form = linkTarget(state, target);
+  const changes = state.changes({
+    from,
+    to: rest.end,
+    insert: rest.close === null ? `${form.text}]]` : form.text,
+  });
+  const end =
+    rest.close === null
+      ? from + form.text.length + 2
+      : changes.mapPos(rest.close);
+  view.dispatch({
+    changes,
+    // Past the link's `]]`, or before its custom text.
+    selection: { anchor: rest.bar ? from + form.text.length : end },
+    effects: form.active(from - 2, end),
+    annotations,
+    userEvent: 'input.complete',
+  });
 }
 
 const NEW_NOTE_LABEL = 'New note';
@@ -158,18 +196,14 @@ function wikilinkSource(options: CompletionOptions) {
     const notes: Completion[] = options.notes().map(note => ({
       label: note.label,
       type: 'wikilink',
-      apply: (view, completion, from, to) => {
-        const { target } = note;
-        const rest = linkRest(view.state, to);
-        const insert = rest.closed ? target : `${target}]]`;
-        view.dispatch({
-          changes: { from, to: rest.end, insert },
-          // Past the link's `]]` (auto-closed, or already there).
-          selection: { anchor: from + target.length + (rest.bar ? 0 : 2) },
-          annotations: pickedCompletion.of(completion),
-          userEvent: 'input.complete',
-        });
-      },
+      apply: (view, completion, from, to) =>
+        completeLink(
+          view,
+          note.target,
+          from,
+          to,
+          pickedCompletion.of(completion),
+        ),
     }));
     const create = options.newNote;
     if (create) {
