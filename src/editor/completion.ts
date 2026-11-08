@@ -9,8 +9,9 @@ import {
   selectedCompletionIndex,
   snippet,
 } from '@codemirror/autocomplete';
+import { isolateHistory } from '@codemirror/commands';
 import {
-  type EditorState,
+  EditorState,
   type Extension,
   StateEffect,
   StateField,
@@ -420,12 +421,24 @@ const menuChrome = ViewPlugin.fromClass(
 );
 
 /**
+ * Every accepted completion (Typst's, snippets, wikilinks) is an undo step
+ * of its own, in Vim mode too: history would otherwise join text typed
+ * right after it, so one undo took both.
+ */
+const ownUndoStep = EditorState.transactionExtender.of(tr =>
+  tr.isUserEvent('input.complete')
+    ? { annotations: isolateHistory.of('full') }
+    : null,
+);
+
+/**
  * Autocomplete for wikilink targets after `[[`, for Typst itself, and for
  * citation keys from the Zotero library after `@`.
  */
 export function completion(options: CompletionOptions): Extension {
   return [
     pendingLinks,
+    ownUndoStep,
     menuChrome,
     autocompletion({
       override: [
