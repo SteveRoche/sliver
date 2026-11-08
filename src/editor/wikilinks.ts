@@ -1,4 +1,4 @@
-import { isolateHistory } from '@codemirror/commands';
+import { invertedEffects, isolateHistory } from '@codemirror/commands';
 import {
   EditorSelection,
   type EditorState,
@@ -70,7 +70,26 @@ interface ActiveLink {
   orphan: boolean;
 }
 
-const setActive = StateEffect.define<ActiveLink | null>();
+const setActive = StateEffect.define<ActiveLink | null>({
+  map(value, mapping) {
+    if (!value) return value;
+    const from = mapping.mapPos(value.from, 1);
+    const to = mapping.mapPos(value.to, -1);
+    return from < to ? { ...value, from, to } : null;
+  },
+});
+
+/**
+ * Undo and redo restore the link state along with the text of a step that
+ * put a link in (a completion, a retarget), so undoing one forgets which
+ * note its title stood for. Only steps that change the text: the rest
+ * (entering, leaving) aren't undo steps.
+ */
+const linkHistory = invertedEffects.of(tr =>
+  tr.docChanged && tr.effects.some(e => e.is(setActive))
+    ? [setActive.of(tr.startState.field(activeField))]
+    : [],
+);
 
 /** Drops the active link's state, e.g. when the file replaced the text. */
 export const forgetActiveLink = setActive.of(null);
@@ -155,15 +174,77 @@ export function followLinkAtCursor(view: EditorView): boolean {
 }
 
 /** Replaces the uuid `target` by its note's title and makes `link` active. */
+/** What stands in the document for uuid `target` while its link is active. */
+function shownFor(options: WikilinkOptions, target: string) {
+  const title = options.title(target);
+  const former = title === null ? options.formerTitle(target) : null;
+  return {
+    shown: label(title ?? former ?? 'Missing note'),
+    orphan: former !== null,
+  };
+}
+
+/**
+ * Text and link state for putting `target` (an address or uuid) into a link
+ * the cursor will be in: a uuid goes in as its note's title, standing for
+ * the uuid (see `ActiveLink`). Dispatch the text and `active(from, to)`, the
+ * link's bounds afterwards, in one undoable step, which `linkHistory`
+ * makes undo forget the link along with the text.
+ */
+export function linkTarget(state: EditorState, target: string) {
+  const options = state.facet(optionsFacet);
+  const uuid = UUID.test(target) && options !== null;
+  const { shown, orphan } = uuid
+    ? shownFor(options, target)
+    : { shown: target, orphan: false };
+  return {
+    text: shown,
+    active: (from: number, to: number) =>
+      setActive.of({
+        from,
+        to,
+        original: target,
+        shown,
+        expanded: uuid,
+        orphan,
+      }),
+  };
+}
+
+/**
+ * Points `links` at `target` in one undoable step; the one the cursor is
+ * in gets its editing form (`linkTarget`).
+ */
+export function retargetLinks(
+  state: EditorState,
+  links: { from: number; to: number; targetFrom: number; targetTo: number }[],
+  target: string,
+): TransactionSpec {
+  const head = state.selection.main.head;
+  const here = links.find(l => l.from <= head && head <= l.to);
+  const form = linkTarget(state, target);
+  const changes = state.changes(
+    links.map(l => ({
+      from: l.targetFrom,
+      to: l.targetTo,
+      insert: l === here ? form.text : target,
+    })),
+  );
+  return {
+    changes,
+    effects: here
+      ? form.active(changes.mapPos(here.from, -1), changes.mapPos(here.to, 1))
+      : [],
+  };
+}
+
 function expand(
   state: EditorState,
   options: WikilinkOptions,
   link: { from: number; to: number },
   target: { target: string; from: number; to: number },
 ): TransactionSpec {
-  const title = options.title(target.target);
-  const former = title === null ? options.formerTitle(target.target) : null;
-  const shown = label(title ?? former ?? 'Missing note');
+  const { shown, orphan } = shownFor(options, target.target);
   const delta = shown.length - (target.to - target.from);
   // A position inside the uuid keeps its distance to the nearer end.
   const map = (pos: number) => {
@@ -187,7 +268,7 @@ function expand(
       original: target.target,
       shown,
       expanded: true,
-      orphan: former !== null,
+      orphan,
     }),
     annotations: Transaction.addToHistory.of(false),
   };
@@ -420,5 +501,5 @@ export function wikilinks(options: WikilinkOptions): Extension {
     },
   });
 
-  return [optionsFacet.of(options), activeField, display, clicks];
+  return [optionsFacet.of(options), activeField, linkHistory, display, clicks];
 }
