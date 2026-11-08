@@ -15,6 +15,8 @@ interface PromptRequest {
   initial: string;
   confirm: string;
   choice?: PromptChoice;
+  /** Why the answer can't be taken (shown under the field), or null. */
+  validate?: (text: string, choice: string) => string | null;
   resolve: (value: { text: string; choice: string } | null) => void;
 }
 
@@ -27,6 +29,7 @@ export function promptWithChoice(options: {
   initial?: string;
   confirm?: string;
   choice: PromptChoice;
+  validate?: (text: string, choice: string) => string | null;
 }): Promise<{ text: string; choice: string } | null> {
   request()?.resolve(null);
   return new Promise(resolve =>
@@ -45,6 +48,7 @@ export async function prompt(options: {
   label: string;
   initial?: string;
   confirm?: string;
+  validate?: (text: string) => string | null;
 }): Promise<string | null> {
   request()?.resolve(null);
   const result = await new Promise<{ text: string } | null>(resolve =>
@@ -57,10 +61,16 @@ export async function prompt(options: {
 export function PromptHost() {
   let input: HTMLInputElement | undefined;
   let select: HTMLSelectElement | undefined;
+  const [error, setError] = createSignal<string | null>(null);
 
   const finish = (value: { text: string; choice: string } | null) => {
     request()?.resolve(value);
     setRequest(null);
+    setError(null);
+  };
+  const check = () => {
+    const validate = request()?.validate;
+    setError(validate?.(input?.value ?? '', select?.value ?? '') ?? null);
   };
 
   return (
@@ -80,6 +90,8 @@ export function PromptHost() {
                 <form
                   onSubmit={event => {
                     event.preventDefault();
+                    check();
+                    if (error()) return;
                     finish({
                       text: input?.value ?? '',
                       choice: select?.value ?? '',
@@ -97,6 +109,7 @@ export function PromptHost() {
                         queueMicrotask(() => el.select());
                       }}
                       value={req().initial}
+                      onInput={() => error() && check()}
                     />
                   </label>
                   <Show when={req().choice}>
@@ -108,6 +121,7 @@ export function PromptHost() {
                             select = el;
                           }}
                           class="setting-select"
+                          onChange={() => error() && check()}
                         >
                           <For each={choice().options}>
                             {option => (
@@ -122,6 +136,9 @@ export function PromptHost() {
                         </select>
                       </label>
                     )}
+                  </Show>
+                  <Show when={error()}>
+                    {message => <p class="field-error">{message()}</p>}
                   </Show>
                   <div class="dialog-actions">
                     <button type="button" onClick={() => finish(null)}>

@@ -102,7 +102,7 @@ const pendingLinks = StateField.define<Pending[]>({
 });
 
 /**
- * Replaces the unfinished link `[[query` (and a `]]` after it) at
+ * Replaces the unfinished link `[[query` (and the rest of its target, and a `]]` after it) at
  * `from`..`to` with a link to a new note, once `create` has made it.
  */
 async function linkToNewNote(
@@ -113,7 +113,8 @@ async function linkToNewNote(
   to: number,
 ) {
   const query = view.state.sliceDoc(from, to);
-  const end = view.state.sliceDoc(to, to + 2) === ']]' ? to + 2 : to;
+  const rest = linkRest(view.state, to);
+  const end = rest.closed ? rest.end + (rest.bar ? 0 : 2) : to;
   const id = ++pendingIds;
   view.dispatch({
     effects: addPending.of({ id, from: from - 2, to: end }),
@@ -124,12 +125,28 @@ async function linkToNewNote(
   view.dispatch({ effects: removePending.of(id) });
   // Unless the link's text was deleted meanwhile.
   if (target === null || !pending || pending.to - pending.from < 2) return;
-  const insert = `[[${target}]]`;
+  // Before a `|`, the link's custom text and `]]` stay.
+  const insert = rest.bar ? `[[${target}` : `[[${target}]]`;
   view.dispatch({
     changes: { from: pending.from, to: pending.to, insert },
     selection: { anchor: pending.from + insert.length },
   });
   view.focus();
+}
+
+/**
+ * What follows the cursor in a link being completed: the rest of its
+ * target, which the completion replaces too (`end`), and whether `]]` or
+ * `|` (`bar`) comes next (`closed`). Outside a closed link, `end` is the
+ * cursor.
+ */
+function linkRest(state: EditorState, at: number) {
+  const line = state.doc.lineAt(at);
+  const rest = state.sliceDoc(at, line.to);
+  const word = /^[^[\]|\n]*/.exec(rest)?.[0] ?? '';
+  const bar = rest.startsWith('|', word.length);
+  const closed = bar || rest.startsWith(']]', word.length);
+  return { end: closed ? at + word.length : at, closed, bar };
 }
 
 const NEW_NOTE_LABEL = 'New note';
@@ -138,11 +155,21 @@ function wikilinkSource(options: CompletionOptions) {
   return (ctx: CompletionContext): CompletionResult | null => {
     const open = ctx.matchBefore(OPEN_LINK);
     if (!open || inRaw(ctx.state, open.from)) return null;
-    const closed = ctx.state.sliceDoc(ctx.pos, ctx.pos + 2) === ']]';
     const notes: Completion[] = options.notes().map(note => ({
       label: note.label,
       type: 'wikilink',
-      apply: closed ? note.target : `${note.target}]]`,
+      apply: (view, completion, from, to) => {
+        const { target } = note;
+        const rest = linkRest(view.state, to);
+        const insert = rest.closed ? target : `${target}]]`;
+        view.dispatch({
+          changes: { from, to: rest.end, insert },
+          // Past the link's `]]` (auto-closed, or already there).
+          selection: { anchor: from + target.length + (rest.bar ? 0 : 2) },
+          annotations: pickedCompletion.of(completion),
+          userEvent: 'input.complete',
+        });
+      },
     }));
     const create = options.newNote;
     if (create) {

@@ -7,7 +7,7 @@ import { setDiagnostics } from '../editor/diagnostics';
 import { followCursor } from '../editor/sync';
 import { typstEditing } from '../editor/typst';
 import { setVimActions } from '../editor/vimCommands';
-import { refreshWikilinks, wikilinks } from '../editor/wikilinks';
+import { refreshWikilinks, savedText, wikilinks } from '../editor/wikilinks';
 import {
   hasReference,
   openInZotero,
@@ -28,6 +28,7 @@ import {
   setPreviewFocus,
   tabOf,
   takeStartCursor,
+  titleKey,
   tree,
 } from '../state/workspace';
 import type { NoteId } from '../vault/api';
@@ -57,6 +58,17 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
       const id = resolveTarget(target);
       if (id) openNote(id);
       else void followBrokenLink(props.id, target);
+    },
+    resolveTitle: text => {
+      const key = titleKey(text);
+      const titled = allNotes().filter(
+        n => n.title && titleKey(n.title) === key,
+      );
+      // Titles are unique within a folder: prefer the linking note's.
+      const folder = noteById(props.id)?.folder;
+      const note =
+        titled.length === 1 ? titled[0] : titled.find(n => n.folder === folder);
+      return note ? (note.address ?? note.id) : null;
     },
   });
   const [text] = createResource(() => session?.text);
@@ -147,7 +159,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
         {s => (
           <Editor
             initialDoc={text() ?? ''}
-            onChange={next => s().edit(next)}
+            onChange={next => s().edit(view ? savedText(view.state) : next)}
             onView={attach}
             extensions={[editing, links, cites, follow, paste]}
             vim={settings.vim}

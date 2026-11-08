@@ -1014,6 +1014,11 @@ button.primary {
   gap: 8px;
 }
 
+.field-error {
+  margin: 8px 0 0;
+  color: var(--error);
+}
+
 .field input,
 .setting-select {
   padding: 6px 8px;

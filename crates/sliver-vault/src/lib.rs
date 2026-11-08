@@ -27,7 +27,8 @@ pub use syntax::{Analysis, CitationRange, LinkRange, analyze};
 pub use theme::{THEME_PATH, theme_library};
 pub use uuid::Uuid;
 pub use vault::{
-    AddressChange, AddressPlace, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderKind,
-    FolderNode, LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan, Placement,
-    Preamble, Reference, SETTINGS_FILE, SectionNode, Template, TreeNode, Vault, VaultError,
+    AddressChange, AddressPlace, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderDeletion,
+    FolderKind, FolderNode, LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan,
+    Placement, Preamble, Reference, SETTINGS_FILE, SectionNode, Template, TreeNode, Vault,
+    VaultError,
 };

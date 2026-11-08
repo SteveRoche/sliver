@@ -154,6 +154,15 @@ pub struct SectionNode {
 
 /// Where [`Vault::place_for_address`] puts a note: `placement`, which
 /// gives it `address`.
+/// What [`Vault::delete_folder`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FolderDeletion {
+    /// Notes that went with the folder.
+    pub removed: Vec<Uuid>,
+    /// Notes whose links to those were rewritten.
+    pub changed: Vec<Uuid>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AddressPlace {
     pub placement: Placement,
@@ -606,13 +615,27 @@ impl Vault {
     /// The whole vault as a folder tree rooted at the vault root (name `""`).
     pub fn tree(&self) -> FolderNode {
         let mut by_folder: HashMap<&str, Vec<&NoteSummary>> = HashMap::new();
+        let mut titles: HashMap<(&str, String), Vec<Uuid>> = HashMap::new();
         for note in self.notes.values() {
             by_folder.entry(&note.folder).or_default().push(note);
+            if let Some(key) = note.title.as_deref().and_then(title_key) {
+                titles.entry((&note.folder, key)).or_default().push(note.id);
+            }
         }
-        self.folder_node("", &by_folder)
+        let clashes: HashSet<Uuid> = titles
+            .into_values()
+            .filter(|ids| ids.len() > 1)
+            .flatten()
+            .collect();
+        self.folder_node("", &by_folder, &clashes)
     }
 
-    fn folder_node(&self, path: &str, by_folder: &HashMap<&str, Vec<&NoteSummary>>) -> FolderNode {
+    fn folder_node(
+        &self,
+        path: &str,
+        by_folder: &HashMap<&str, Vec<&NoteSummary>>,
+        clashes: &HashSet<Uuid>,
+    ) -> FolderNode {
         let is_zettelkasten = self.zettelkasten.as_deref() == Some(path);
         let mut subfolders: Vec<&String> = self
             .folders
@@ -622,7 +645,7 @@ impl Vault {
         subfolders.sort_by_key(|f| (folder_name(f).to_lowercase(), *f));
         let notes = by_folder.get(path).map_or(&[][..], Vec::as_slice);
         let (sections, loose) = if is_zettelkasten {
-            self.address_tree(notes)
+            self.address_tree(notes, clashes)
         } else {
             (Vec::new(), Vec::new())
         };
@@ -649,26 +672,28 @@ impl Vault {
             warning,
             folders: subfolders
                 .into_iter()
-                .map(|f| self.folder_node(f, by_folder))
+                .map(|f| self.folder_node(f, by_folder, clashes))
                 .collect(),
             notes: if is_zettelkasten {
                 loose
             } else {
                 let mut notes = notes.to_vec();
                 notes.sort_by(|x, y| x.title.cmp(&y.title).then(x.id.cmp(&y.id)));
-                notes.into_iter().map(|n| self.leaf(n)).collect()
+                notes.into_iter().map(|n| self.leaf(n, clashes)).collect()
             },
             assets: self.assets_in(path),
             sections,
         }
     }
 
-    fn leaf(&self, note: &NoteSummary) -> TreeNode {
+    fn leaf(&self, note: &NoteSummary, clashes: &HashSet<Uuid>) -> TreeNode {
         let warning = if let Some(paths) = self.duplicates.get(&note.id) {
             Some(format!(
                 "Other files with this note's id are ignored: {}",
                 paths.join(", ")
             ))
+        } else if clashes.contains(&note.id) {
+            Some("Another note in this folder has the same title".to_owned())
         } else if note.address.is_some() && !self.in_zettelkasten(note) {
             Some("Has an address but isn't in the Zettelkasten".to_owned())
         } else if let Some(address) = &note.address
@@ -699,7 +724,11 @@ impl Vault {
     /// nearest existing ancestor in address order; then the notes of
     /// sequences outside any section the same way, and the notes without a
     /// valid address by title.
-    fn address_tree(&self, notes: &[&NoteSummary]) -> (Vec<SectionNode>, Vec<TreeNode>) {
+    fn address_tree(
+        &self,
+        notes: &[&NoteSummary],
+        clashes: &HashSet<Uuid>,
+    ) -> (Vec<SectionNode>, Vec<TreeNode>) {
         let mut addressed: Vec<(Address, &NoteSummary)> = Vec::new();
         let mut loose: Vec<&NoteSummary> = Vec::new();
         for &note in notes {
@@ -741,16 +770,17 @@ impl Vault {
                 i: usize,
                 addressed: &[(Address, &NoteSummary)],
                 children: &[Vec<usize>],
+                clashes: &HashSet<Uuid>,
             ) -> TreeNode {
                 TreeNode {
                     children: children[i]
                         .iter()
-                        .map(|&c| go(vault, c, addressed, children))
+                        .map(|&c| go(vault, c, addressed, children, clashes))
                         .collect(),
-                    ..vault.leaf(addressed[i].1)
+                    ..vault.leaf(addressed[i].1, clashes)
                 }
             }
-            go(self, i, &addressed, &children)
+            go(self, i, &addressed, &children, clashes)
         };
         let mut sections: Vec<SectionNode> = self
             .section_names
@@ -774,7 +804,7 @@ impl Vault {
             }
         }
         sections.retain(|s| !s.notes.is_empty());
-        outside.extend(loose.into_iter().map(|note| self.leaf(note)));
+        outside.extend(loose.into_iter().map(|note| self.leaf(note, clashes)));
         (sections, outside)
     }
 
@@ -819,6 +849,7 @@ impl Vault {
                 (zettelkasten, Some(address.to_string()))
             }
         };
+        self.require_title_free(&folder, title.as_deref(), None)?;
         let header = format_header(&NoteHeader {
             title,
             address,
@@ -836,14 +867,20 @@ impl Vault {
     }
 
     pub fn rename_note(&mut self, id: Uuid, title: &str) -> Result<NoteSummary> {
+        let folder = self.note(id)?.folder.clone();
+        self.require_title_free(&folder, Some(title), Some(id))?;
         let text = set_title(&self.read_note(id)?, title)?;
         self.write_note(id, &text)
     }
 
-    pub fn delete_note(&mut self, id: Uuid, mode: DeleteMode) -> Result<()> {
+    /// Deletes note `id`; links to it then name its title. Returns every
+    /// note whose file changed.
+    pub fn delete_note(&mut self, id: Uuid, mode: DeleteMode) -> Result<Vec<Uuid>> {
         remove_path(&self.note_path(id)?, mode)?;
+        let orphaned = self.orphaned_links(&[id]);
         self.forget(id);
-        self.prune_sections()
+        self.prune_sections()?;
+        self.unlink(&orphaned)
     }
 
     /// Addresses of every note except `except`, wherever they are: a stray
@@ -1361,9 +1398,10 @@ impl Vault {
         })
     }
 
-    /// Deletes a folder with everything in it and returns the ids of the
-    /// notes that went with it. The Zettelkasten can't be deleted.
-    pub fn delete_folder(&mut self, path: &str, mode: DeleteMode) -> Result<Vec<Uuid>> {
+    /// Deletes a folder with everything in it; links to its notes then name
+    /// their titles. Returns the ids of the notes that went with it and of
+    /// those whose files changed. The Zettelkasten can't be deleted.
+    pub fn delete_folder(&mut self, path: &str, mode: DeleteMode) -> Result<FolderDeletion> {
         if path.is_empty() {
             return Err(VaultError::Refused(
                 "the vault root can't be deleted".into(),
@@ -1387,13 +1425,15 @@ impl Vault {
             .filter(|n| inside(&n.folder))
             .map(|n| n.id)
             .collect();
+        let orphaned = self.orphaned_links(&removed);
         for id in &removed {
             self.forget(*id);
         }
         self.folders.retain(|f| !inside(f));
         self.assets.retain(|a, _| !inside(parent_folder(a)));
         self.extra_zettelkasten.retain(|f| !inside(f));
-        Ok(removed)
+        let changed = self.unlink(&orphaned)?;
+        Ok(FolderDeletion { removed, changed })
     }
 
     /// Makes `path` the Zettelkasten. Only for vaults that have none.
@@ -1420,6 +1460,8 @@ impl Vault {
         let from = self.note_path(id)?;
         let to = self.file_path(folder, id);
         if from != to {
+            let title = self.note(id)?.title.clone();
+            self.require_title_free(folder, title.as_deref(), Some(id))?;
             fs::rename(&from, &to)?;
             self.stamps.insert(id, stamp_of(&fs::metadata(&to)?));
             if let Some(note) = self.notes.get_mut(&id) {
@@ -1430,6 +1472,36 @@ impl Vault {
     }
 
     // --- files ---
+
+    /// Refuses a note titled `title` in `folder` when another note there
+    /// (other than `except`) has that title. Untitled notes never clash.
+    fn require_title_free(
+        &self,
+        folder: &str,
+        title: Option<&str>,
+        except: Option<Uuid>,
+    ) -> Result<()> {
+        let Some(key) = title.and_then(title_key) else {
+            return Ok(());
+        };
+        let taken = self.notes.values().any(|n| {
+            Some(n.id) != except
+                && n.folder == folder
+                && n.title.as_deref().and_then(title_key).as_ref() == Some(&key)
+        });
+        if !taken {
+            return Ok(());
+        }
+        let place = if folder.is_empty() {
+            "the vault root".to_owned()
+        } else {
+            format!("{folder:?}")
+        };
+        Err(VaultError::Refused(format!(
+            "a note titled {:?} is already in {place}",
+            title.unwrap_or_default().trim()
+        )))
+    }
 
     /// Drops note `id` from the index.
     fn forget(&mut self, id: Uuid) {
@@ -1542,6 +1614,22 @@ impl Vault {
     pub fn save_package(&self, spec: &str, tar_gz: &[u8]) -> Result<()> {
         self.atomic_write(&self.package_path(spec)?, tar_gz)
     }
+}
+
+/// A title as links match it: trimmed, case-insensitive, curly quotes as
+/// straight ones. None for a blank title.
+fn title_key(title: &str) -> Option<String> {
+    let key: String = title
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            c => c,
+        })
+        .collect::<String>()
+        .to_lowercase();
+    (!key.is_empty()).then_some(key)
 }
 
 fn remove_path(path: &Path, mode: DeleteMode) -> Result<()> {
@@ -1910,6 +1998,38 @@ mod tests {
     }
 
     #[test]
+    fn titles_are_unique_within_a_folder() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        vault.create_folder("", "Inbox").unwrap();
+        let root = |folder: &str| Placement::Unaddressed {
+            folder: folder.into(),
+        };
+        let first = vault.create_note(Some("Idea".into()), root("")).unwrap();
+        assert!(matches!(
+            vault.create_note(Some(" idea ".into()), root("")),
+            Err(VaultError::Refused(_))
+        ));
+        let other = vault
+            .create_note(Some("Idea".into()), root("Inbox"))
+            .unwrap();
+        vault.create_note(None, root("")).unwrap();
+        vault.create_note(None, root("")).unwrap();
+
+        let second = vault.create_note(Some("Other".into()), root("")).unwrap();
+        assert!(matches!(
+            vault.rename_note(second.id, "IDEA"),
+            Err(VaultError::Refused(_))
+        ));
+        vault.rename_note(first.id, "idea").unwrap();
+        assert!(matches!(
+            vault.move_to_folder(other.id, ""),
+            Err(VaultError::Refused(_))
+        ));
+        assert_eq!(vault.note(other.id).unwrap().folder, "Inbox");
+    }
+
+    #[test]
     fn permanent_delete_removes_file_and_index_entry() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
@@ -2210,7 +2330,10 @@ mod tests {
             Err(VaultError::Refused(_))
         ));
         assert_eq!(
-            vault.delete_folder("Old", DeleteMode::Permanent).unwrap(),
+            vault
+                .delete_folder("Old", DeleteMode::Permanent)
+                .unwrap()
+                .removed,
             vec![gone.id]
         );
         assert!(!dir.0.join("Old").exists());
