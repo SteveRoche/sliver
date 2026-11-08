@@ -39,6 +39,7 @@ import {
   deleteNote,
   focusedPane,
   focusedTabs,
+  formerTitle,
   inZettelkasten,
   kinds,
   layout,
@@ -53,7 +54,6 @@ import {
   openNote,
   openVault,
   placementFolder,
-  plainQuotes,
   previewLayout,
   refreshLinks,
   renameAsset,
@@ -71,6 +71,7 @@ import {
   setZettelkasten,
   splitFocused,
   titleClash,
+  titleKey,
   togglePreview,
   toggleReading,
   unmarkSection,
@@ -370,38 +371,35 @@ async function newNoteDefault(kind?: string) {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Mod-click on a broken wikilink in note `source`. A title links to the
- * note with that title (asked when there are several), else creates it
- * in the vault root. An address creates the note there when that leaves
- * no gap in the Zettelkasten, else offers the address that doesn't (or a
- * note titled as the target). Either way the note's links to the target
- * then point at the note (its address, or uuid without one); other notes'
- * stay as they are. A uuid does nothing: it can't be chosen.
+ * Mod-click (or Mod+Enter) on a broken wikilink in note `source`. A title
+ * that notes have asks which one to link to, with their folders, or to
+ * create another (the new-note dialog); one no note has creates the note
+ * in the vault root. An address creates the note there when that leaves no
+ * gap in the Zettelkasten, else offers the address that doesn't (or a note
+ * titled as the target). A uuid whose note is gone counts as the title it
+ * had, if known (else it does nothing). Either way the note's links to the
+ * target then point at the note (its address, or uuid without one); other
+ * notes' stay as they are.
  */
 export async function followBrokenLink(source: NoteId, raw: string) {
   const target = sessionFor(source)?.sourceTarget(raw) ?? raw.trim();
-  if (!target || UUID.test(target)) return;
+  // What the link names: the target, or a dead uuid's former title.
+  const name = UUID.test(target) ? formerTitle(target) : target;
+  if (!target || !name) return;
   const relink = (note: NoteSummary) => {
     const next = note.address ?? note.id;
     if (next !== target) sessionFor(source)?.retarget(target, next);
   };
 
-  const key = plainQuotes(target).toLowerCase();
-  const titled = allNotes().filter(
-    n => n.title && plainQuotes(n.title.trim()).toLowerCase() === key,
-  );
-  if (titled.length === 1) {
-    relink(titled[0]);
-    openNote(titled[0].id);
-    return;
-  }
-  if (titled.length > 1) {
-    const choice = await pick<NoteId | null>(`Notes titled "${target}"`, [
+  const key = titleKey(name);
+  const titled = allNotes().filter(n => n.title && titleKey(n.title) === key);
+  if (titled.length > 0) {
+    const choice = await pick<NoteId | null>(`Link to "${name}"`, [
       ...titled.map(n => ({
-        label: n.folder ? `${noteLabel(n)} (${n.folder})` : noteLabel(n),
+        label: `${noteLabel(n)} (${folderLabel(n.folder)})`,
         value: n.id,
       })),
-      { label: `Create another note titled "${target}"`, value: null },
+      { label: `Create a new note titled "${name}"…`, value: null },
     ]);
     if (!choice) return;
     if (choice.value !== null) {
@@ -410,18 +408,21 @@ export async function followBrokenLink(source: NoteId, raw: string) {
       openNote(choice.value);
       return;
     }
+    const note = await newLinkedNote(source, name, true);
+    if (note) relink(note);
+    return;
   } else {
     // Fails without a Zettelkasten: then it's only a title.
-    const place = await vault.placeForAddress(target).catch(() => null);
+    const place = await vault.placeForAddress(name).catch(() => null);
     if (place) {
-      if (place.address !== target) {
+      if (place.address !== name) {
         const where = placeLabel(place.placement);
-        const choice = await pick<'address' | 'title'>(`No note ${target}`, [
+        const choice = await pick<'address' | 'title'>(`No note ${name}`, [
           {
-            label: `Create ${place.address}, ${where}, and link to it (${target} would leave a gap)`,
+            label: `Create ${place.address}, ${where}, and link to it (${name} would leave a gap)`,
             value: 'address',
           },
-          { label: `Create a note titled "${target}"`, value: 'title' },
+          { label: `Create a note titled "${name}"`, value: 'title' },
         ]);
         if (!choice) return;
         if (choice.value === 'address') {
@@ -435,12 +436,8 @@ export async function followBrokenLink(source: NoteId, raw: string) {
     }
   }
 
-  // An uninitialized link's note goes in the vault root; asked when a note
-  // there already has the title (one elsewhere was offered above).
-  const note =
-    titleClash('', target) === null
-      ? await noteInFolder('', target)
-      : await newLinkedNote(source, target, true);
+  // An uninitialized link's note goes in the vault root.
+  const note = await noteInFolder('', name);
   if (note) relink(note);
 }
 

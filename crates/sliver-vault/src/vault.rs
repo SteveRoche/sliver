@@ -997,17 +997,28 @@ impl Vault {
 
     /// Source of a note's link table for `targets` (as written in its
     /// links); see [`link_table`].
-    pub fn link_table(&self, targets: &[String]) -> String {
+    /// `former` gives the titles of deleted notes by uuid, for links to
+    /// them (shown broken, as that title).
+    pub fn link_table(&self, targets: &[String], former: &HashMap<String, String>) -> String {
         let mut seen = HashSet::new();
         link_table(targets.iter().filter_map(|target| {
             if !seen.insert(target.as_str()) {
                 return None;
             }
-            let note = self.notes.get(&self.resolve(target)?)?;
+            let Some(note) = self.resolve(target).and_then(|id| self.notes.get(&id)) else {
+                return Some((
+                    target.as_str(),
+                    LinkTarget {
+                        id: None,
+                        title: Some(former.get(target)?.as_str()),
+                        address: None,
+                    },
+                ));
+            };
             Some((
                 target.as_str(),
                 LinkTarget {
-                    id: note.id.to_string(),
+                    id: Some(note.id.to_string()),
                     title: note.title.as_deref(),
                     address: note.address.as_deref(),
                 },
@@ -2053,6 +2064,15 @@ mod tests {
     }
 
     fn render_themed(vault: &Vault, id: Uuid, dark: bool) -> (String, Vec<String>) {
+        render_with(vault, id, dark, &HashMap::new())
+    }
+
+    fn render_with(
+        vault: &Vault,
+        id: Uuid,
+        dark: bool,
+        former: &HashMap<String, String>,
+    ) -> (String, Vec<String>) {
         let mut engine = sliver_typst::Engine::new();
         engine
             .set_source(
@@ -2069,7 +2089,7 @@ mod tests {
         engine
             .set_source(
                 &crate::link_table_path(&id.to_string()),
-                &vault.link_table(&targets),
+                &vault.link_table(&targets, former),
             )
             .unwrap();
         engine
@@ -2203,6 +2223,30 @@ mod tests {
             "title change re-renders the link"
         );
     }
+    #[test]
+    fn preview_shows_links_to_deleted_notes_by_their_former_title() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let a = top_note(&mut vault, Some("A".into())).unwrap();
+        let gone = Uuid::new_v4().to_string();
+        vault
+            .write_note(
+                a.id,
+                &format!("#metadata((title: \"A\", address: \"1.1\")) <note>\n[[{gone}]] [[{gone}|custom]]"),
+            )
+            .unwrap();
+        let former = HashMap::from([(gone.clone(), "Old title".to_owned())]);
+        let (svg, diagnostics) = render_with(&vault, a.id, false, &former);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let href = format!("href=\"sliver-new:{gone}\"");
+        assert_eq!(svg.matches(&href).count(), 2 * 2);
+        assert_ne!(
+            svg,
+            render(&vault, a.id).0,
+            "drawn as the title, not the uuid"
+        );
+    }
+
     #[test]
     fn stores_packages_by_spec() {
         let dir = TempDir::new();

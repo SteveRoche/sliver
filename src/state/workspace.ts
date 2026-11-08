@@ -9,7 +9,7 @@ import {
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { linksAt } from '../editor/analysis';
-import { savedText } from '../editor/wikilinks';
+import { forgetActiveLink, savedText } from '../editor/wikilinks';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -283,6 +283,17 @@ export function firstPreviews(timeoutMs: number): Promise<void> {
   });
 }
 
+/**
+ * The last title of every note seen since the app started, deleted ones
+ * included: a link to a note deleted outside the app (or before the delete
+ * rewrote it) shows that title, as an uninitialized link.
+ */
+const lastTitles = new Map<NoteId, string>();
+
+/** The title note `id` had when it was last seen, if it's gone now. */
+export const formerTitle = (id: string): string | undefined =>
+  index().byId.has(id) ? undefined : lastTitles.get(id.toLowerCase());
+
 const index = createRoot(() =>
   createMemo(() => {
     const byId = new Map<NoteId, TreeNode>();
@@ -299,6 +310,7 @@ const index = createRoot(() =>
     const walkNotes = (nodes: TreeNode[], parent?: TreeNode) => {
       for (const node of nodes) {
         byId.set(node.id, node);
+        if (node.title) lastTitles.set(node.id.toLowerCase(), node.title);
         if (parent) parents.set(node.id, parent);
         notes.push(node);
         if (isNoteAddress(node.address) && !byAddress.has(node.address)) {
@@ -482,7 +494,12 @@ function createSession(id: NoteId): NoteSession {
     tableFor = key;
     tableSent = tableSent
       .then(async () => {
-        const table = await vault.linkTable(id, targets);
+        const former: Record<string, string> = {};
+        for (const target of targets) {
+          const title = formerTitle(target);
+          if (title) former[target] = title;
+        }
+        const table = await vault.linkTable(id, targets, former);
         if (!disposed) await typst.setSource(table.path, table.text);
       })
       .catch(error => console.warn(`could not update ${id}'s links:`, error));
@@ -629,7 +646,6 @@ function createSession(id: NoteId): NoteSession {
       if (!view) return;
       if (savedText(view.state) === next) return;
       const current = view.state.doc.toString();
-      if (current === next) return;
       let start = 0;
       while (start < current.length && current[start] === next[start]) start++;
       let end = 0;
@@ -646,6 +662,9 @@ function createSession(id: NoteId): NoteSession {
           to: current.length - end,
           insert: next.slice(start, next.length - end),
         },
+        // The file wins: a link being edited no longer stands for the
+        // target it had (a delete may have rewritten it to a title).
+        effects: forgetActiveLink,
       });
     },
     shownView() {
