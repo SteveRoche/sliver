@@ -55,6 +55,16 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
       const id = resolveTarget(target);
       return id ? (noteById(id)?.title ?? 'Untitled') : null;
     },
+    label: target => {
+      const id = resolveTarget(target);
+      const note = id && noteById(id);
+      if (!note) return null;
+      const title = note.title ?? 'Untitled';
+      // Like the preview's rule: the address only where the note has one.
+      return settings.linkDisplay === 'address' && note.address
+        ? { shown: note.address, hover: title }
+        : { shown: title, hover: note.address };
+    },
     open: target => {
       const id = resolveTarget(target);
       if (id) openNote(id);
@@ -140,9 +150,11 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
   };
   createEffect(on(() => session?.compiled(), showDiagnostics));
   createEffect(
-    on(tree, () => view?.dispatch({ effects: refreshWikilinks.of(null) }), {
-      defer: true,
-    }),
+    on(
+      [tree, () => settings.linkDisplay],
+      () => view?.dispatch({ effects: refreshWikilinks.of(null) }),
+      { defer: true },
+    ),
   );
   createEffect(
     on(

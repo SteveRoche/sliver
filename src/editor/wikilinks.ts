@@ -24,6 +24,12 @@ import { linksAt, syntaxField } from './analysis';
 export interface WikilinkOptions {
   /** The linked note's title, or null when the target doesn't resolve. */
   title(target: string): string | null;
+  /**
+   * What a resolving link without custom text shows (the title or, per the
+   * `linkDisplay` setting, the address), and the other form for its hover
+   * (null when there's none); null when the target doesn't resolve.
+   */
+  label(target: string): { shown: string; hover: string | null } | null;
   /** For a uuid whose note is gone: the title it had, if known. */
   formerTitle(target: string): string | null;
   open(target: string): void;
@@ -365,6 +371,8 @@ class LinkWidget extends WidgetType {
     readonly label: string,
     readonly target: string,
     readonly broken: boolean,
+    /** The tooltip of a working link: the form `label` doesn't show. */
+    readonly hover: string = target,
   ) {
     super();
   }
@@ -373,7 +381,8 @@ class LinkWidget extends WidgetType {
     return (
       other.label === this.label &&
       other.target === this.target &&
-      other.broken === this.broken
+      other.broken === this.broken &&
+      other.hover === this.hover
     );
   }
 
@@ -383,7 +392,7 @@ class LinkWidget extends WidgetType {
     span.textContent = this.label;
     span.title = this.broken
       ? `No note "${this.target}". ${isMac ? 'Cmd' : 'Ctrl'}-click to create it.`
-      : this.target;
+      : this.hover;
     return span;
   }
 
@@ -413,15 +422,16 @@ function decorations(
       !uuid &&
       state.selection.ranges.some(r => r.from <= link.to && r.to >= link.from);
     if (editing) return [sourceMark.range(link.from, link.to)];
-    const title = options.title(link.target);
+    const label = options.label(link.target);
     // A uuid never shows, even when its note is gone.
     const shown =
-      title ??
+      label?.shown ??
       (uuid ? (options.formerTitle(link.target) ?? 'Missing note') : null);
     const widget = new LinkWidget(
       link.text ?? shown ?? link.target,
       shown ?? link.target,
-      title === null,
+      label === null,
+      label?.hover ?? (uuid ? (shown ?? link.target) : link.target),
     );
     return [Decoration.replace({ widget }).range(link.from, link.to)];
   });
