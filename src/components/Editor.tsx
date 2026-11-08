@@ -120,6 +120,7 @@ const theme = EditorView.theme({
     },
   // Five rows of 22px.
   '.cm-tooltip.cm-link-menu > ul': { maxHeight: '110px' },
+  '.cm-tooltip.cm-link-menu': { height: 'auto !important' },
   // Shown by the footer instead. Positioned against the tooltip, at the
   // list's top, so selecting it never scrolls the list.
   '.cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-new-note-option': {
