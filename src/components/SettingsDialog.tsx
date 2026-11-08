@@ -232,20 +232,6 @@ export function SettingsDialog() {
                 </Match>
                 <Match when={section() === 'preview'}>
                   <SectionBody title="Preview">
-                    <SelectSetting<Settings['linkDisplay']>
-                      id="setting-link-display"
-                      name="Wikilink text"
-                      description="What links without custom text show."
-                      value={settings.linkDisplay}
-                      options={[
-                        { value: 'title', label: 'Note title' },
-                        { value: 'address', label: 'Zettelkasten address' },
-                      ]}
-                      onChange={linkDisplay => {
-                        updateSettings({ linkDisplay });
-                        void refreshLinks();
-                      }}
-                    />
                     <SelectSetting<Settings['defaultViewMode']>
                       id="setting-default-view-mode"
                       name="View for new panes"
@@ -285,6 +271,20 @@ export function SettingsDialog() {
                 </Match>
                 <Match when={section() === 'notes'}>
                   <SectionBody title="Notes">
+                    <SelectSetting<Settings['linkDisplay']>
+                      id="setting-link-display"
+                      name="Wikilink text"
+                      description="What links without custom text show, in the editor and the preview. Notes without an address show their title."
+                      value={settings.linkDisplay}
+                      options={[
+                        { value: 'title', label: 'Note title' },
+                        { value: 'address', label: 'Zettelkasten address' },
+                      ]}
+                      onChange={linkDisplay => {
+                        updateSettings({ linkDisplay });
+                        void refreshLinks();
+                      }}
+                    />
                     <SelectSetting<Settings['newNoteLocation']>
                       id="setting-new-note-location"
                       name="Default location for new notes"

@@ -9,6 +9,11 @@ import {
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { linksAt } from '../editor/analysis';
+import {
+  forgetActiveLink,
+  retargetLinks,
+  savedText,
+} from '../editor/wikilinks';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -282,6 +287,17 @@ export function firstPreviews(timeoutMs: number): Promise<void> {
   });
 }
 
+/**
+ * The last title of every note seen since the app started, deleted ones
+ * included: a link to a note deleted outside the app (or before the delete
+ * rewrote it) shows that title, as an uninitialized link.
+ */
+const lastTitles = new Map<NoteId, string>();
+
+/** The title note `id` had when it was last seen, if it's gone now. */
+export const formerTitle = (id: string): string | undefined =>
+  index().byId.has(id) ? undefined : lastTitles.get(id.toLowerCase());
+
 const index = createRoot(() =>
   createMemo(() => {
     const byId = new Map<NoteId, TreeNode>();
@@ -298,6 +314,7 @@ const index = createRoot(() =>
     const walkNotes = (nodes: TreeNode[], parent?: TreeNode) => {
       for (const node of nodes) {
         byId.set(node.id, node);
+        if (node.title) lastTitles.set(node.id.toLowerCase(), node.title);
         if (parent) parents.set(node.id, parent);
         notes.push(node);
         if (isNoteAddress(node.address) && !byAddress.has(node.address)) {
@@ -481,7 +498,12 @@ function createSession(id: NoteId): NoteSession {
     tableFor = key;
     tableSent = tableSent
       .then(async () => {
-        const table = await vault.linkTable(id, targets);
+        const former: Record<string, string> = {};
+        for (const target of targets) {
+          const title = formerTitle(target);
+          if (title) former[target] = title;
+        }
+        const table = await vault.linkTable(id, targets, former);
         if (!disposed) await typst.setSource(table.path, table.text);
       })
       .catch(error => console.warn(`could not update ${id}'s links:`, error));
@@ -577,7 +599,7 @@ function createSession(id: NoteId): NoteSession {
       if (next) saver.hold();
       setConflict(next);
     },
-    currentText: () => view?.state.doc.toString() ?? latestText ?? '',
+    currentText: () => (view && savedText(view.state)) ?? latestText ?? '',
     loadFromDisk(next) {
       this.replaceText(next);
       // The edit the replacement made goes nowhere: it's what's on disk.
@@ -613,6 +635,8 @@ function createSession(id: NoteId): NoteSession {
       return typst.jumpFromCursor(mainPath, notePath(id), position);
     },
     edit(next) {
+      // Showing or hiding a link's uuid changes the editor, not the file.
+      if (next === latestText) return;
       latestText = next;
       // A new link target needs its table entry before the compile.
       void sendLinkTable(next).then(() => preview?.update(next));
@@ -624,8 +648,8 @@ function createSession(id: NoteId): NoteSession {
     },
     replaceText(next) {
       if (!view) return;
+      if (savedText(view.state) === next) return;
       const current = view.state.doc.toString();
-      if (current === next) return;
       let start = 0;
       while (start < current.length && current[start] === next[start]) start++;
       let end = 0;
@@ -642,6 +666,9 @@ function createSession(id: NoteId): NoteSession {
           to: current.length - end,
           insert: next.slice(start, next.length - end),
         },
+        // The file wins: a link being edited no longer stands for the
+        // target it had (a delete may have rewritten it to a title).
+        effects: forgetActiveLink,
       });
     },
     shownView() {
@@ -650,14 +677,12 @@ function createSession(id: NoteId): NoteSession {
     },
     retarget(from, to) {
       if (!view) return;
-      const changes = linksAt(view.state)
-        .filter(link => sameTarget(link.target, from))
-        .map(link => ({
-          from: link.targetFrom,
-          to: link.targetTo,
-          insert: to,
-        }));
-      if (changes.length > 0) view.dispatch({ changes });
+      const links = linksAt(view.state).filter(link =>
+        sameTarget(link.target, from),
+      );
+      if (links.length > 0) {
+        view.dispatch(retargetLinks(view.state, links, to));
+      }
     },
     sourceTarget(target) {
       if (!view) return undefined;
@@ -1229,6 +1254,40 @@ async function restoreWorkspace() {
 export const plainQuotes = (text: string) =>
   text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"');
 
+/** A title as links match it: trimmed, case-insensitive, quotes straight. */
+export const titleKey = (title: string) =>
+  plainQuotes(title.trim()).toLowerCase();
+
+/** The folder a note created at `placement` lands in. */
+export const placementFolder = (placement: Placement) =>
+  placement.kind === 'unaddressed'
+    ? (placement.folder ?? '')
+    : (zettelkasten()?.path ?? '');
+
+/**
+ * Why a note titled `title` can't be in `folder` (another note there has
+ * that title; notes in other folders may), or null. `except` is the note
+ * being renamed or moved. The backend refuses the same.
+ */
+export function titleClash(
+  folder: string,
+  title: string,
+  except?: NoteId,
+): string | null {
+  const key = titleKey(title);
+  if (!key) return null;
+  const taken = allNotes().some(
+    n =>
+      n.id !== except &&
+      n.folder === folder &&
+      n.title &&
+      titleKey(n.title) === key,
+  );
+  if (!taken) return null;
+  const place = folder ? `"${folder}"` : 'the vault root';
+  return `A note titled "${title.trim()}" is already in ${place}.`;
+}
+
 const sameTarget = (a: string, b: string) =>
   plainQuotes(a.trim()) === plainQuotes(b.trim());
 
@@ -1246,6 +1305,7 @@ export async function createNote(
   placement: Placement,
   title: string,
   kind?: string,
+  open = true,
 ) {
   const template = await vault.noteTemplate(kind);
   const { body, cursor } = expandTemplate(template, {
@@ -1261,7 +1321,7 @@ export async function createNote(
   // The body ends the note's text (see `create_note_of_kind`).
   if (cursor !== null) startCursors.set(note.id, body.length - cursor);
   await refreshTree();
-  openNote(note.id);
+  if (open) openNote(note.id);
   return note;
 }
 
@@ -1276,8 +1336,9 @@ export async function renameNote(id: NoteId, title: string) {
 export async function deleteNote(id: NoteId) {
   const tab = tabOf(id);
   if (tab) await closeTab(tab.key, true);
-  await vault.deleteNote(id, settings.deleteMode);
-  await refreshTree();
+  // Links to the note get rewritten in any note.
+  await flushAll();
+  await reloadChanged(await vault.deleteNote(id, settings.deleteMode));
 }
 
 /** Reloads notes whose files the backend rewrote into their open editors. */
@@ -1358,10 +1419,11 @@ export async function deleteFolder(path: string) {
       await closeTab(tab.key, true);
     }
   }
-  await vault.deleteFolder(path, settings.deleteMode);
+  await flushAll();
+  const changed = await vault.deleteFolder(path, settings.deleteMode);
   setCollapsedFolders(list => list.filter(p => !inside(p)));
   persistWorkspace();
-  await refreshTree();
+  await reloadChanged(changed);
 }
 
 export async function setZettelkasten(path: string) {

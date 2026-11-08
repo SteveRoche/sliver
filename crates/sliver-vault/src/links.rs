@@ -51,9 +51,10 @@ pub enum LinkDisplay {
     Address,
 }
 
-/// One entry of a generated link table: what a target names.
+/// One entry of a generated link table: what a target names. A target
+/// without an `id` is broken, and shown as its (former) `title`.
 pub struct LinkTarget<'a> {
-    pub id: String,
+    pub id: Option<String>,
     pub title: Option<&'a str>,
     pub address: Option<&'a str>,
 }
@@ -145,16 +146,20 @@ fn parse_inner(inner: &str) -> Option<(String, Option<String>)> {
 
 /// Source of a generated link table (see [`link_table_path`]): `notes`, from
 /// each link target (as written: an address or a uuid) that resolves to the
-/// note's id, title and address. Unresolved targets are left out (broken).
+/// note's id, title and address. Unresolved targets are left out (broken),
+/// except uuids of deleted notes whose titles are known (`id: none`).
 pub fn link_table<'a>(targets: impl IntoIterator<Item = (&'a str, LinkTarget<'a>)>) -> String {
     let mut entries = String::new();
     for (key, target) in targets {
         let title = target.title.or(target.address).unwrap_or("Untitled");
         let address = target.address.map_or("none".to_owned(), string_literal);
+        let id = target
+            .id
+            .as_deref()
+            .map_or("none".to_owned(), string_literal);
         entries.push_str(&format!(
-            "  {}: (id: {}, title: {}, address: {address}),\n",
+            "  {}: (id: {id}, title: {}, address: {address}),\n",
             string_literal(key),
-            string_literal(&target.id),
             string_literal(title)
         ));
     }
@@ -185,7 +190,11 @@ pub fn link_library(display: LinkDisplay) -> String {
     let custom = if bar == none {{ "" }} else {{ inner.slice(bar + 1).trim() }}
     let note = notes.at(target, default: none)
     if note == none {{
-      link("{NEW_LINK_SCHEME}" + target, text(fill: theme.error, it))
+      // Like a working link, without the brackets.
+      link("{NEW_LINK_SCHEME}" + target, text(fill: theme.error, if custom != "" {{ custom }} else {{ target }}))
+    }} else if note.id == none {{
+      // A deleted note's uuid: shown as the title it had.
+      link("{NEW_LINK_SCHEME}" + target, text(fill: theme.error, if custom != "" {{ custom }} else {{ note.title }}))
     }} else {{
       let shown = if custom != "" {{ custom }} else if display == "address" and note.address != none {{ note.address }} else {{ note.title }}
       link("{LINK_SCHEME}" + note.id, shown)

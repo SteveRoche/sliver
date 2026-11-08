@@ -213,14 +213,16 @@ export const vault = {
     invoke<NoteSummary>('write_note', { id, text }),
   renameNote: (id: NoteId, title: string) =>
     invoke<NoteSummary>('rename_note', { id, title }),
+  /** Resolves to the ids of every note whose file changed (links to it). */
   deleteNote: (id: NoteId, mode?: DeleteMode) =>
-    invoke<void>('delete_note', { id, mode }),
+    invoke<NoteId[]>('delete_note', { id, mode }),
   createFolder: (parent: string, name: string) =>
     invoke<string>('create_folder', { parent, name }),
   /** Paths into the folder are rewritten in notes, preambles and templates. */
   renameFolder: (path: string, name: string) =>
     invoke<Moved>('rename_folder', { path, name }),
   /** Resolves to the ids of the notes deleted with the folder. */
+  /** Resolves to the ids of every note whose file changed (links into it). */
   deleteFolder: (path: string, mode?: DeleteMode) =>
     invoke<NoteId[]>('delete_folder', { path, mode }),
   setZettelkasten: (path: string) => invoke<void>('set_zettelkasten', { path }),
@@ -246,9 +248,9 @@ export const vault = {
   /** `/.sliver/links.typ`: the link table and `wikilinks` show rule. */
   linkLibrary: (showAddresses: boolean) =>
     invoke<SourceFile>('link_library', { showAddresses }),
-  /** Note `id`'s link table: the notes its link `targets` name. */
-  linkTable: (id: NoteId, targets: string[]) =>
-    invoke<SourceFile>('link_table', { id, targets }),
+  /** Note `id`'s link table: the notes its link `targets` name, and the former titles of deleted ones (`former`, by uuid). */
+  linkTable: (id: NoteId, targets: string[], former: Record<string, string>) =>
+    invoke<SourceFile>('link_table', { id, targets, former }),
   analyze: (text: string) => invoke<Analysis>('analyze', { text }),
   /** `/.sliver/theme.typ` with the light or dark theme's colours. */
   themeLibrary: (dark: boolean) =>

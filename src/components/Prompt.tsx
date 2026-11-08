@@ -1,24 +1,36 @@
 import { Dialog } from '@ark-ui/solid';
-import { createSignal, Show } from 'solid-js';
+import { createSignal, For, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
+
+/** A dropdown shown after the text field. */
+export interface PromptChoice {
+  label: string;
+  options: { label: string; value: string }[];
+  initial: string;
+}
 
 interface PromptRequest {
   title: string;
   label: string;
   initial: string;
   confirm: string;
-  resolve: (value: string | null) => void;
+  choice?: PromptChoice;
+  /** Why the answer can't be taken (shown under the field), or null. */
+  validate?: (text: string, choice: string) => string | null;
+  resolve: (value: { text: string; choice: string } | null) => void;
 }
 
 const [request, setRequest] = createSignal<PromptRequest | null>(null);
 
-/** Asks for one line of text; resolves to null when cancelled. */
-export function prompt(options: {
+/** Asks for one line of text and a choice; resolves to null when cancelled. */
+export function promptWithChoice(options: {
   title: string;
   label: string;
   initial?: string;
   confirm?: string;
-}): Promise<string | null> {
+  choice: PromptChoice;
+  validate?: (text: string, choice: string) => string | null;
+}): Promise<{ text: string; choice: string } | null> {
   request()?.resolve(null);
   return new Promise(resolve =>
     setRequest({
@@ -30,13 +42,35 @@ export function prompt(options: {
   );
 }
 
+/** Asks for one line of text; resolves to null when cancelled. */
+export async function prompt(options: {
+  title: string;
+  label: string;
+  initial?: string;
+  confirm?: string;
+  validate?: (text: string) => string | null;
+}): Promise<string | null> {
+  request()?.resolve(null);
+  const result = await new Promise<{ text: string } | null>(resolve =>
+    setRequest({ initial: '', confirm: 'OK', ...options, resolve }),
+  );
+  return result?.text ?? null;
+}
+
 /** Mount once at the app root. */
 export function PromptHost() {
   let input: HTMLInputElement | undefined;
+  let select: HTMLSelectElement | undefined;
+  const [error, setError] = createSignal<string | null>(null);
 
-  const finish = (value: string | null) => {
+  const finish = (value: { text: string; choice: string } | null) => {
     request()?.resolve(value);
     setRequest(null);
+    setError(null);
+  };
+  const check = () => {
+    const validate = request()?.validate;
+    setError(validate?.(input?.value ?? '', select?.value ?? '') ?? null);
   };
 
   return (
@@ -56,7 +90,12 @@ export function PromptHost() {
                 <form
                   onSubmit={event => {
                     event.preventDefault();
-                    finish(input?.value ?? '');
+                    check();
+                    if (error()) return;
+                    finish({
+                      text: input?.value ?? '',
+                      choice: select?.value ?? '',
+                    });
                   }}
                 >
                   <Dialog.Title class="dialog-title">
@@ -70,8 +109,37 @@ export function PromptHost() {
                         queueMicrotask(() => el.select());
                       }}
                       value={req().initial}
+                      onInput={() => error() && check()}
                     />
                   </label>
+                  <Show when={req().choice}>
+                    {choice => (
+                      <label class="field field-inline">
+                        <span>{choice().label}</span>
+                        <select
+                          ref={el => {
+                            select = el;
+                          }}
+                          class="setting-select"
+                          onChange={() => error() && check()}
+                        >
+                          <For each={choice().options}>
+                            {option => (
+                              <option
+                                value={option.value}
+                                selected={option.value === choice().initial}
+                              >
+                                {option.label}
+                              </option>
+                            )}
+                          </For>
+                        </select>
+                      </label>
+                    )}
+                  </Show>
+                  <Show when={error()}>
+                    {message => <p class="field-error">{message()}</p>}
+                  </Show>
                   <div class="dialog-actions">
                     <button type="button" onClick={() => finish(null)}>
                       Cancel
