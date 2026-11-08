@@ -92,7 +92,7 @@ impl Vault {
             changed.push(*note);
         }
         self.prune_sections()?;
-        changed.extend(self.rewrite_links(&map)?);
+        changed.extend(self.rewrite_links(|t| replacement(&map, t).map(str::to_owned))?);
         Ok(dedup(changed))
     }
 
@@ -120,7 +120,8 @@ impl Vault {
         self.prune_sections()?;
         let mut changed = vec![id];
         if let Some(address) = unfiled {
-            changed.extend(self.rewrite_links(&HashMap::from([(address, id.to_string())]))?);
+            let map = HashMap::from([(address, id.to_string())]);
+            changed.extend(self.rewrite_links(|t| replacement(&map, t).map(str::to_owned))?);
         }
         Ok(dedup(changed))
     }
@@ -184,16 +185,45 @@ impl Vault {
         self.resolve(&address.to_string()) == Some(id)
     }
 
-    /// Rewrites the target of every wikilink whose address is in `map`,
-    /// keeping the rest of the link (custom text, spacing) as it was.
-    fn rewrite_links(&mut self, map: &LinkMap) -> Result<Vec<Uuid>> {
-        if map.is_empty() {
+    /// What links to the notes in `gone`, about to be deleted, should say
+    /// instead: each one's title, for its uuid and the address it owns. Taken
+    /// before they leave the index; applied with [`Vault::unlink`].
+    pub(super) fn orphaned_links(&self, gone: &[Uuid]) -> Orphaned {
+        let mut orphaned = Orphaned::default();
+        for &id in gone {
+            let Ok(note) = self.note(id) else { continue };
+            let target = title_target(note.title.as_deref().unwrap_or(""));
+            if let Some(address) = self.address_of(note).filter(|a| self.owns(id, a)) {
+                orphaned.addresses.insert(address, target.clone());
+            }
+            orphaned.ids.insert(id, target);
+        }
+        orphaned
+    }
+
+    /// Points links to deleted notes at their titles, which read as links to
+    /// notes yet to be written (Mod-click creates one). Returns every note
+    /// whose file changed.
+    pub(super) fn unlink(&mut self, orphaned: &Orphaned) -> Result<Vec<Uuid>> {
+        if orphaned.ids.is_empty() {
             return Ok(Vec::new());
         }
+        self.rewrite_links(|target| match Uuid::parse_str(target) {
+            Ok(id) => orphaned.ids.get(&id).cloned(),
+            Err(_) => orphaned
+                .addresses
+                .get(&target.parse::<Address>().ok()?)
+                .cloned(),
+        })
+    }
+
+    /// Rewrites the target of every wikilink that `new_target` maps,
+    /// keeping the rest of the link (custom text, spacing) as it was.
+    fn rewrite_links(&mut self, new_target: impl Fn(&str) -> Option<String>) -> Result<Vec<Uuid>> {
         let mut sources: Vec<Uuid> = self
             .links
             .iter()
-            .filter(|(_, links)| links.iter().any(|l| replacement(map, &l.target).is_some()))
+            .filter(|(_, links)| links.iter().any(|l| new_target(&l.target).is_some()))
             .map(|(id, _)| *id)
             .collect();
         sources.sort();
@@ -203,10 +233,10 @@ impl Vault {
             let edits: Vec<_> = links_in(&typst_syntax::parse(&text))
                 .into_iter()
                 .filter_map(|link| {
-                    let new = replacement(map, &link.target)?;
+                    let new = new_target(&link.target)?;
                     let inner = link.range.start + 2;
                     let at = inner + text[inner..link.range.end].find(&link.target)?;
-                    Some((at..at + link.target.len(), new.to_owned()))
+                    Some((at..at + link.target.len(), new))
                 })
                 .collect();
             for (range, new) in edits.into_iter().rev() {
@@ -215,6 +245,49 @@ impl Vault {
             self.write_note(id, &text)?;
         }
         Ok(sources)
+    }
+}
+
+/// Link targets replacing those of deleted notes ([`Vault::orphaned_links`]).
+#[derive(Default)]
+pub(super) struct Orphaned {
+    ids: HashMap<Uuid, String>,
+    addresses: HashMap<Address, String>,
+}
+
+/// `title` as a link target that links by title: whitespace collapsed, and
+/// if that still wouldn't read back as the same plain-text target (markup
+/// characters, brackets, `|`, or what looks like an address or uuid), only
+/// its letters, digits and plain punctuation; "Untitled" when nothing's left.
+fn title_target(title: &str) -> String {
+    let collapse = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reads_back = |t: &str| {
+        let source = format!("[[{t}]]");
+        let links = links_in(&typst_syntax::parse(&source));
+        matches!(links.as_slice(), [link] if link.target == t && link.text.is_none() && link.range == (0..source.len()))
+            && t.parse::<Address>().is_err()
+            && Uuid::parse_str(t).is_err()
+    };
+    let whole = collapse(title);
+    if reads_back(&whole) {
+        return whole;
+    }
+    let plain = collapse(
+        &title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || "'\",.;:?!()&".contains(c) {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>(),
+    );
+    if reads_back(&plain) {
+        plain
+    } else {
+        "Untitled".to_owned()
     }
 }
 
@@ -397,6 +470,47 @@ mod tests {
             vault.move_to_folder(child, "Zettelkasten"),
             Err(VaultError::Refused(_))
         ));
+    }
+
+    #[test]
+    fn deleting_points_links_at_the_title() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let inbox = Placement::Unaddressed {
+            folder: String::new(),
+        };
+        let filed = note(&mut vault, Placement::NewSequence, "");
+        vault.rename_note(filed, "Filed note").unwrap();
+        let loose = note(&mut vault, inbox.clone(), "");
+        vault.rename_note(loose, "Loose *note*").unwrap();
+        let linker = note(
+            &mut vault,
+            inbox,
+            &format!("[[1.1]] [[{loose}|here]] [[ {filed} ]]"),
+        );
+
+        assert_eq!(
+            vault.delete_note(loose, DeleteMode::Permanent).unwrap(),
+            vec![linker]
+        );
+        assert_eq!(
+            vault.delete_note(filed, DeleteMode::Permanent).unwrap(),
+            vec![linker]
+        );
+        assert!(
+            vault
+                .read_note(linker)
+                .unwrap()
+                .ends_with("[[Filed note]] [[Loose note|here]] [[ Filed note ]]")
+        );
+    }
+
+    #[test]
+    fn title_targets_read_back_as_titles() {
+        assert_eq!(title_target("Markov's  inequality"), "Markov's inequality");
+        assert_eq!(title_target("a [b] | c"), "a b c");
+        assert_eq!(title_target("1.2"), "Untitled");
+        assert_eq!(title_target(""), "Untitled");
     }
 
     #[test]

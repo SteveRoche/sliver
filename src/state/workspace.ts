@@ -9,6 +9,7 @@ import {
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { linksAt } from '../editor/analysis';
+import { savedText } from '../editor/wikilinks';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -577,7 +578,7 @@ function createSession(id: NoteId): NoteSession {
       if (next) saver.hold();
       setConflict(next);
     },
-    currentText: () => view?.state.doc.toString() ?? latestText ?? '',
+    currentText: () => (view && savedText(view.state)) ?? latestText ?? '',
     loadFromDisk(next) {
       this.replaceText(next);
       // The edit the replacement made goes nowhere: it's what's on disk.
@@ -613,6 +614,8 @@ function createSession(id: NoteId): NoteSession {
       return typst.jumpFromCursor(mainPath, notePath(id), position);
     },
     edit(next) {
+      // Showing or hiding a link's uuid changes the editor, not the file.
+      if (next === latestText) return;
       latestText = next;
       // A new link target needs its table entry before the compile.
       void sendLinkTable(next).then(() => preview?.update(next));
@@ -624,6 +627,7 @@ function createSession(id: NoteId): NoteSession {
     },
     replaceText(next) {
       if (!view) return;
+      if (savedText(view.state) === next) return;
       const current = view.state.doc.toString();
       if (current === next) return;
       let start = 0;
@@ -1229,6 +1233,40 @@ async function restoreWorkspace() {
 export const plainQuotes = (text: string) =>
   text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"');
 
+/** A title as links match it: trimmed, case-insensitive, quotes straight. */
+export const titleKey = (title: string) =>
+  plainQuotes(title.trim()).toLowerCase();
+
+/** The folder a note created at `placement` lands in. */
+export const placementFolder = (placement: Placement) =>
+  placement.kind === 'unaddressed'
+    ? (placement.folder ?? '')
+    : (zettelkasten()?.path ?? '');
+
+/**
+ * Why a note titled `title` can't be in `folder` (another note there has
+ * that title; notes in other folders may), or null. `except` is the note
+ * being renamed or moved. The backend refuses the same.
+ */
+export function titleClash(
+  folder: string,
+  title: string,
+  except?: NoteId,
+): string | null {
+  const key = titleKey(title);
+  if (!key) return null;
+  const taken = allNotes().some(
+    n =>
+      n.id !== except &&
+      n.folder === folder &&
+      n.title &&
+      titleKey(n.title) === key,
+  );
+  if (!taken) return null;
+  const place = folder ? `"${folder}"` : 'the vault root';
+  return `A note titled "${title.trim()}" is already in ${place}.`;
+}
+
 const sameTarget = (a: string, b: string) =>
   plainQuotes(a.trim()) === plainQuotes(b.trim());
 
@@ -1277,8 +1315,9 @@ export async function renameNote(id: NoteId, title: string) {
 export async function deleteNote(id: NoteId) {
   const tab = tabOf(id);
   if (tab) await closeTab(tab.key, true);
-  await vault.deleteNote(id, settings.deleteMode);
-  await refreshTree();
+  // Links to the note get rewritten in any note.
+  await flushAll();
+  await reloadChanged(await vault.deleteNote(id, settings.deleteMode));
 }
 
 /** Reloads notes whose files the backend rewrote into their open editors. */
@@ -1359,10 +1398,11 @@ export async function deleteFolder(path: string) {
       await closeTab(tab.key, true);
     }
   }
-  await vault.deleteFolder(path, settings.deleteMode);
+  await flushAll();
+  const changed = await vault.deleteFolder(path, settings.deleteMode);
   setCollapsedFolders(list => list.filter(p => !inside(p)));
   persistWorkspace();
-  await refreshTree();
+  await reloadChanged(changed);
 }
 
 export async function setZettelkasten(path: string) {
