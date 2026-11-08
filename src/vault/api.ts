@@ -248,9 +248,9 @@ export const vault = {
   /** `/.sliver/links.typ`: the link table and `wikilinks` show rule. */
   linkLibrary: (showAddresses: boolean) =>
     invoke<SourceFile>('link_library', { showAddresses }),
-  /** Note `id`'s link table: the notes its link `targets` name. */
-  linkTable: (id: NoteId, targets: string[]) =>
-    invoke<SourceFile>('link_table', { id, targets }),
+  /** Note `id`'s link table: the notes its link `targets` name, and the former titles of deleted ones (`former`, by uuid). */
+  linkTable: (id: NoteId, targets: string[], former: Record<string, string>) =>
+    invoke<SourceFile>('link_table', { id, targets, former }),
   analyze: (text: string) => invoke<Analysis>('analyze', { text }),
   /** `/.sliver/theme.typ` with the light or dark theme's colours. */
   themeLibrary: (dark: boolean) =>

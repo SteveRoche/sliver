@@ -18,6 +18,7 @@ import { settings } from '../state/settings';
 import {
   allNotes,
   closeTab,
+  formerTitle,
   noteById,
   noteLabel,
   openNote,
@@ -59,6 +60,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
       if (id) openNote(id);
       else void followBrokenLink(props.id, target);
     },
+    formerTitle: target => formerTitle(target) ?? null,
     resolveTitle: text => {
       const key = titleKey(text);
       const titled = allNotes().filter(

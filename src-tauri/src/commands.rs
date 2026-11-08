@@ -258,11 +258,12 @@ pub async fn link_table(
     open: State<'_, OpenVault>,
     id: Uuid,
     targets: Vec<String>,
+    former: Option<std::collections::HashMap<String, String>>,
 ) -> CommandResult<SourceFile> {
     with_vault(&open, |vault| {
         Ok(SourceFile {
             path: sliver_vault::link_table_path(&id.to_string()),
-            text: vault.link_table(&targets),
+            text: vault.link_table(&targets, &former.unwrap_or_default()),
         })
     })
 }

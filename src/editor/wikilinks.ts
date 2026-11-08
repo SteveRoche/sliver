@@ -24,6 +24,8 @@ import { linksAt, syntaxField } from './analysis';
 export interface WikilinkOptions {
   /** The linked note's title, or null when the target doesn't resolve. */
   title(target: string): string | null;
+  /** For a uuid whose note is gone: the title it had, if known. */
+  formerTitle(target: string): string | null;
   open(target: string): void;
   /**
    * The target (address, or uuid) of the note titled `title` that a link
@@ -61,9 +63,17 @@ interface ActiveLink {
   /** What stands in the document for `original` while the link is active. */
   shown: string;
   expanded: boolean;
+  /**
+   * The uuid's note is gone, and `shown` is its former title: the link
+   * keeps that title (an uninitialized link) instead of the dead uuid.
+   */
+  orphan: boolean;
 }
 
 const setActive = StateEffect.define<ActiveLink | null>();
+
+/** Drops the active link's state, e.g. when the file replaced the text. */
+export const forgetActiveLink = setActive.of(null);
 
 const activeField = StateField.define<ActiveLink | null>({
   create: () => null,
@@ -105,7 +115,7 @@ function activeTarget(state: EditorState, active: ActiveLink) {
   const link = parseLink(state, active.from, active.to);
   if (!link) return null;
   const target =
-    active.expanded && link.target === active.shown
+    active.expanded && !active.orphan && link.target === active.shown
       ? active.original
       : link.target;
   return { ...link, target };
@@ -151,7 +161,9 @@ function expand(
   link: { from: number; to: number },
   target: { target: string; from: number; to: number },
 ): TransactionSpec {
-  const shown = label(options.title(target.target) ?? 'Missing note');
+  const title = options.title(target.target);
+  const former = title === null ? options.formerTitle(target.target) : null;
+  const shown = label(title ?? former ?? 'Missing note');
   const delta = shown.length - (target.to - target.from);
   // A position inside the uuid keeps its distance to the nearer end.
   const map = (pos: number) => {
@@ -175,6 +187,7 @@ function expand(
       original: target.target,
       shown,
       expanded: true,
+      orphan: former !== null,
     }),
     annotations: Transaction.addToHistory.of(false),
   };
@@ -182,10 +195,13 @@ function expand(
 
 /**
  * The cursor left the active link. An untouched title becomes its uuid
- * again. Other text is resolved: the title of a note links to it (its
- * address, or uuid), an address or uuid stays, and anything else stays as
- * an uninitialized link (Mod-click creates the note). After undo or redo
- * nothing is resolved, so the redo history survives.
+ * again (unless the uuid's note is gone: then the title stays, an
+ * uninitialized link), and other untouched links stay as they are, even a
+ * title that some note has now (a deleted note's link stays uninitialized
+ * until followed). Edited text is resolved: the title of a note links to
+ * it (its address, or uuid), an address or uuid stays, and anything else
+ * stays as an uninitialized link (Mod-click creates the note). After undo
+ * or redo nothing is resolved, so the redo history survives.
  */
 function leave(
   state: EditorState,
@@ -196,6 +212,10 @@ function leave(
   const done = setActive.of(null);
   const link = parseLink(state, active.from, active.to);
   if (!link?.target) return { effects: done };
+  // Untouched: an orphan keeps its former title, anything else is as it was.
+  if (link.target === active.shown && (active.orphan || !active.expanded)) {
+    return { effects: done };
+  }
   if (active.expanded && link.target === active.shown) {
     return {
       changes: { from: link.from, to: link.to, insert: active.original },
@@ -254,6 +274,7 @@ function reconcile(
       original: link.target,
       shown: link.target,
       expanded: false,
+      orphan: false,
     }),
   };
 }
@@ -306,14 +327,19 @@ function decorations(
   const ranges = linksAt(state).flatMap((link: LinkRange) => {
     if (link.from >= link.to) return [];
     if (active && link.from < active.to && link.to > active.from) return [];
+    const uuid = UUID.test(link.target);
     const editing =
-      !UUID.test(link.target) &&
+      !uuid &&
       state.selection.ranges.some(r => r.from <= link.to && r.to >= link.from);
     if (editing) return [sourceMark.range(link.from, link.to)];
     const title = options.title(link.target);
+    // A uuid never shows, even when its note is gone.
+    const shown =
+      title ??
+      (uuid ? (options.formerTitle(link.target) ?? 'Missing note') : null);
     const widget = new LinkWidget(
-      link.text ?? title ?? link.target,
-      link.target,
+      link.text ?? shown ?? link.target,
+      shown ?? link.target,
       title === null,
     );
     return [Decoration.replace({ widget }).range(link.from, link.to)];
