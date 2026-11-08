@@ -112,13 +112,14 @@ pub async fn rename_note(
     with_vault(&open, |vault| vault.rename_note(id, &title))
 }
 
-/// `mode` defaults to the OS trash; the settings view will choose it later.
+/// `mode` defaults to the OS trash. Returns the ids of every note whose
+/// file changed (links to the deleted note were rewritten).
 #[tauri::command]
 pub async fn delete_note(
     open: State<'_, OpenVault>,
     id: Uuid,
     mode: Option<DeleteMode>,
-) -> CommandResult<()> {
+) -> CommandResult<Vec<Uuid>> {
     with_vault(&open, |vault| {
         vault.delete_note(id, mode.unwrap_or_default())
     })
@@ -142,7 +143,8 @@ pub async fn rename_folder(
     with_vault(&open, |vault| vault.rename_folder(&path, &name))
 }
 
-/// Returns the ids of the notes deleted with the folder.
+/// Returns the ids of every note whose file changed (links to the deleted
+/// notes were rewritten).
 #[tauri::command]
 pub async fn delete_folder(
     open: State<'_, OpenVault>,
@@ -150,7 +152,9 @@ pub async fn delete_folder(
     mode: Option<DeleteMode>,
 ) -> CommandResult<Vec<Uuid>> {
     with_vault(&open, |vault| {
-        vault.delete_folder(&path, mode.unwrap_or_default())
+        Ok(vault
+            .delete_folder(&path, mode.unwrap_or_default())?
+            .changed)
     })
 }
 
@@ -254,11 +258,12 @@ pub async fn link_table(
     open: State<'_, OpenVault>,
     id: Uuid,
     targets: Vec<String>,
+    former: Option<std::collections::HashMap<String, String>>,
 ) -> CommandResult<SourceFile> {
     with_vault(&open, |vault| {
         Ok(SourceFile {
             path: sliver_vault::link_table_path(&id.to_string()),
-            text: vault.link_table(&targets),
+            text: vault.link_table(&targets, &former.unwrap_or_default()),
         })
     })
 }

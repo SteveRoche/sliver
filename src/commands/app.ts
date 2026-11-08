@@ -1,6 +1,6 @@
 import { ask, message, open } from '@tauri-apps/plugin-dialog';
 import { openPalette, pick } from '../components/Palette';
-import { prompt } from '../components/Prompt';
+import { prompt, promptWithChoice } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
 import {
   clearMarks,
@@ -12,6 +12,7 @@ import {
 } from '../components/Sidebar';
 import { toggleWrap } from '../editor/format';
 import { triggerSignature } from '../editor/signature';
+import { followLinkAtCursor, linkAtCursor } from '../editor/wikilinks';
 import { insertCitation, refreshReferences } from '../state/citations';
 import { toggleDebug } from '../state/debug';
 import {
@@ -38,6 +39,7 @@ import {
   deleteNote,
   focusedPane,
   focusedTabs,
+  formerTitle,
   inZettelkasten,
   kinds,
   layout,
@@ -51,7 +53,7 @@ import {
   openAsset,
   openNote,
   openVault,
-  plainQuotes,
+  placementFolder,
   previewLayout,
   refreshLinks,
   renameAsset,
@@ -68,6 +70,8 @@ import {
   setPreviewLayout,
   setZettelkasten,
   splitFocused,
+  titleClash,
+  titleKey,
   togglePreview,
   toggleReading,
   unmarkSection,
@@ -97,6 +101,7 @@ async function newNote(placement: Placement, heading: string, kind?: string) {
     title: kind ? `${heading} (${kind})` : heading,
     label: 'Title',
     confirm: 'Create',
+    validate: text => titleClash(placementFolder(placement), text),
   });
   if (title === null) return;
   await createNote(placement, title.trim(), kind);
@@ -109,6 +114,7 @@ async function rename(id: NoteId) {
     label: 'Title',
     initial: note?.title ?? '',
     confirm: 'Rename',
+    validate: text => titleClash(note?.folder ?? '', text, id),
   });
   if (title === null || !title.trim()) return;
   await renameNote(id, title.trim());
@@ -169,6 +175,7 @@ async function fileNote(id: NoteId) {
 
 /** Moves note `id` to `placement`, after confirming what else changes. */
 async function fileAt(id: NoteId, placement: Placement) {
+  if (await titleClashes(id, placementFolder(placement))) return;
   const plan = await vault.planMove(id, placement);
   const [first, ...rest] = plan.moves;
   const links = plan.linkEdits.reduce((sum, e) => sum + e.count, 0);
@@ -191,6 +198,15 @@ async function fileAt(id: NoteId, placement: Placement) {
   await moveToAddress(id, placement);
 }
 
+/** Says so when note `id` can't move to `folder` for another note's title there. */
+async function titleClashes(id: NoteId, folder: string) {
+  const note = noteById(id);
+  if (!note?.title || note.folder === folder) return false;
+  const clash = titleClash(folder, note.title, id);
+  if (clash) await message(clash, { title: 'Move note', kind: 'info' });
+  return clash !== null;
+}
+
 const folderLabel = (path: string) => (path === '' ? 'Vault root' : path);
 
 async function moveNoteToFolder(id: NoteId) {
@@ -205,6 +221,7 @@ async function moveNoteToFolder(id: NoteId) {
 
 /** Moves note `id` into folder `folder`, warning first if it loses its address. */
 async function moveNoteInto(id: NoteId, folder: string) {
+  if (await titleClashes(id, folder)) return;
   const note = noteById(id);
   if (note?.address && inZettelkasten(id)) {
     const ok = await ask(
@@ -341,44 +358,48 @@ function newNoteFolder(current: NoteId | null): string {
 
 /** Mod+N: a note where the vault's settings say new notes go. */
 async function newNoteDefault(kind?: string) {
-  await newNoteIn(newNoteFolder(activeNote()), kind);
+  const result = await promptWithChoice({
+    title: kind ? `New note (${kind})` : 'New note',
+    label: 'Title',
+    confirm: 'Create',
+    choice: folderChoice(newNoteFolder(activeNote())),
+    validate: (text, folder) => titleClash(folder, text),
+  });
+  if (result) await noteInFolder(result.choice, result.text.trim(), true, kind);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Mod-click on a broken wikilink in note `source`. A title links to the
- * note with that title (asked when there are several), else creates it
- * where new notes go. An address creates the note there when that leaves
- * no gap in the Zettelkasten, else offers the address that doesn't (or a
- * note titled as the target). Either way the note's links to the target
- * then point at the note (its address, or uuid without one); other notes'
- * stay as they are. A uuid does nothing: it can't be chosen.
+ * Mod-click (or Mod+Enter) on a broken wikilink in note `source`. A title
+ * that notes have asks which one to link to, with their folders, or to
+ * create another (the new-note dialog); one no note has creates the note
+ * in the vault root. An address creates the note there when that leaves no
+ * gap in the Zettelkasten, else offers the address that doesn't (or a note
+ * titled as the target). A uuid whose note is gone counts as the title it
+ * had, if known (else it does nothing). Either way the note's links to the
+ * target then point at the note (its address, or uuid without one); other
+ * notes' stay as they are.
  */
 export async function followBrokenLink(source: NoteId, raw: string) {
   const target = sessionFor(source)?.sourceTarget(raw) ?? raw.trim();
-  if (!target || UUID.test(target)) return;
+  // What the link names: the target, or a dead uuid's former title.
+  const name = UUID.test(target) ? formerTitle(target) : target;
+  if (!target || !name) return;
   const relink = (note: NoteSummary) => {
     const next = note.address ?? note.id;
     if (next !== target) sessionFor(source)?.retarget(target, next);
   };
 
-  const key = plainQuotes(target).toLowerCase();
-  const titled = allNotes().filter(
-    n => n.title && plainQuotes(n.title.trim()).toLowerCase() === key,
-  );
-  if (titled.length === 1) {
-    relink(titled[0]);
-    openNote(titled[0].id);
-    return;
-  }
-  if (titled.length > 1) {
-    const choice = await pick<NoteId | null>(`Notes titled "${target}"`, [
+  const key = titleKey(name);
+  const titled = allNotes().filter(n => n.title && titleKey(n.title) === key);
+  if (titled.length > 0) {
+    const choice = await pick<NoteId | null>(`Link to "${name}"`, [
       ...titled.map(n => ({
-        label: n.folder ? `${noteLabel(n)} (${n.folder})` : noteLabel(n),
+        label: `${noteLabel(n)} (${folderLabel(n.folder)})`,
         value: n.id,
       })),
-      { label: `Create another note titled "${target}"`, value: null },
+      { label: `Create a new note titled "${name}"…`, value: null },
     ]);
     if (!choice) return;
     if (choice.value !== null) {
@@ -387,18 +408,21 @@ export async function followBrokenLink(source: NoteId, raw: string) {
       openNote(choice.value);
       return;
     }
+    const note = await newLinkedNote(source, name, true);
+    if (note) relink(note);
+    return;
   } else {
     // Fails without a Zettelkasten: then it's only a title.
-    const place = await vault.placeForAddress(target).catch(() => null);
+    const place = await vault.placeForAddress(name).catch(() => null);
     if (place) {
-      if (place.address !== target) {
+      if (place.address !== name) {
         const where = placeLabel(place.placement);
-        const choice = await pick<'address' | 'title'>(`No note ${target}`, [
+        const choice = await pick<'address' | 'title'>(`No note ${name}`, [
           {
-            label: `Create ${place.address}, ${where}, and link to it (${target} would leave a gap)`,
+            label: `Create ${place.address}, ${where}, and link to it (${name} would leave a gap)`,
             value: 'address',
           },
-          { label: `Create a note titled "${target}"`, value: 'title' },
+          { label: `Create a note titled "${name}"`, value: 'title' },
         ]);
         if (!choice) return;
         if (choice.value === 'address') {
@@ -412,11 +436,54 @@ export async function followBrokenLink(source: NoteId, raw: string) {
     }
   }
 
-  const folder = newNoteFolder(source);
+  // An uninitialized link's note goes in the vault root.
+  const note = await noteInFolder('', name);
+  if (note) relink(note);
+}
+
+/** Creates a note titled `title` in `folder`, asking for an address in the Zettelkasten. */
+async function noteInFolder(
+  folder: string,
+  title: string,
+  open = true,
+  kind?: string,
+) {
   let placement: Placement | null = { kind: 'unaddressed', folder };
   if (folder === zettelkasten()?.path) placement = await chooseAddress(null);
-  if (!placement) return;
-  relink(await createNote(placement, target));
+  return placement && createNote(placement, title, kind, open);
+}
+
+/** The "In:" folder dropdown of the new-note prompts, starting at `initial`. */
+const folderChoice = (initial: string) => ({
+  label: 'In:',
+  options: ['', ...allFolders().map(f => f.path)].map(path => ({
+    label: folderLabel(path),
+    value: path,
+  })),
+  initial,
+});
+
+/**
+ * Create a new note in `[[` completion in note `source`: asks for a
+ * title (starting from what was typed) and a folder, and creates the note without opening it.
+ * Resolves to the note, or null when cancelled.
+ */
+export async function newLinkedNote(
+  source: NoteId,
+  query: string,
+  open = false,
+) {
+  const result = await promptWithChoice({
+    title: 'New linked note',
+    label: 'Title',
+    initial: query.trim(),
+    confirm: 'Create',
+    choice: folderChoice(newNoteFolder(source)),
+    validate: (text, folder) => titleClash(folder, text),
+  });
+  if (result === null) return null;
+  // Stays on the linking note unless `open`.
+  return noteInFolder(result.choice, result.text.trim(), open);
 }
 
 /** "the next note after 1.2 Title", "an aside to ...", "a new sequence". */
@@ -440,6 +507,7 @@ async function linkedNoteAt(
     title: `New note ${place.address}`,
     label: 'Title',
     confirm: 'Create',
+    validate: text => titleClash(placementFolder(place.placement), text),
   });
   if (title === null) return;
   relink(await createNote(place.placement, title.trim()));
@@ -952,6 +1020,20 @@ export function registerAppCommands(): () => void {
         const view = shownEditor();
         view?.dispatch({ effects: triggerSignature.of(null) });
         view?.focus();
+      },
+    },
+    {
+      id: 'editor.followLink',
+      title: 'Follow link at cursor',
+      keybinding: 'Mod+Enter',
+      // Otherwise Mod+Enter stays CodeMirror's (a blank line below).
+      enabled: () => {
+        const view = shownEditor();
+        return !!view?.hasFocus && !!linkAtCursor(view);
+      },
+      run: () => {
+        const view = shownEditor();
+        if (view) followLinkAtCursor(view);
       },
     },
     {
