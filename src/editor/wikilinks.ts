@@ -40,7 +40,8 @@ export interface WikilinkOptions {
   label(target: string): { shown: string; hover: string | null } | null;
   /** For a uuid whose note is gone: the title it had, if known. */
   formerTitle(target: string): string | null;
-  open(target: string): void;
+  /** Follows the link: in place of the note, or in a new tab. */
+  open(target: string, newTab: boolean): void;
   /**
    * The target (address, or uuid) of the note titled `title` that a link
    * typed as `[[title]]` should point at, or null when there's none (or
@@ -136,11 +137,11 @@ export function linkAtCursor(view: EditorView): boolean {
 }
 
 /** Follows (or, when broken, creates) the link at the cursor. */
-export function followLinkAtCursor(view: EditorView): boolean {
+export function followLinkAtCursor(view: EditorView, newTab = false): boolean {
   const options = view.state.facet(optionsFacet);
   const target = targetAt(view.state, view.state.selection.main.head);
   if (!options || target === undefined) return false;
-  options.open(target);
+  options.open(target, newTab);
   return true;
 }
 
@@ -378,7 +379,8 @@ export function wikilinks(options: WikilinkOptions): Extension {
       const target = pos === null ? undefined : targetAt(view.state, pos);
       if (target === undefined) return false;
       event.preventDefault();
-      options.open(target);
+      // Cmd/Ctrl-click follows it in place, with Shift in a new tab.
+      options.open(target, event.shiftKey);
       return true;
     },
   });

@@ -30,10 +30,10 @@ import { settings } from '../state/settings';
 import {
   allNotes,
   closeTab,
+  followFrom,
   formerTitle,
   noteById,
   noteLabel,
-  openNote,
   resolveTarget,
   saveAttachment,
   saveNote,
@@ -78,9 +78,9 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
         ? { shown: note.address, hover: title }
         : { shown: title, hover: note.address };
     },
-    open: target => {
+    open: (target, newTab) => {
       const id = resolveTarget(target);
-      if (id) openNote(id);
+      if (id) void followFrom(props.id, id, newTab);
       else void followBrokenLink(props.id, target);
     },
     formerTitle: target => formerTitle(target) ?? null,

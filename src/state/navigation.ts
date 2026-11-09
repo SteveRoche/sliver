@@ -3,6 +3,7 @@ import { createStore } from 'solid-js/store';
 import type { NoteId } from '../vault/api';
 import { findPane, paneNote, panes } from './layout';
 import {
+  activateTab,
   inZettelkasten,
   layout,
   navigate,
@@ -10,12 +11,13 @@ import {
   parentNote,
   sequenceNotes,
   sequenceOf,
+  tabOf,
 } from './workspace';
 
 /**
- * Moving between notes in a pane: back and forward through the notes it
- * showed, and along the Folgezettel (parent, first next note, asides).
- * Moves replace the pane's active note rather than open tabs (`navigate`).
+ * Moving between notes in a pane: back and forward through the notes its
+ * active tab showed, and along the Folgezettel (parent, first next note,
+ * asides). Moves replace the tab's note rather than open tabs (`navigate`).
  */
 
 interface History {
@@ -24,36 +26,57 @@ interface History {
   at: number;
 }
 
-/** Each pane's history, by pane id; not persisted. */
-const [histories, setHistories] = createStore<Record<string, History>>({});
+/**
+ * Each tab's history, by tab key (so it moves with the tab between panes);
+ * not persisted.
+ */
+const [histories, setHistories] = createStore<
+  Record<string, History | undefined>
+>({});
 
-// Every note a pane comes to show joins its history, however it got there
-// (sidebar, link, tab switch), dropping what was ahead of it.
+// Every note a tab comes to show joins its history, however it got there
+// (sidebar, link, switcher), dropping what was ahead of it. Closed tabs'
+// histories go.
 createRoot(() =>
   createEffect(() => {
-    for (const pane of panes(layout.root)) {
-      const note = paneNote(pane);
-      if (!note) continue;
-      untrack(() => {
-        const h = histories[pane.id] ?? { notes: [], at: -1 };
-        if (h.notes[h.at] === note) return;
-        const notes = [...h.notes.slice(0, h.at + 1), note];
-        setHistories(pane.id, { notes, at: notes.length - 1 });
-      });
-    }
+    const tabs = panes(layout.root).flatMap(pane => pane.tabs);
+    const notes = tabs.map(tab => [tab.key, tab.note] as const);
+    untrack(() => {
+      const open = new Set(tabs.map(tab => tab.key));
+      for (const key of Object.keys(histories)) {
+        if (!open.has(key)) setHistories(key, undefined);
+      }
+      for (const [key, note] of notes) {
+        if (!note) continue;
+        const h = histories[key] ?? { notes: [], at: -1 };
+        if (h.notes[h.at] === note) continue;
+        const next = [...h.notes.slice(0, h.at + 1), note];
+        setHistories(key, { notes: next, at: next.length - 1 });
+      }
+    });
   }),
 );
 
-/** Where going back (`-1`) or forward (`1`) in pane `paneId` lands, skipping deleted notes. */
+/** The active tab of pane `paneId`. */
+const activeTab = (paneId: string) => {
+  const pane = findPane(layout.root, paneId);
+  return pane?.tabs.find(t => t.key === pane.active);
+};
+
+/**
+ * Where going back (`-1`) or forward (`1`) in the active tab of pane
+ * `paneId` lands, skipping deleted notes.
+ */
 function historyStep(paneId: string, direction: -1 | 1) {
-  const h = histories[paneId];
-  if (!h) return undefined;
+  const key = activeTab(paneId)?.key;
+  const h = key === undefined ? undefined : histories[key];
+  if (key === undefined || !h) return undefined;
   for (
     let at = h.at + direction;
     at >= 0 && at < h.notes.length;
     at += direction
   ) {
-    if (noteById(h.notes[at])) return at;
+    if (noteById(h.notes[at])) return { key, at, note: h.notes[at] };
   }
   return undefined;
 }
@@ -62,11 +85,17 @@ export const canGo = (paneId: string, direction: -1 | 1) =>
   historyStep(paneId, direction) !== undefined;
 
 export function go(paneId: string, direction: -1 | 1) {
-  const at = historyStep(paneId, direction);
-  if (at === undefined) return;
+  const step = historyStep(paneId, direction);
+  if (!step) return;
+  const elsewhere = tabOf(step.note);
+  // A note open in another tab is shown there; this tab stays as it is.
+  if (elsewhere && elsewhere.key !== step.key) {
+    activateTab(elsewhere.key);
+    return;
+  }
   // Moved first, so the note showing up isn't recorded as a new step.
-  setHistories(paneId, 'at', at);
-  void navigate(paneId, histories[paneId].notes[at]);
+  setHistories(step.key, 'at', step.at);
+  void navigate(paneId, step.note);
 }
 
 export type FolgezettelMove = 'parent' | 'next' | 'previousAside' | 'nextAside';
