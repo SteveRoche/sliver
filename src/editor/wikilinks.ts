@@ -1,12 +1,10 @@
-import { invertedEffects, isolateHistory } from '@codemirror/commands';
+import { isolateHistory } from '@codemirror/commands';
 import {
-  EditorSelection,
   type EditorState,
   type Extension,
   Facet,
   StateEffect,
   StateField,
-  Transaction,
   type TransactionSpec,
 } from '@codemirror/state';
 import {
@@ -20,6 +18,16 @@ import {
 import { isMac } from '../commands/registry';
 import type { LinkRange } from '../vault/api';
 import { linksAt, syntaxField } from './analysis';
+import {
+  ADDRESS,
+  linksIn,
+  linkTitle,
+  linkView,
+  replaceFromFile,
+  toFile,
+  UUID,
+  uuidAt,
+} from './linkView';
 
 export interface WikilinkOptions {
   /** The linked note's title, or null when the target doesn't resolve. */
@@ -48,32 +56,16 @@ const optionsFacet = Facet.define<WikilinkOptions, WikilinkOptions | null>({
   combine: values => values[0] ?? null,
 });
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** Looks like a Zettelkasten address (or a sequence number). */
-const ADDRESS = /^\d+(?:\.\d+(?:[a-z]+\d+)*[a-z]*)?$/i;
-
 /**
- * The link the main cursor is in (brackets included, or just after them).
- * Its uuid target, if it has one, is replaced in the document by the note's
- * title (`shown`) for as long as the cursor stays, so the title can be
- * edited as text and the uuid never shows. Leaving puts the uuid back when
- * the title wasn't touched, and otherwise points the link at the note the
- * new text names (see `leave`). Saving goes through `savedText`, so the
- * file keeps the uuid meanwhile.
+ * The link the main cursor is in (brackets included, or just after them),
+ * with its text on entering, so leaving can tell whether it was edited.
+ * Nothing about the text changes on entering or leaving: a uuid link's
+ * title is already the editor's text (see `linkView.ts`).
  */
 interface ActiveLink {
   from: number;
   to: number;
-  /** The target as it was on entering (a uuid when `expanded`). */
   original: string;
-  /** What stands in the document for `original` while the link is active. */
-  shown: string;
-  expanded: boolean;
-  /**
-   * The uuid's note is gone, and `shown` is its former title: the link
-   * keeps that title (an uninitialized link) instead of the dead uuid.
-   */
-  orphan: boolean;
 }
 
 const setActive = StateEffect.define<ActiveLink | null>({
@@ -84,21 +76,6 @@ const setActive = StateEffect.define<ActiveLink | null>({
     return from < to ? { ...value, from, to } : null;
   },
 });
-
-/**
- * Undo and redo restore the link state along with the text of a step that
- * put a link in (a completion, a retarget), so undoing one forgets which
- * note its title stood for. Only steps that change the text: the rest
- * (entering, leaving) aren't undo steps.
- */
-const linkHistory = invertedEffects.of(tr =>
-  tr.docChanged && tr.effects.some(e => e.is(setActive))
-    ? [setActive.of(tr.startState.field(activeField))]
-    : [],
-);
-
-/** Drops the active link's state, e.g. when the file replaced the text. */
-export const forgetActiveLink = setActive.of(null);
 
 const activeField = StateField.define<ActiveLink | null>({
   create: () => null,
@@ -125,44 +102,32 @@ function parseLink(state: EditorState, from: number, to: number) {
   return { target, from: start, to: start + target.length };
 }
 
-/** What a uuid target is shown as: the title as plain link text. */
-function label(title: string): string {
-  return (
-    title
-      .replace(/[[\]|\n]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim() || 'Untitled'
-  );
+/**
+ * The change that makes the editor show `file` (a reload from disk), in
+ * editor form, or null when it already does.
+ */
+export function reloadSpec(
+  state: EditorState,
+  file: string,
+  targets?: { from: number; to: number }[],
+): TransactionSpec | null {
+  const options = state.facet(optionsFacet) ?? {
+    title: () => null,
+    formerTitle: () => null,
+    resolveTitle: () => null,
+  };
+  // The file wins: a link being edited no longer stands for what it did.
+  return replaceFromFile(state, file, options, targets, [setActive.of(null)]);
 }
 
-/** The active link's target as the file should have it. */
-function activeTarget(state: EditorState, active: ActiveLink) {
-  const link = parseLink(state, active.from, active.to);
-  if (!link) return null;
-  const target =
-    active.expanded && !active.orphan && link.target === active.shown
-      ? active.original
-      : link.target;
-  return { ...link, target };
-}
-
-/** The document as the file should have it: with the active link's uuid back if its title is untouched. */
+/** The document as the file should have it: titles standing for uuids back as uuids. */
 export function savedText(state: EditorState): string {
-  const text = state.doc.toString();
-  const active = state.field(activeField, false);
-  if (!active?.expanded) return text;
-  const link = activeTarget(state, active);
-  if (!link || link.target !== active.original) return text;
-  return text.slice(0, link.from) + link.target + text.slice(link.to);
+  return toFile(state);
 }
 
-/** The target of the link at `pos`, as it should be followed. */
+/** The target of the link at `pos` as the file has it (a title standing for a uuid reads as the uuid). */
 function targetAt(state: EditorState, pos: number): string | undefined {
-  const active = state.field(activeField);
-  if (active && active.from <= pos && pos <= active.to) {
-    return activeTarget(state, active)?.target || undefined;
-  }
-  return linksAt(state).find(l => l.from <= pos && pos <= l.to)?.target;
+  return linksIn(state).find(l => l.from <= pos && pos <= l.to)?.target;
 }
 
 /** Whether the main cursor is in (or at the edge of) a wikilink. */
@@ -179,116 +144,30 @@ export function followLinkAtCursor(view: EditorView): boolean {
   return true;
 }
 
-/** Replaces the uuid `target` by its note's title and makes `link` active. */
-/** What stands in the document for uuid `target` while its link is active. */
-function shownFor(options: WikilinkOptions, target: string) {
-  const title = options.title(target);
-  const former = title === null ? options.formerTitle(target) : null;
-  return {
-    shown: label(title ?? former ?? 'Missing note'),
-    orphan: former !== null,
-  };
-}
-
 /**
- * Text and link state for putting `target` (an address or uuid) into a link
- * the cursor will be in: a uuid goes in as its note's title, standing for
- * the uuid (see `ActiveLink`). Dispatch the text and `active(from, to)`, the
- * link's bounds afterwards, in one undoable step, which `linkHistory`
- * makes undo forget the link along with the text.
- */
-export function linkTarget(state: EditorState, target: string) {
-  const options = state.facet(optionsFacet);
-  const uuid = UUID.test(target) && options !== null;
-  const { shown, orphan } = uuid
-    ? shownFor(options, target)
-    : { shown: target, orphan: false };
-  return {
-    text: shown,
-    active: (from: number, to: number) =>
-      setActive.of({
-        from,
-        to,
-        original: target,
-        shown,
-        expanded: uuid,
-        orphan,
-      }),
-  };
-}
-
-/**
- * Points `links` at `target` in one undoable step; the one the cursor is
- * in gets its editing form (`linkTarget`).
+ * Points `links` at `target` in one undoable step. A uuid goes in as it
+ * is; the incoming filter (`linkView.ts`) shows it as the note's title in
+ * the same transaction.
  */
 export function retargetLinks(
   state: EditorState,
-  links: { from: number; to: number; targetFrom: number; targetTo: number }[],
+  links: { targetFrom: number; targetTo: number }[],
   target: string,
 ): TransactionSpec {
-  const head = state.selection.main.head;
-  const here = links.find(l => l.from <= head && head <= l.to);
-  const form = linkTarget(state, target);
-  const changes = state.changes(
-    links.map(l => ({
-      from: l.targetFrom,
-      to: l.targetTo,
-      insert: l === here ? form.text : target,
-    })),
-  );
   return {
-    changes,
-    effects: here
-      ? form.active(changes.mapPos(here.from, -1), changes.mapPos(here.to, 1))
-      : [],
-  };
-}
-
-function expand(
-  state: EditorState,
-  options: WikilinkOptions,
-  link: { from: number; to: number },
-  target: { target: string; from: number; to: number },
-): TransactionSpec {
-  const { shown, orphan } = shownFor(options, target.target);
-  const delta = shown.length - (target.to - target.from);
-  // A position inside the uuid keeps its distance to the nearer end.
-  const map = (pos: number) => {
-    if (pos <= target.from) return pos;
-    if (pos >= target.to) return pos + delta;
-    return pos - target.from <= target.to - pos
-      ? target.from + Math.min(pos - target.from, shown.length)
-      : target.from + shown.length - Math.min(target.to - pos, shown.length);
-  };
-  return {
-    changes: { from: target.from, to: target.to, insert: shown },
-    selection: EditorSelection.create(
-      state.selection.ranges.map(r =>
-        EditorSelection.range(map(r.anchor), map(r.head)),
-      ),
-      state.selection.mainIndex,
+    changes: state.changes(
+      links.map(l => ({ from: l.targetFrom, to: l.targetTo, insert: target })),
     ),
-    effects: setActive.of({
-      from: link.from,
-      to: link.to + delta,
-      original: target.target,
-      shown,
-      expanded: true,
-      orphan,
-    }),
-    annotations: Transaction.addToHistory.of(false),
   };
 }
 
 /**
- * The cursor left the active link. An untouched title becomes its uuid
- * again (unless the uuid's note is gone: then the title stays, an
- * uninitialized link), and other untouched links stay as they are, even a
- * title that some note has now (a deleted note's link stays uninitialized
- * until followed). Edited text is resolved: the title of a note links to
- * it (its address, or uuid), an address or uuid stays, and anything else
- * stays as an uninitialized link (Mod-click creates the note). After undo
- * or redo nothing is resolved, so the redo history survives.
+ * The cursor left the active link. Untouched, nothing happens. Edited
+ * text is resolved: the title of a note links to it (its address, or, for
+ * a note without one, the title stands for its uuid), an address or uuid
+ * stays, and anything else stays as an uninitialized link (Mod-click
+ * creates the note). After undo or redo nothing is resolved, so the redo
+ * history survives.
  */
 function leave(
   state: EditorState,
@@ -298,24 +177,32 @@ function leave(
 ): TransactionSpec {
   const done = setActive.of(null);
   const link = parseLink(state, active.from, active.to);
-  if (!link?.target) return { effects: done };
-  // Untouched: an orphan keeps its former title, anything else is as it was.
-  if (link.target === active.shown && (active.orphan || !active.expanded)) {
+  if (
+    !link?.target ||
+    state.sliceDoc(active.from, active.to) === active.original
+  ) {
     return { effects: done };
-  }
-  if (active.expanded && link.target === active.shown) {
-    return {
-      changes: { from: link.from, to: link.to, insert: active.original },
-      effects: done,
-      // The exact inverse of the expansion, which wasn't recorded either.
-      annotations: Transaction.addToHistory.of(false),
-    };
   }
   if (undoing || UUID.test(link.target) || ADDRESS.test(link.target)) {
     return { effects: done };
   }
+  if (uuidAt(state, link.from, link.to) !== undefined) return { effects: done };
   const resolved = options.resolveTitle(link.target);
   if (resolved === null || resolved === link.target) return { effects: done };
+  if (UUID.test(resolved)) {
+    return {
+      effects: [
+        done,
+        linkTitle({
+          from: link.from,
+          to: link.to,
+          uuid: resolved,
+          shown: link.target,
+        }),
+      ],
+      annotations: isolateHistory.of('full'),
+    };
+  }
   return {
     changes: { from: link.from, to: link.to, insert: resolved },
     effects: done,
@@ -335,11 +222,6 @@ function reconcile(
     if (head < active.from || head > active.to) {
       return leave(state, options, active, undoing);
     }
-    // A uuid that arrived meanwhile (a completion, a retarget, a paste).
-    const link = parseLink(state, active.from, active.to);
-    if (link && UUID.test(link.target)) {
-      return expand(state, options, active, link);
-    }
     return null;
   }
   const link = linksAt(state).find(l => l.from <= head && head <= l.to);
@@ -347,21 +229,11 @@ function reconcile(
   if (!link || state.sliceDoc(link.targetFrom, link.targetTo) !== link.target) {
     return null;
   }
-  if (UUID.test(link.target)) {
-    return expand(state, options, link, {
-      target: link.target,
-      from: link.targetFrom,
-      to: link.targetTo,
-    });
-  }
   return {
     effects: setActive.of({
       from: link.from,
       to: link.to,
-      original: link.target,
-      shown: link.target,
-      expanded: false,
-      orphan: false,
+      original: state.sliceDoc(link.from, link.to),
     }),
   };
 }
@@ -405,8 +277,8 @@ const sourceMark = Decoration.mark({ class: 'cm-wikilink-source' });
 
 /**
  * Shows each wikilink as its target's title (or its custom text) until the
- * cursor enters it, when the source comes back for editing. A uuid link
- * shows its source only once it's active (and the uuid replaced).
+ * cursor enters it, when the source comes back for editing; a uuid link's
+ * source is its title already.
  */
 function decorations(
   view: EditorView,
@@ -414,13 +286,13 @@ function decorations(
 ): DecorationSet {
   const { state } = view;
   const active = state.field(activeField);
-  const ranges = linksAt(state).flatMap((link: LinkRange) => {
+  const ranges = linksIn(state).flatMap((link: LinkRange) => {
     if (link.from >= link.to) return [];
     if (active && link.from < active.to && link.to > active.from) return [];
     const uuid = UUID.test(link.target);
-    const editing =
-      !uuid &&
-      state.selection.ranges.some(r => r.from <= link.to && r.to >= link.from);
+    const editing = state.selection.ranges.some(
+      r => r.from <= link.to && r.to >= link.from,
+    );
     if (editing) return [sourceMark.range(link.from, link.to)];
     const label = options.label(link.target);
     // A uuid never shows, even when its note is gone.
@@ -511,5 +383,11 @@ export function wikilinks(options: WikilinkOptions): Extension {
     },
   });
 
-  return [optionsFacet.of(options), activeField, linkHistory, display, clicks];
+  return [
+    optionsFacet.of(options),
+    activeField,
+    linkView(() => options),
+    display,
+    clicks,
+  ];
 }

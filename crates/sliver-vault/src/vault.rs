@@ -615,11 +615,11 @@ impl Vault {
     /// The whole vault as a folder tree rooted at the vault root (name `""`).
     pub fn tree(&self) -> FolderNode {
         let mut by_folder: HashMap<&str, Vec<&NoteSummary>> = HashMap::new();
-        let mut titles: HashMap<(&str, String), Vec<Uuid>> = HashMap::new();
+        let mut titles: HashMap<String, Vec<Uuid>> = HashMap::new();
         for note in self.notes.values() {
             by_folder.entry(&note.folder).or_default().push(note);
             if let Some(key) = note.title.as_deref().and_then(title_key) {
-                titles.entry((&note.folder, key)).or_default().push(note.id);
+                titles.entry(key).or_default().push(note.id);
             }
         }
         let clashes: HashSet<Uuid> = titles
@@ -693,7 +693,7 @@ impl Vault {
                 paths.join(", ")
             ))
         } else if clashes.contains(&note.id) {
-            Some("Another note in this folder has the same title".to_owned())
+            Some("Another note in the vault has the same title".to_owned())
         } else if note.address.is_some() && !self.in_zettelkasten(note) {
             Some("Has an address but isn't in the Zettelkasten".to_owned())
         } else if let Some(address) = &note.address
@@ -849,7 +849,7 @@ impl Vault {
                 (zettelkasten, Some(address.to_string()))
             }
         };
-        self.require_title_free(&folder, title.as_deref(), None)?;
+        self.require_title_free(title.as_deref(), None)?;
         let header = format_header(&NoteHeader {
             title,
             address,
@@ -867,8 +867,7 @@ impl Vault {
     }
 
     pub fn rename_note(&mut self, id: Uuid, title: &str) -> Result<NoteSummary> {
-        let folder = self.note(id)?.folder.clone();
-        self.require_title_free(&folder, Some(title), Some(id))?;
+        self.require_title_free(Some(title), Some(id))?;
         let text = set_title(&self.read_note(id)?, title)?;
         self.write_note(id, &text)
     }
@@ -1471,8 +1470,6 @@ impl Vault {
         let from = self.note_path(id)?;
         let to = self.file_path(folder, id);
         if from != to {
-            let title = self.note(id)?.title.clone();
-            self.require_title_free(folder, title.as_deref(), Some(id))?;
             fs::rename(&from, &to)?;
             self.stamps.insert(id, stamp_of(&fs::metadata(&to)?));
             if let Some(note) = self.notes.get_mut(&id) {
@@ -1484,29 +1481,22 @@ impl Vault {
 
     // --- files ---
 
-    /// Refuses a note titled `title` in `folder` when another note there
-    /// (other than `except`) has that title. Untitled notes never clash.
-    fn require_title_free(
-        &self,
-        folder: &str,
-        title: Option<&str>,
-        except: Option<Uuid>,
-    ) -> Result<()> {
+    /// Refuses the title `title` when another note in the vault (other than
+    /// `except`) has it: a title names exactly one note. Untitled notes never
+    /// clash.
+    fn require_title_free(&self, title: Option<&str>, except: Option<Uuid>) -> Result<()> {
         let Some(key) = title.and_then(title_key) else {
             return Ok(());
         };
-        let taken = self.notes.values().any(|n| {
-            Some(n.id) != except
-                && n.folder == folder
-                && n.title.as_deref().and_then(title_key).as_ref() == Some(&key)
-        });
-        if !taken {
+        let Some(other) = self.notes.values().find(|n| {
+            Some(n.id) != except && n.title.as_deref().and_then(title_key).as_ref() == Some(&key)
+        }) else {
             return Ok(());
-        }
-        let place = if folder.is_empty() {
+        };
+        let place = if other.folder.is_empty() {
             "the vault root".to_owned()
         } else {
-            format!("{folder:?}")
+            format!("{:?}", other.folder)
         };
         Err(VaultError::Refused(format!(
             "a note titled {:?} is already in {place}",
@@ -2009,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn titles_are_unique_within_a_folder() {
+    fn titles_are_unique_in_the_vault() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
         vault.create_folder("", "Inbox").unwrap();
@@ -2017,27 +2007,39 @@ mod tests {
             folder: folder.into(),
         };
         let first = vault.create_note(Some("Idea".into()), root("")).unwrap();
-        assert!(matches!(
-            vault.create_note(Some(" idea ".into()), root("")),
-            Err(VaultError::Refused(_))
-        ));
-        let other = vault
-            .create_note(Some("Idea".into()), root("Inbox"))
-            .unwrap();
+        for folder in ["", "Inbox"] {
+            assert!(matches!(
+                vault.create_note(Some(" idea ".into()), root(folder)),
+                Err(VaultError::Refused(_))
+            ));
+        }
         vault.create_note(None, root("")).unwrap();
         vault.create_note(None, root("")).unwrap();
 
-        let second = vault.create_note(Some("Other".into()), root("")).unwrap();
+        let second = vault
+            .create_note(Some("Other".into()), root("Inbox"))
+            .unwrap();
         assert!(matches!(
             vault.rename_note(second.id, "IDEA"),
             Err(VaultError::Refused(_))
         ));
         vault.rename_note(first.id, "idea").unwrap();
-        assert!(matches!(
-            vault.move_to_folder(other.id, ""),
-            Err(VaultError::Refused(_))
-        ));
-        assert_eq!(vault.note(other.id).unwrap().folder, "Inbox");
+        // Moving never changes a title, so it never clashes.
+        vault.move_to_folder(first.id, "Inbox").unwrap();
+
+        // Clashes from edits outside the app are warnings.
+        vault
+            .write_note(second.id, "#metadata((title: \"Idea\")) <note>")
+            .unwrap();
+        let tree = vault.tree();
+        let inbox = tree.folders.iter().find(|f| f.path == "Inbox").unwrap();
+        assert!(
+            inbox
+                .notes
+                .iter()
+                .all(|n| n.warning.as_deref()
+                    == Some("Another note in the vault has the same title"))
+        );
     }
 
     #[test]
