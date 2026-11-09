@@ -15,6 +15,7 @@ import FolderX from 'lucide-solid/icons/folder-x';
 import Group from 'lucide-solid/icons/group';
 import Library from 'lucide-solid/icons/library';
 import Milestone from 'lucide-solid/icons/milestone';
+import PanelTop from 'lucide-solid/icons/panel-top';
 import Pencil from 'lucide-solid/icons/pencil';
 import Plus from 'lucide-solid/icons/plus';
 import Shapes from 'lucide-solid/icons/shapes';
@@ -47,6 +48,7 @@ import {
   noteLabel,
   openAsset,
   openNote,
+  openNoteHere,
   sectionLabel,
   sections,
   sequenceOf,
@@ -178,8 +180,8 @@ const [menuSection, setMenuSection] = createSignal<number | null>(null);
 export { menuAsset, menuFolder, menuSection, menuTarget };
 
 /**
- * Zettelkasten notes marked with Shift- or Cmd/Ctrl-click, whose sequences
- * can be made a section. A plain click or Escape clears them.
+ * Zettelkasten notes marked with Shift-click, whose sequences can be made a
+ * section. A plain click or Escape clears them.
  */
 const [marked, setMarked] = createSignal<ReadonlySet<NoteId>>(new Set());
 let markAnchor: NoteId | null = null;
@@ -197,51 +199,61 @@ const isMarkable = (id: NoteId | undefined): id is NoteId =>
   !!id && inZettelkasten(id) && isNoteAddress(noteById(id)?.address ?? null);
 
 /**
- * Marking rows for a section: Cmd/Ctrl-click toggles a Zettelkasten note,
- * Shift-click adds the rows from the last one marked. Runs in the capture
- * phase, so such clicks never reach the tree (which would open the note).
+ * Clicks on rows that the tree's selection doesn't cover, in the capture
+ * phase so they never reach it (which would open the note in place):
+ * Cmd/Ctrl-click and middle-click open a note in a new tab, and Shift-click
+ * marks the run of Zettelkasten notes from the last one clicked (or marked)
+ * to this one, for a section (sections are runs of sequences).
  */
-function rowMarking(tree: HTMLElement) {
+function rowClicks(tree: HTMLElement) {
   const onClick = (event: MouseEvent) => {
     const target = event.target as Element;
     const id = target.closest<HTMLElement>('[data-note-id]')?.dataset.noteId;
-    const modified = event.shiftKey || event.metaKey || event.ctrlKey;
-    if (!modified) {
+    if (target.closest('.fold-toggle')) return;
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey) {
+      if (!id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openNote(id);
+      return;
+    }
+    if (!event.shiftKey) {
       if (marked().size > 0) clearMarks();
       markAnchor = isMarkable(id) ? id : null;
       return;
     }
-    if (!isMarkable(id) || target.closest('.fold-toggle')) return;
+    if (!isMarkable(id)) return;
     event.preventDefault();
     event.stopPropagation();
-    const next = new Set(marked());
     const rows = [...tree.querySelectorAll<HTMLElement>('[data-note-id]')]
       .map(row => row.dataset.noteId)
       .filter(isMarkable);
     const from = markAnchor ? rows.indexOf(markAnchor) : -1;
     const to = rows.indexOf(id);
-    if (event.shiftKey && from >= 0 && to >= 0) {
-      for (const row of rows.slice(
-        Math.min(from, to),
-        Math.max(from, to) + 1,
-      )) {
-        next.add(row);
-      }
-    } else if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
+    if (from < 0 || to < 0) {
+      markAnchor = id;
+      setMarked(new Set([id]));
+      return;
     }
-    markAnchor = id;
-    setMarked(next);
+    setMarked(new Set(rows.slice(Math.min(from, to), Math.max(from, to) + 1)));
+  };
+  const onAuxClick = (event: MouseEvent) => {
+    if (event.button !== 1) return;
+    const id = (event.target as Element).closest<HTMLElement>('[data-note-id]')
+      ?.dataset.noteId;
+    if (!id) return;
+    event.preventDefault();
+    openNote(id);
   };
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && marked().size > 0) clearMarks();
   };
   tree.addEventListener('click', onClick, { capture: true });
+  tree.addEventListener('auxclick', onAuxClick);
   tree.addEventListener('keydown', onKey);
   return () => {
     tree.removeEventListener('click', onClick, { capture: true });
+    tree.removeEventListener('auxclick', onAuxClick);
     tree.removeEventListener('keydown', onKey);
   };
 }
@@ -449,7 +461,7 @@ export function Sidebar() {
           if (tree) {
             onCleanup(overlayScrollbar(tree));
             onCleanup(treeDragging(tree));
-            onCleanup(rowMarking(tree));
+            onCleanup(rowClicks(tree));
           }
         })
       }
@@ -512,7 +524,7 @@ export function Sidebar() {
               if (id.startsWith(ASSET_PREFIX)) {
                 void openAsset(id.slice(ASSET_PREFIX.length));
               } else {
-                openNote(id);
+                void openNoteHere(id);
               }
             }}
             expandOnClick={false}
@@ -595,6 +607,10 @@ function NoteMenu(props: {
   };
   return (
     <>
+      <Menu.Item value="menu.openInNewTab">
+        <PanelTop size={14} /> Open in new tab
+      </Menu.Item>
+      <Menu.Separator class="menu-separator" />
       <Show when={props.sequences.length > 0}>
         <Menu.Item value="menu.markSection">
           <Group size={14} /> Make {range()} a section…

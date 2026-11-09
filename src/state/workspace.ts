@@ -964,6 +964,25 @@ export async function navigate(paneId: string, id: NoteId) {
   });
 }
 
+/**
+ * The usual way to open a note (sidebar, note switcher): in the focused
+ * pane's current tab, so jumping around doesn't pile up tabs. A modifier
+ * opens a new tab instead (`openNote`).
+ */
+export const openNoteHere = (id: NoteId) => navigate(focusedPane().id, id);
+
+/**
+ * Follows a link from note `source` to `id`: in a new tab, or in place of
+ * the note in the pane showing `source` (not necessarily the focused one,
+ * e.g. from the global preview column).
+ */
+export function followFrom(source: NoteId, id: NoteId, newTab: boolean) {
+  if (newTab) return openNote(id);
+  const tab = tabOf(source);
+  const pane = tab && paneOfTab(layout.root, tab.key);
+  return navigate(pane?.id ?? focusedPane().id, id);
+}
+
 export function newTab() {
   const key = newTabKey();
   const target = focusedPane().id;

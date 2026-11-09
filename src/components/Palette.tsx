@@ -2,8 +2,13 @@ import { Dialog } from '@ark-ui/solid';
 import Search from 'lucide-solid/icons/search';
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
-import { availableCommands, keybindingOf } from '../commands/registry';
-import { allNotes, noteLabel, openNote } from '../state/workspace';
+import { availableCommands, isMac, keybindingOf } from '../commands/registry';
+import {
+  allNotes,
+  noteLabel,
+  openNote,
+  openNoteHere,
+} from '../state/workspace';
 import { Keys } from './Keys';
 import { withOverlayScrollbar } from './scrollbars';
 
@@ -15,11 +20,15 @@ interface Item {
   detail?: string;
   keybinding?: string;
   run: () => unknown;
+  /** What Mod+Enter does instead, if anything (a note in a new tab). */
+  runAlt?: () => unknown;
 }
 
 interface Request {
   placeholder: string;
   items: () => Item[];
+  /** A hint under the list: what Mod+Enter does. */
+  alt?: string;
   /** Called when the palette closes without a choice. */
   cancel?: () => void;
 }
@@ -31,6 +40,7 @@ export function openPalette(mode: PaletteMode) {
   setRequest({
     placeholder: mode === 'notes' ? 'Go to note…' : 'Run a command…',
     items: () => itemsFor(mode),
+    alt: mode === 'notes' ? 'open in new tab' : undefined,
   });
 }
 
@@ -89,7 +99,8 @@ function itemsFor(m: PaletteMode): Item[] {
     return allNotes().map(note => ({
       key: note.id,
       label: noteLabel(note),
-      run: () => openNote(note.id),
+      run: () => openNoteHere(note.id),
+      runAlt: () => openNote(note.id),
     }));
   }
   return availableCommands()
@@ -142,12 +153,13 @@ export function Palette() {
     setHighlighted(0);
   };
 
-  const choose = (item: Item | undefined) => {
+  const choose = (item: Item | undefined, alt = false) => {
     if (!item) return;
     setRequest(null);
     close();
+    const run = (alt && item.runAlt) || item.run;
     // Let the dialog restore focus before the command moves it elsewhere.
-    queueMicrotask(() => void item.run());
+    queueMicrotask(() => void run());
   };
 
   const move = (delta: number) => {
@@ -170,7 +182,7 @@ export function Palette() {
       move(-1);
     } else if (event.key === 'Enter') {
       event.preventDefault();
-      choose(items()[highlighted()]);
+      choose(items()[highlighted()], isMac ? event.metaKey : event.ctrlKey);
     }
   };
 
@@ -223,7 +235,7 @@ export function Palette() {
                     aria-selected={i() === highlighted()}
                     class="palette-item"
                     onPointerMove={e => hover(e, i())}
-                    onClick={() => choose(item)}
+                    onClick={e => choose(item, isMac ? e.metaKey : e.ctrlKey)}
                   >
                     <span>{item.label}</span>
                     <Show when={item.keybinding}>
@@ -239,6 +251,13 @@ export function Palette() {
                 <div class="palette-empty">No matches</div>
               </Show>
             </div>
+            <Show when={request()?.alt}>
+              {alt => (
+                <div class="palette-hint">
+                  <Keys keybinding="Mod+Enter" /> {alt()}
+                </div>
+              )}
+            </Show>
           </Dialog.Content>
         </Dialog.Positioner>
       </Portal>

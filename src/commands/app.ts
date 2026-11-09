@@ -39,6 +39,7 @@ import {
   deleteNote,
   focusedPane,
   focusedTabs,
+  followFrom,
   formerTitle,
   inZettelkasten,
   kinds,
@@ -393,7 +394,7 @@ export async function followBrokenLink(source: NoteId, raw: string) {
     if (choice.value !== null) {
       const note = noteById(choice.value);
       if (note) relink(note);
-      openNote(choice.value);
+      void followFrom(source, choice.value, false);
       return;
     }
     const note = await newLinkedNote(source, name, true);
@@ -842,6 +843,15 @@ export function registerAppCommands(): () => void {
       run: markSectionPrompt,
     },
     ...[
+      {
+        id: 'menu.openInNewTab',
+        title: 'Open note in new tab',
+        enabled: () => menuTarget() !== null,
+        run: () => {
+          const id = menuTarget();
+          if (id) openNote(id);
+        },
+      },
       ...onNote('menu', menuTarget),
       ...onFolder(),
       ...onSection(),
@@ -1022,6 +1032,19 @@ export function registerAppCommands(): () => void {
       run: () => {
         const view = shownEditor();
         if (view) followLinkAtCursor(view);
+      },
+    },
+    {
+      id: 'editor.followLinkInNewTab',
+      title: 'Follow link at cursor in new tab',
+      keybinding: 'Mod+Shift+Enter',
+      enabled: () => {
+        const view = shownEditor();
+        return !!view?.hasFocus && !!linkAtCursor(view);
+      },
+      run: () => {
+        const view = shownEditor();
+        if (view) followLinkAtCursor(view, true);
       },
     },
     {

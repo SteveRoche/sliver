@@ -29,8 +29,8 @@ interface PreviewProps {
   onAnchor?: (get: (() => PagePoint | null) | undefined) => void;
   diagnostics: Diagnostic[];
   loadingPackages?: string[];
-  /** Called with the note id when a `sliver://` link is clicked. */
-  onOpenNote?: (id: string) => void;
+  /** A click on a working wikilink; with Cmd/Ctrl, for a new tab. */
+  onOpenNote?: (id: string, newTab: boolean) => void;
   /** Mod-click on a broken wikilink, with its target. */
   onBrokenLink?: (target: string) => void;
   /** The keys cited in a run of link areas on a line (in points). */
@@ -285,7 +285,10 @@ export function Preview(props: PreviewProps) {
     event.preventDefault();
     const href = hrefOf(anchor) ?? '';
     if (href.startsWith(LINK_SCHEME)) {
-      props.onOpenNote?.(href.slice(LINK_SCHEME.length));
+      props.onOpenNote?.(
+        href.slice(LINK_SCHEME.length),
+        event.metaKey || event.ctrlKey,
+      );
     } else if (href.startsWith(NEW_LINK_SCHEME)) {
       if (event.metaKey || event.ctrlKey) {
         props.onBrokenLink?.(href.slice(NEW_LINK_SCHEME.length));

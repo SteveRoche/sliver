@@ -109,7 +109,7 @@ function targetAt(x: number, y: number) {
   return { pane, zone };
 }
 
-/** Back and forward through the pane's notes, then the Folgezettel moves. */
+/** Back and forward through the active tab's notes, then the Folgezettel moves. */
 const NAVIGATION: {
   label: string;
   icon: Component<{ size?: number }>;
