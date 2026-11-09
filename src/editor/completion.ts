@@ -35,7 +35,6 @@ import { type Component, createRoot } from 'solid-js';
 import { overlayScrollbar } from '../components/scrollbars';
 import type { CompletionItem, Completions, Position } from '../typst/protocol';
 import { inRaw } from './analysis';
-import { linkTarget } from './wikilinks';
 
 export interface LinkCandidate {
   label: string;
@@ -156,8 +155,8 @@ function linkRest(state: EditorState, at: number) {
 /**
  * Puts `target` into the link being completed: the text after `[[` at
  * `from` up to `to` and the rest of the target, closing the link if it
- * isn't. One undoable step that also records which note the link names
- * (`linkTarget`), so undo goes back to the typed text and forgets it.
+ * isn't. One undoable step; a uuid shows as its note's title right away
+ * (the incoming filter in `linkView.ts`).
  */
 function completeLink(
   view: EditorView,
@@ -168,21 +167,17 @@ function completeLink(
 ) {
   const { state } = view;
   const rest = linkRest(state, to);
-  const form = linkTarget(state, target);
   const changes = state.changes({
     from,
     to: rest.end,
-    insert: rest.close === null ? `${form.text}]]` : form.text,
+    insert: rest.close === null ? `${target}]]` : target,
   });
   const end =
-    rest.close === null
-      ? from + form.text.length + 2
-      : changes.mapPos(rest.close);
+    rest.close === null ? from + target.length + 2 : changes.mapPos(rest.close);
   view.dispatch({
     changes,
     // Past the link's `]]`, or before its custom text.
-    selection: { anchor: rest.bar ? from + form.text.length : end },
-    effects: form.active(from - 2, end),
+    selection: { anchor: rest.bar ? from + target.length : end },
     annotations,
     userEvent: 'input.complete',
   });
@@ -191,6 +186,36 @@ function completeLink(
 const NEW_NOTE_LABEL = 'New note';
 
 function wikilinkSource(options: CompletionOptions) {
+  const create = options.newNote;
+  const newNote = (query: string): Completion | null =>
+    create
+      ? {
+          // Labelled with the query itself so the filter always keeps it.
+          label: query,
+          displayLabel: 'New note',
+          type: 'newNote',
+          // Below every match.
+          boost: -1e6,
+          apply: (view, completion, from, to) =>
+            void linkToNewNote(view, create, completion, from, to),
+        }
+      : null;
+  const update = (
+    current: CompletionResult,
+    from: number,
+    _to: number,
+    ctx: CompletionContext,
+  ): CompletionResult | null => {
+    const open = ctx.matchBefore(OPEN_LINK);
+    if (!open || open.from + 2 !== from) return null;
+    const option = newNote(open.text.slice(2));
+    if (!option) return { ...current, from };
+    return {
+      ...current,
+      from,
+      options: [...current.options.slice(0, -1), option],
+    };
+  };
   return (ctx: CompletionContext): CompletionResult | null => {
     const open = ctx.matchBefore(OPEN_LINK);
     if (!open || inRaw(ctx.state, open.from)) return null;
@@ -206,22 +231,24 @@ function wikilinkSource(options: CompletionOptions) {
           pickedCompletion.of(completion),
         ),
     }));
-    const create = options.newNote;
-    if (create) {
-      notes.push({
-        // Labelled with the query itself so the filter always keeps it.
-        label: open.text.slice(2),
-        displayLabel: 'New note',
-        type: 'newNote',
-        // Below every match.
-        boost: -1e6,
-        apply: (view, completion, from, to) =>
-          void linkToNewNote(view, create, completion, from, to),
-      });
-    }
-    // No `validFor`: the create option's label must follow the query.
-    return { from: open.from + 2, options: notes };
+    const option = newNote(open.text.slice(2));
+    if (option) notes.push(option);
+    // No `validFor`, since the create option's label must follow the query,
+    // but `update` keeps the result while typing: a source asking again
+    // disables the menu meanwhile, and Enter would type a newline.
+    return { from: open.from + 2, options: notes, update };
   };
+}
+
+/**
+ * Inside a link's target, the other sources hold an empty result while it's
+ * typed instead of asking again on every key (see `wikilinkSource`).
+ */
+function quietInLink(ctx: CompletionContext): CompletionResult | null {
+  const open = ctx.matchBefore(OPEN_LINK);
+  return open
+    ? { from: open.from + 2, options: [], validFor: /^[^[\]|\n]*$/ }
+    : null;
 }
 
 /** An unfinished `@key` before the cursor (not after a word: `a@b` is text). */
@@ -232,6 +259,8 @@ const MIN_QUERY = 2;
 
 function zoteroSource(options: CompletionOptions) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
+    const quiet = quietInLink(ctx);
+    if (quiet) return quiet;
     const match = ctx.matchBefore(OPEN_CITATION);
     if (!match || !options.zotero) return null;
     const at = match.from + match.text.indexOf('@');
@@ -310,7 +339,8 @@ const toSnippet = (apply: string) =>
 
 function typstSource(options: CompletionOptions) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
-    if (ctx.matchBefore(OPEN_LINK)) return null;
+    const quiet = quietInLink(ctx);
+    if (quiet) return quiet;
     const line = ctx.state.doc.lineAt(ctx.pos);
     const found = await options.typst(
       ctx.state.doc.toString(),

@@ -53,7 +53,6 @@ import {
   openAsset,
   openNote,
   openVault,
-  placementFolder,
   previewLayout,
   refreshLinks,
   renameAsset,
@@ -101,7 +100,7 @@ async function newNote(placement: Placement, heading: string, kind?: string) {
     title: kind ? `${heading} (${kind})` : heading,
     label: 'Title',
     confirm: 'Create',
-    validate: text => titleClash(placementFolder(placement), text),
+    validate: text => titleClash(text),
   });
   if (title === null) return;
   await createNote(placement, title.trim(), kind);
@@ -114,7 +113,7 @@ async function rename(id: NoteId) {
     label: 'Title',
     initial: note?.title ?? '',
     confirm: 'Rename',
-    validate: text => titleClash(note?.folder ?? '', text, id),
+    validate: text => titleClash(text, id),
   });
   if (title === null || !title.trim()) return;
   await renameNote(id, title.trim());
@@ -175,7 +174,6 @@ async function fileNote(id: NoteId) {
 
 /** Moves note `id` to `placement`, after confirming what else changes. */
 async function fileAt(id: NoteId, placement: Placement) {
-  if (await titleClashes(id, placementFolder(placement))) return;
   const plan = await vault.planMove(id, placement);
   const [first, ...rest] = plan.moves;
   const links = plan.linkEdits.reduce((sum, e) => sum + e.count, 0);
@@ -198,15 +196,6 @@ async function fileAt(id: NoteId, placement: Placement) {
   await moveToAddress(id, placement);
 }
 
-/** Says so when note `id` can't move to `folder` for another note's title there. */
-async function titleClashes(id: NoteId, folder: string) {
-  const note = noteById(id);
-  if (!note?.title || note.folder === folder) return false;
-  const clash = titleClash(folder, note.title, id);
-  if (clash) await message(clash, { title: 'Move note', kind: 'info' });
-  return clash !== null;
-}
-
 const folderLabel = (path: string) => (path === '' ? 'Vault root' : path);
 
 async function moveNoteToFolder(id: NoteId) {
@@ -221,7 +210,6 @@ async function moveNoteToFolder(id: NoteId) {
 
 /** Moves note `id` into folder `folder`, warning first if it loses its address. */
 async function moveNoteInto(id: NoteId, folder: string) {
-  if (await titleClashes(id, folder)) return;
   const note = noteById(id);
   if (note?.address && inZettelkasten(id)) {
     const ok = await ask(
@@ -363,7 +351,7 @@ async function newNoteDefault(kind?: string) {
     label: 'Title',
     confirm: 'Create',
     choice: folderChoice(newNoteFolder(activeNote())),
-    validate: (text, folder) => titleClash(folder, text),
+    validate: text => titleClash(text),
   });
   if (result) await noteInFolder(result.choice, result.text.trim(), true, kind);
 }
@@ -479,7 +467,7 @@ export async function newLinkedNote(
     initial: query.trim(),
     confirm: 'Create',
     choice: folderChoice(newNoteFolder(source)),
-    validate: (text, folder) => titleClash(folder, text),
+    validate: text => titleClash(text),
   });
   if (result === null) return null;
   // Stays on the linking note unless `open`.
@@ -507,7 +495,7 @@ async function linkedNoteAt(
     title: `New note ${place.address}`,
     label: 'Title',
     confirm: 'Create',
-    validate: text => titleClash(placementFolder(place.placement), text),
+    validate: text => titleClash(text),
   });
   if (title === null) return;
   relink(await createNote(place.placement, title.trim()));

@@ -8,12 +8,8 @@ import {
   on,
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
-import { linksAt } from '../editor/analysis';
-import {
-  forgetActiveLink,
-  retargetLinks,
-  savedText,
-} from '../editor/wikilinks';
+import { fileToDocPosition, linksIn } from '../editor/linkView';
+import { reloadSpec, retargetLinks, savedText } from '../editor/wikilinks';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -114,13 +110,13 @@ export interface NoteSession {
   conflict: () => DiskConflict | null;
   setConflict(conflict: DiskConflict | null): void;
   /** Takes the file's text from disk, dropping unsaved edits. */
-  loadFromDisk(text: string): void;
+  loadFromDisk(text: string): Promise<void>;
   /** The editor's text now. */
   currentText(): string;
   edit(text: string): void;
   flush(): Promise<void>;
   /** Swaps in text changed outside the editor (e.g. a rename), keeping the cursor. */
-  replaceText(text: string): void;
+  replaceText(text: string): Promise<void>;
   /** Replaces the editor's selection with `text` (inserts at the cursor) and focuses it. */
   insert(text: string): void;
   /** Points the editor's wikilinks to `from` at `to` instead, keeping their custom text (one undo step). */
@@ -600,8 +596,8 @@ function createSession(id: NoteId): NoteSession {
       setConflict(next);
     },
     currentText: () => (view && savedText(view.state)) ?? latestText ?? '',
-    loadFromDisk(next) {
-      this.replaceText(next);
+    async loadFromDisk(next) {
+      await this.replaceText(next);
       // The edit the replacement made goes nowhere: it's what's on disk.
       saver.cancel();
       setDirty(false);
@@ -611,7 +607,8 @@ function createSession(id: NoteId): NoteSession {
       if (!mainPath || !view) return;
       const found = await typst.jumpFromClick(mainPath, page, x, y);
       if (!found || found.path !== notePath(id) || !view) return;
-      const { line, column } = found.position;
+      // The compiler sees the file, where uuids stand for titles.
+      const { line, column } = fileToDocPosition(view.state, found.position);
       const doc = view.state.doc;
       if (line >= doc.lines) return;
       const at = Math.min(doc.line(line + 1).from + column, doc.length);
@@ -646,30 +643,17 @@ function createSession(id: NoteId): NoteSession {
     async flush() {
       await saver.flush();
     },
-    replaceText(next) {
+    async replaceText(next) {
       if (!view) return;
-      if (savedText(view.state) === next) return;
-      const current = view.state.doc.toString();
-      let start = 0;
-      while (start < current.length && current[start] === next[start]) start++;
-      let end = 0;
-      while (
-        end < current.length - start &&
-        end < next.length - start &&
-        current[current.length - 1 - end] === next[next.length - 1 - end]
-      ) {
-        end++;
-      }
-      view.dispatch({
-        changes: {
-          from: start,
-          to: current.length - end,
-          insert: next.slice(start, next.length - end),
-        },
-        // The file wins: a link being edited no longer stands for the
-        // target it had (a delete may have rewritten it to a title).
-        effects: forgetActiveLink,
-      });
+      // Which `[[...]]` are links (not raw or comments), for showing uuids as titles.
+      const links = await vault.analyze(next).catch(() => null);
+      if (!view) return;
+      const spec = reloadSpec(
+        view.state,
+        next,
+        links?.links.map(l => ({ from: l.targetFrom, to: l.targetTo })),
+      );
+      if (spec) view.dispatch(spec);
     },
     shownView() {
       // Hidden tabs and reading view hide the editor with `display: none`.
@@ -677,7 +661,7 @@ function createSession(id: NoteId): NoteSession {
     },
     retarget(from, to) {
       if (!view) return;
-      const links = linksAt(view.state).filter(link =>
+      const links = linksIn(view.state).filter(link =>
         sameTarget(link.target, from),
       );
       if (links.length > 0) {
@@ -686,7 +670,7 @@ function createSession(id: NoteId): NoteSession {
     },
     sourceTarget(target) {
       if (!view) return undefined;
-      return linksAt(view.state)
+      return linksIn(view.state)
         .find(link => sameTarget(link.target, target))
         ?.target.trim();
     },
@@ -1258,33 +1242,19 @@ export const plainQuotes = (text: string) =>
 export const titleKey = (title: string) =>
   plainQuotes(title.trim()).toLowerCase();
 
-/** The folder a note created at `placement` lands in. */
-export const placementFolder = (placement: Placement) =>
-  placement.kind === 'unaddressed'
-    ? (placement.folder ?? '')
-    : (zettelkasten()?.path ?? '');
-
 /**
- * Why a note titled `title` can't be in `folder` (another note there has
- * that title; notes in other folders may), or null. `except` is the note
- * being renamed or moved. The backend refuses the same.
+ * Why a note can't be titled `title` (another note in the vault has that
+ * title: a title names exactly one note), or null. `except` is the note
+ * being renamed. The backend refuses the same.
  */
-export function titleClash(
-  folder: string,
-  title: string,
-  except?: NoteId,
-): string | null {
+export function titleClash(title: string, except?: NoteId): string | null {
   const key = titleKey(title);
   if (!key) return null;
-  const taken = allNotes().some(
-    n =>
-      n.id !== except &&
-      n.folder === folder &&
-      n.title &&
-      titleKey(n.title) === key,
+  const other = allNotes().find(
+    n => n.id !== except && n.title && titleKey(n.title) === key,
   );
-  if (!taken) return null;
-  const place = folder ? `"${folder}"` : 'the vault root';
+  if (!other) return null;
+  const place = other.folder ? `"${other.folder}"` : 'the vault root';
   return `A note titled "${title.trim()}" is already in ${place}.`;
 }
 
@@ -1329,7 +1299,7 @@ export async function renameNote(id: NoteId, title: string) {
   const session = sessions.get(id);
   await session?.flush();
   await vault.renameNote(id, title);
-  if (session) session.replaceText(await vault.readNote(id));
+  if (session) await session.replaceText(await vault.readNote(id));
   await refreshTree();
 }
 
@@ -1345,7 +1315,7 @@ export async function deleteNote(id: NoteId) {
 async function reloadChanged(ids: NoteId[]) {
   for (const id of ids) {
     const session = sessions.get(id);
-    if (session) session.replaceText(await vault.readNote(id));
+    if (session) await session.replaceText(await vault.readNote(id));
   }
   await refreshTree();
 }
@@ -1528,7 +1498,7 @@ export async function setNoteKind(id: NoteId, kind: string | null) {
   const session = sessions.get(id);
   await session?.flush();
   await vault.setKind(id, kind);
-  if (session) session.replaceText(await vault.readNote(id));
+  if (session) await session.replaceText(await vault.readNote(id));
   await refreshTree();
   await session?.reloadMain();
   invalidatePreviews();
@@ -1738,7 +1708,7 @@ export async function applyDiskChanges(changes: DiskChanges) {
     const session = sessions.get(id);
     if (!session) continue;
     if (session.dirty()) session.setConflict('changed');
-    else session.loadFromDisk(await vault.readNote(id));
+    else await session.loadFromDisk(await vault.readNote(id));
   }
   for (const id of changes.removed) {
     const session = sessions.get(id);
@@ -1779,7 +1749,7 @@ export async function resolveConflict(id: NoteId, keep: 'mine' | 'disk') {
       const tab = tabOf(id);
       if (tab) await closeTab(tab.key, true);
     } else {
-      session.loadFromDisk(await vault.readNote(id));
+      await session.loadFromDisk(await vault.readNote(id));
     }
     return;
   }
