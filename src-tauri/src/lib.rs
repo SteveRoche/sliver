@@ -1,4 +1,5 @@
 mod commands;
+mod compiler;
 #[cfg(target_os = "macos")]
 mod menu;
 mod state;
@@ -20,9 +21,27 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(commands::OpenVault(Mutex::new(None)))
+        .manage(compiler::Compiler::default())
         .manage(watch::VaultWatcher::default())
         .setup(|app| Ok(window::create(app)?))
         .invoke_handler(tauri::generate_handler![
+            compiler::typst_set_source,
+            compiler::typst_set_prefix,
+            compiler::typst_remove_source,
+            compiler::typst_affected_mains,
+            compiler::typst_forget_file,
+            compiler::typst_add_package,
+            compiler::typst_has_package,
+            compiler::typst_compile,
+            compiler::typst_complete,
+            compiler::typst_tooltip,
+            compiler::typst_signature,
+            compiler::typst_jump_from_click,
+            compiler::typst_jump_from_cursor,
+            compiler::typst_metadata_text,
+            compiler::typst_standalone,
+            compiler::typst_citation_marks,
+            compiler::typst_citation_styles,
             commands::create_vault,
             commands::open_vault,
             commands::last_vault,

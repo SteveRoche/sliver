@@ -982,18 +982,6 @@ fn signature_at(world: &CompileWorld, source: &Source, cursor: usize) -> Option<
 }
 
 /// Milliseconds from an arbitrary start, for timing compiles.
-#[cfg(target_arch = "wasm32")]
-fn now_ms() -> f64 {
-    use wasm_bindgen::prelude::wasm_bindgen;
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = performance, js_name = now)]
-        fn performance_now() -> f64;
-    }
-    performance_now()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn now_ms() -> f64 {
     use std::sync::OnceLock;
     use std::time::Instant;

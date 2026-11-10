@@ -1,54 +1,51 @@
+import { invoke } from '@tauri-apps/api/core';
 import type {
-  Calls,
   CitationMark,
+  CompileHeader,
   CompileResult,
   Completions,
-  FromWorker,
-  HostReply,
   Hover,
   PagePoint,
   Position,
-  Request,
   Signature,
   SourceLocation,
-  WorkerHost,
 } from './protocol';
-
-type Args<K extends keyof Calls> = Calls[K]['args'];
-type Result<K extends keyof Calls> = Calls[K]['result'];
 
 const decoder = new TextDecoder();
 
-/** Talks to the Typst compiler running in a Web Worker. */
-export class TypstClient {
-  private worker = new Worker(new URL('./worker.ts', import.meta.url), {
-    type: 'module',
-  });
-  private nextId = 0;
-  private pending = new Map<
-    number,
-    { resolve: (value: unknown) => void; reject: (error: Error) => void }
-  >();
-  private loadedListeners = new Set<() => void>();
+/** How long a package that failed to load waits before it's tried again. */
+const RETRY_MS = 30_000;
 
-  constructor(private host: WorkerHost) {
-    this.worker.onmessage = (event: MessageEvent<FromWorker>) => {
-      const message = event.data;
-      if ('event' in message) {
-        for (const listener of this.loadedListeners) listener();
-      } else if ('op' in message) {
-        void this.serveHost(message);
-      } else {
-        const call = this.pending.get(message.id);
-        this.pending.delete(message.id);
-        if (message.ok) call?.resolve(message.value);
-        else call?.reject(new Error(message.error));
-      }
-    };
+function packageUrl(spec: string): string {
+  const match = /^@preview\/([a-z0-9-]+):(\d+\.\d+\.\d+)$/.exec(spec);
+  if (!match) {
+    throw new Error(`only @preview packages can be downloaded: ${spec}`);
   }
+  return `https://packages.typst.org/preview/${match[1]}-${match[2]}.tar.gz`;
+}
+
+async function gunzip(gz: ArrayBuffer): Promise<Uint8Array> {
+  const stream = new Blob([gz])
+    .stream()
+    .pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * Talks to the Typst compiler, which runs natively in the backend
+ * (`src-tauri/src/compiler.rs`): one engine for every open note. Vault
+ * files a compile reads are loaded there too; packages are fetched here
+ * (the open vault's `.sliver/pkg` cache first, else packages.typst.org) and
+ * handed over.
+ */
+export class TypstClient {
+  private loadedListeners = new Set<() => void>();
+  private loading = new Map<string, Promise<void>>();
+  private loaded = new Set<string>();
+  private failedAt = new Map<string, number>();
 
   setSource(path: string, text: string): Promise<void> {
-    return this.call('setSource', { path, text });
+    return invoke('typst_set_source', { path, text });
   }
 
   /**
@@ -56,68 +53,78 @@ export class TypstClient {
    * imports). Positions in results stay relative to the text itself.
    */
   setPrefix(path: string, prefix: string): Promise<void> {
-    return this.call('setPrefix', { path, prefix });
+    return invoke('typst_set_prefix', { path, prefix });
   }
 
   removeSource(path: string): Promise<void> {
-    return this.call('removeSource', { path });
+    return invoke('typst_remove_source', { path });
   }
 
   /** Forgets vault file `path`; resolves to the mains that read it. */
   forgetFile(path: string): Promise<string[]> {
-    return this.call('forgetFile', { path });
+    return invoke('typst_forget_file', { path });
   }
 
   /** Compiles `main`; with `render`, also renders its changed pages. */
   async compile(
     main: string,
     render: boolean,
-    /** A source file to replace first, in the same message. */
+    /** A source file to replace first, in the same call. */
     source?: { path: string; text: string },
     /** A point of the last layout to follow into the new one. */
     anchor?: PagePoint | null,
   ): Promise<CompileResult> {
-    const raw = await this.call('compile', { main, render, source, anchor });
+    const body = await invoke<ArrayBuffer>('typst_compile', {
+      main,
+      render,
+      source: source ?? null,
+      anchor: anchor ? { page: anchor.page, y: anchor.y } : null,
+    });
+    const length = new DataView(body).getUint32(0, true);
+    const header: CompileHeader = JSON.parse(
+      decoder.decode(new Uint8Array(body, 4, length)),
+    );
+    const svg = new Uint8Array(body, 4 + length);
+    const loadingPackages = this.ensurePackages(header.missingPackages);
+    const diagnostics = header.diagnostics.filter(
+      // "Not found" errors of packages being fetched are left out.
+      d => !loadingPackages.some(spec => d.message.includes(spec)),
+    );
     const moved =
-      anchor && raw.anchor ? { from: anchor, to: raw.anchor } : null;
-    const {
-      anchor: _,
-      rendered,
-      pageSizes,
-      backgrounds,
-      bandCounts,
-      bandRects,
-      bandKeys,
-      svg,
-      svgEnds,
-      ...stats
-    } = raw;
-    if (!rendered) return { ...stats, anchor: moved, pages: null };
-    let band = 0;
+      anchor && header.anchor ? { from: anchor, to: header.anchor } : null;
     let start = 0;
-    const pages = bandCounts.map((count, page) => ({
-      width: pageSizes[2 * page],
-      height: pageSizes[2 * page + 1],
-      background: backgrounds[page],
-      bands: Array.from({ length: count }, () => {
-        const end = svgEnds[band];
-        const out = {
-          top: bandRects[2 * band],
-          height: bandRects[2 * band + 1],
-          key: bandKeys[band],
-          svg: end > start ? decoder.decode(svg.subarray(start, end)) : null,
-        };
-        start = end;
-        band++;
-        return out;
-      }),
-    }));
-    return { ...stats, anchor: moved, pages };
+    const pages =
+      header.pages?.map(page => ({
+        width: page.width,
+        height: page.height,
+        background: page.background,
+        bands: page.bands.map(band => {
+          const out = {
+            top: band.top,
+            height: band.height,
+            key: band.key,
+            svg:
+              band.end > start
+                ? decoder.decode(svg.subarray(start, band.end))
+                : null,
+          };
+          start = band.end;
+          return out;
+        }),
+      })) ?? null;
+    return {
+      diagnostics,
+      loadingPackages,
+      compileMs: header.compileMs,
+      renderMs: header.renderMs,
+      anchor: moved,
+      pages,
+    };
   }
 
   /** Main files whose last compile read `path`, i.e. those a change to it affects. */
   affectedMains(path: string): Promise<string[]> {
-    return this.call('affectedMains', { path });
+    return invoke('typst_affected_mains', { path });
   }
 
   /**
@@ -131,7 +138,7 @@ export class TypstClient {
     position: Position,
     explicit: boolean,
   ): Promise<Completions | null> {
-    return this.call('complete', { main, path, text, position, explicit });
+    return invoke('typst_complete', { main, path, text, position, explicit });
   }
 
   /** What hovering `position` in `text` shows. */
@@ -142,7 +149,7 @@ export class TypstClient {
     position: Position,
     before: boolean,
   ): Promise<Hover | null> {
-    return this.call('tooltip', { main, path, text, position, before });
+    return invoke('typst_tooltip', { main, path, text, position, before });
   }
 
   /** Signature help for the call around `position` in `text`. */
@@ -152,7 +159,7 @@ export class TypstClient {
     text: string,
     position: Position,
   ): Promise<Signature | null> {
-    return this.call('signature', { main, path, text, position });
+    return invoke('typst_signature', { main, path, text, position });
   }
 
   /** The source behind a click on page `page` at (`x`, `y`) points. */
@@ -162,7 +169,7 @@ export class TypstClient {
     x: number,
     y: number,
   ): Promise<SourceLocation | null> {
-    return this.call('jumpFromClick', { main, page, x, y });
+    return invoke('typst_jump_from_click', { main, page, x, y });
   }
 
   /** Where the text at `position` in `path` appears in `main`'s pages. */
@@ -171,12 +178,12 @@ export class TypstClient {
     path: string,
     position: Position,
   ): Promise<PagePoint[]> {
-    return this.call('jumpFromCursor', { main, path, position });
+    return invoke('typst_jump_from_cursor', { main, path, position });
   }
 
   /** The string metadata labelled `label` in `main`'s last good compile. */
   metadataText(main: string, label: string): Promise<string | null> {
-    return this.call('metadataText', { main, label });
+    return invoke('typst_metadata_text', { main, label });
   }
 
   /** Compiles `text` as a main file of its own, which is then forgotten. */
@@ -185,56 +192,74 @@ export class TypstClient {
     text: string,
     render: boolean,
   ): Promise<{ pages: string[]; errors: string[] }> {
-    return this.call('standalone', { path, text, render });
+    return invoke('typst_standalone', { path, text, render });
   }
 
   /** Where citations and cross-references start in `main`'s last good layout. */
   citationMarks(main: string): Promise<CitationMark[]> {
-    return this.call('citationMarks', { main });
+    return invoke('typst_citation_marks', { main });
   }
 
   /** Typst's built-in citation styles. */
   citationStyles(): Promise<{ name: string; label: string }[]> {
-    return this.call('citationStyles', {});
+    return invoke('typst_citation_styles');
   }
 
   /**
-   * Fires when packages or vault files finish loading, so documents that
-   * needed them can recompile.
+   * Fires when packages finish loading, so documents that needed them can
+   * recompile.
    */
   onLoaded(listener: () => void): () => void {
     this.loadedListeners.add(listener);
     return () => this.loadedListeners.delete(listener);
   }
 
-  private async serveHost(request: Extract<FromWorker, { op: string }>) {
-    if (request.op === 'savePackage') {
-      await this.host
-        .save(request.spec, request.data)
-        .catch(error =>
-          console.warn(`could not cache ${request.spec}:`, error),
-        );
-      return;
+  /** Starts loading the packages `specs` the engine lacks; returns those loading. */
+  private ensurePackages(specs: string[]): string[] {
+    for (const spec of specs) {
+      if (this.loaded.has(spec) || this.loading.has(spec)) continue;
+      if (Date.now() - (this.failedAt.get(spec) ?? -Infinity) < RETRY_MS) {
+        continue;
+      }
+      const task = this.loadPackage(spec)
+        .then(
+          () => {
+            this.loaded.add(spec);
+            for (const listener of this.loadedListeners) listener();
+          },
+          error => {
+            this.failedAt.set(spec, Date.now());
+            console.warn(`could not load ${spec}:`, error);
+          },
+        )
+        .finally(() => this.loading.delete(spec));
+      this.loading.set(spec, task);
     }
-    const value = await (request.op === 'loadFile'
-      ? this.host.loadFile(request.path)
-      : this.host.load(request.spec)
-    ).catch(() => null);
-    const reply: HostReply = { hostId: request.hostId, value };
-    this.worker.postMessage(reply, value ? [value] : []);
+    return specs.filter(spec => this.loading.has(spec));
   }
 
-  private call<K extends keyof Calls>(
-    kind: K,
-    args: Args<K>,
-  ): Promise<Result<K>> {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-      });
-      this.worker.postMessage({ id, kind, ...args } as Request);
+  // The vault cache is a local read, so it's tried first; a download goes
+  // straight to the engine and is saved to the vault off the critical path.
+  private async loadPackage(spec: string): Promise<void> {
+    const cached = await invoke<ArrayBuffer>('load_package', { spec }).catch(
+      () => null,
+    );
+    if (cached && cached.byteLength > 0) {
+      await this.addPackage(spec, await gunzip(cached));
+      return;
+    }
+    const response = await fetch(packageUrl(spec));
+    if (!response.ok) throw new Error(`${spec}: HTTP ${response.status}`);
+    const gz = await response.arrayBuffer();
+    await this.addPackage(spec, await gunzip(gz));
+    void invoke('save_package', new Uint8Array(gz), {
+      headers: { 'x-package-spec': spec },
+    }).catch(error => console.warn(`could not cache ${spec}:`, error));
+  }
+
+  private addPackage(spec: string, tar: Uint8Array): Promise<void> {
+    return invoke('typst_add_package', tar, {
+      headers: { 'x-package-spec': spec },
     });
   }
 }
