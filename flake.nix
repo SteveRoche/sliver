@@ -15,11 +15,7 @@
   {
     devShells.default = pkgs.mkShell {
       packages = with pkgs; [
-        (rust-bin.stable.latest.default.override {
-          targets = [ "wasm32-unknown-unknown" ];
-        })
-        # Must match the `wasm-bindgen` crate version once sliver-typst depends on it.
-        wasm-bindgen-cli
+        rust-bin.stable.latest.default
         pnpm
       ];
     };

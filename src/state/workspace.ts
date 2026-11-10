@@ -272,9 +272,7 @@ export function firstPreviews(timeoutMs: number): Promise<void> {
           const result = session?.result();
           if (!session || !result) return false;
           return (
-            session.pages().length > 0 ||
-            (result.loadingPackages.length === 0 &&
-              result.loadingFiles.length === 0)
+            session.pages().length > 0 || result.loadingPackages.length === 0
           );
         });
         if (ready) queueMicrotask(done);
@@ -560,7 +558,6 @@ function createSession(id: NoteId): NoteSession {
             { severity: 'error', message: error.message, hints: [] },
           ],
           loadingPackages: [],
-          loadingFiles: [],
           compileMs: 0,
           renderMs: 0,
         }),
@@ -695,7 +692,7 @@ function createSession(id: NoteId): NoteSession {
       if (discard) saver.cancel();
       else void saver.flush();
       preview?.dispose();
-      // Everything the worker holds for this note: its text, its wrapper
+      // Everything the compiler holds for this note: its text, its wrapper
       // (with the last layout and rendered page hashes) and its page width.
       void typst.removeSource(notePath(id));
       void typst.removeSource(previewMainPath(id));

@@ -4354,6 +4354,7 @@ dependencies = [
  "notify-debouncer-full",
  "serde",
  "serde_json",
+ "sliver-typst",
  "sliver-vault",
  "tauri",
  "tauri-build",
@@ -4372,7 +4373,6 @@ dependencies = [
  "typst-ide",
  "typst-layout",
  "typst-svg",
- "wasm-bindgen",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ const fmt = (ms: number | undefined) =>
 
 /**
  * Live compile latency for the visible note ("Toggle debug view"): the
- * latest compile and SVG render times in the worker, the edit-to-preview
+ * latest compile and SVG render times in the engine, the edit-to-preview
  * round trip, and the editor's syntax analysis, with the recent maximum and
  * a bar per sample to spot spikes while typing.
  */

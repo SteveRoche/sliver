@@ -408,7 +408,7 @@ pub async fn save_settings(open: State<'_, OpenVault>, json: String) -> CommandR
 }
 
 /// The vault's cached `.tar.gz` for a package as raw bytes; empty if there is
-/// none or no vault is open (the worker then downloads it).
+/// none or no vault is open (the frontend then downloads it).
 #[tauri::command]
 pub async fn load_package(open: State<'_, OpenVault>, spec: String) -> CommandResult<Response> {
     let bytes = match lock(&open).as_ref() {

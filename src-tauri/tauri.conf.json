@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.steve.sliver",
   "build": {
-    "beforeDevCommand": "pnpm build:wasm && pnpm dev",
+    "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build:wasm && pnpm build",
+    "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
   "app": {

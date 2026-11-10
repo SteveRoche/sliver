@@ -7,8 +7,7 @@
       "!!**/target",
       "!!**/node_modules",
       "!!src-tauri/gen",
-      "!!.direnv",
-      "!!src/typst/pkg"
+      "!!.direnv"
     ]
   },
   "formatter": {
