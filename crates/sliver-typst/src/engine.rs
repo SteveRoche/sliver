@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Mutex;
 
+use chrono::Datelike;
+
 use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
 use typst::foundations::{
     Bytes, CastInfo, Datetime, Duration, Label, NativeElement, Reflect, Repr, Value,
@@ -1128,14 +1130,35 @@ impl World for CompileWorld<'_> {
         self.engine.fonts.get(index).cloned()
     }
 
-    fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
-        None
+    /// The local date, or with `offset` (hours) the UTC date shifted by it.
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        let date = match offset {
+            None => chrono::Local::now().date_naive(),
+            Some(offset) => {
+                let seconds = offset.seconds().round() as i64;
+                (chrono::Utc::now() + chrono::TimeDelta::try_seconds(seconds)?).date_naive()
+            }
+        };
+        Datetime::from_ymd(date.year(), date.month() as u8, date.day() as u8)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn today_compiles() {
+        let mut engine = Engine::new();
+        engine
+            .set_source(
+                "/main.typ",
+                "#datetime.today().display() #datetime.today(offset: -12).year()",
+            )
+            .unwrap();
+        let out = engine.compile("/main.typ", false).unwrap();
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+    }
 
     #[test]
     fn compiles_to_svg_pages() {

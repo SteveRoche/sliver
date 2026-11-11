@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 typst = "0.15.1"
 typst-assets = { version = "0.15.1", features = ["fonts"] }
 typst-ide = "0.15.1"

@@ -4368,6 +4368,7 @@ dependencies = [
 name = "sliver-typst"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "typst",
  "typst-assets",
  "typst-ide",
