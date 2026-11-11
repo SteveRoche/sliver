@@ -3,6 +3,7 @@ import {
   type Extension,
   StateEffect,
   StateField,
+  type Text,
 } from '@codemirror/state';
 import {
   Decoration,
@@ -34,7 +35,8 @@ interface SyntaxState {
   raw: { from: number; to: number }[];
 }
 
-const setAnalysis = StateEffect.define<{ text: string; analysis: Analysis }>();
+/** `doc`: the document analyzed; documents are immutable, so identity says whether it's still current. */
+const setAnalysis = StateEffect.define<{ doc: Text; analysis: Analysis }>();
 
 export const syntaxField = StateField.define<SyntaxState>({
   create: () => ({
@@ -45,10 +47,7 @@ export const syntaxField = StateField.define<SyntaxState>({
   }),
   update(value, tr) {
     for (const effect of tr.effects) {
-      if (
-        effect.is(setAnalysis) &&
-        effect.value.text === tr.state.doc.toString()
-      ) {
+      if (effect.is(setAnalysis) && effect.value.doc === tr.state.doc) {
         return fromAnalysis(effect.value.analysis);
       }
     }
@@ -146,12 +145,13 @@ const analyzer = (lint: boolean) =>
         try {
           while (this.stale && !this.destroyed) {
             this.stale = false;
-            const text = this.view.state.doc.toString();
+            const doc = this.view.state.doc;
+            const text = doc.toString();
             const started = performance.now();
             const analysis = await vault.analyze(text);
             recordAnalysis(performance.now() - started);
             // A result for older text is dropped; the loop fetches the latest.
-            if (!this.destroyed && text === this.view.state.doc.toString()) {
+            if (!this.destroyed && doc === this.view.state.doc) {
               const warnings = lint
                 ? analysis.relativePaths.map(r => ({
                     ...r,
@@ -160,7 +160,7 @@ const analyzer = (lint: boolean) =>
                 : [];
               this.view.dispatch({
                 effects: [
-                  setAnalysis.of({ text, analysis }),
+                  setAnalysis.of({ doc, analysis }),
                   setLint.of({ text, warnings }),
                 ],
               });

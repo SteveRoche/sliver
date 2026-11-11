@@ -113,7 +113,7 @@ function PreambleEditor(props: {
         <Editor
           initialDoc={props.initial}
           onChange={text => {
-            pending = text;
+            pending = text();
             clearTimeout(timer);
             timer = setTimeout(save, settings.autosaveDelay);
           }}

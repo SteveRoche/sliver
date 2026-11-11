@@ -21,7 +21,8 @@ import { overlayScrollbar } from './scrollbars';
 
 interface EditorProps {
   initialDoc: string;
-  onChange: (text: string) => void;
+  /** The text is read only when asked for: a long note's copy per keystroke adds up. */
+  onChange: (text: () => string) => void;
   extensions?: Extension;
   vim?: boolean;
   lineNumbers?: boolean;
@@ -226,7 +227,10 @@ export function Editor(props: EditorProps) {
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           EditorView.lineWrapping,
           EditorView.updateListener.of(update => {
-            if (update.docChanged) props.onChange(update.state.doc.toString());
+            if (update.docChanged) {
+              const { doc } = update.state;
+              props.onChange(() => doc.toString());
+            }
           }),
           theme,
           props.extensions ?? [],

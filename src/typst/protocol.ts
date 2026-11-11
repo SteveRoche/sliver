@@ -19,6 +19,8 @@ interface CompileStats {
   /** Compile (parse, evaluate, layout) and SVG render times in the engine. */
   compileMs: number;
   renderMs: number;
+  /** The whole command in the backend: waiting for the compiler, the source, compile, render. */
+  backendMs: number;
 }
 
 /**
@@ -40,6 +42,7 @@ export interface CompileHeader {
   missingPackages: string[];
   compileMs: number;
   renderMs: number;
+  backendMs: number;
 }
 
 /**

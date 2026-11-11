@@ -78,7 +78,13 @@ function withDecorations(compile: Squiggle[], lint: Squiggle[]): SquiggleState {
 const squiggleField = StateField.define<SquiggleState>({
   create: () => withDecorations([], []),
   update(value, tr) {
-    const doc = tr.state.doc.toString();
+    // Only effects need the text, and only when its length could match.
+    let text: string | undefined;
+    const isDoc = (candidate: string) => {
+      if (candidate.length !== tr.state.doc.length) return false;
+      text ??= tr.state.doc.toString();
+      return candidate === text;
+    };
     let { compile, lint } = value;
     let changed = false;
     if (tr.docChanged) {
@@ -95,14 +101,14 @@ const squiggleField = StateField.define<SquiggleState>({
       changed = true;
     }
     for (const effect of tr.effects) {
-      if (effect.is(setDiagnostics) && effect.value.text === doc) {
+      if (effect.is(setDiagnostics) && isDoc(effect.value.text)) {
         compile = toSquiggles(
           effect.value.text,
           effect.value.diagnostics,
           tr.state.doc,
         );
         changed = true;
-      } else if (effect.is(setLint) && effect.value.text === doc) {
+      } else if (effect.is(setLint) && isDoc(effect.value.text)) {
         lint = effect.value.warnings
           .filter(w => w.from < w.to)
           .map(w => ({

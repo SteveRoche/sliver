@@ -524,6 +524,7 @@ function createSession(id: NoteId): NoteSession {
       visible: () => visibleNotes().has(id),
       anchor: () => anchor?.() ?? null,
       onResult: (r, compiledText, timing) => {
+        const applying = performance.now();
         setResult(r);
         if (r.pages) {
           // Bands sent before come back without SVG: take it from what's shown.
@@ -548,7 +549,13 @@ function createSession(id: NoteId): NoteSession {
           text: compiledText,
           diagnostics: r.diagnostics.filter(d => d.path === notePath(id)),
         });
-        recordCompile({ note: id, ...timing });
+        const domMs = performance.now() - applying;
+        recordCompile({
+          note: id,
+          ...timing,
+          domMs,
+          totalMs: timing.totalMs + domMs,
+        });
       },
       onError: error =>
         setResult({
@@ -560,6 +567,7 @@ function createSession(id: NoteId): NoteSession {
           loadingPackages: [],
           compileMs: 0,
           renderMs: 0,
+          backendMs: 0,
         }),
     });
     await table;

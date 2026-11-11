@@ -182,7 +182,7 @@ impl Vault {
     }
 
     fn owns(&self, id: Uuid, address: &Address) -> bool {
-        self.resolve(&address.to_string()) == Some(id)
+        self.by_address.get(address).and_then(|ids| ids.first()) == Some(&id)
     }
 
     /// What links to the notes in `gone`, about to be deleted, should say

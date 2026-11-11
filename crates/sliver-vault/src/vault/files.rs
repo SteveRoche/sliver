@@ -108,6 +108,7 @@ impl Vault {
             stamps: std::mem::take(&mut self.stamps),
             hashes: std::mem::take(&mut self.hashes),
         };
+        self.by_address.clear();
         self.folders.clear();
         self.zettelkasten = None;
         self.section_names.clear();
@@ -152,6 +153,45 @@ impl Vault {
             tree: self.tree() != tree_before,
             preambles,
         })
+    }
+
+    /// Whether the index already agrees with the disk about every one of
+    /// `paths` (vault paths, `/`-separated), so a watcher event for them needs
+    /// no rescan: the app's own writes, moves and deletes, which record their
+    /// stamps as they go. A note or asset counts when its stamp is the one
+    /// recorded, a missing path when the index has nothing there, a folder
+    /// when it's known (changes inside it come as events of their own).
+    /// Anything else (markers, preambles, new files, duplicates) doesn't.
+    pub fn matches_disk(&self, paths: &[String]) -> bool {
+        paths.iter().all(|path| self.path_matches_disk(path))
+    }
+
+    fn path_matches_disk(&self, path: &str) -> bool {
+        let path = path.trim_matches('/');
+        if path.is_empty() || path.split('/').any(|part| part.starts_with('.')) {
+            return false;
+        }
+        let file = self.root.join(path);
+        let folder = parent_folder(path);
+        let id = super::note_id(&file);
+        if id.is_some_and(|id| self.duplicates.contains_key(&id)) {
+            return false;
+        }
+        let note = id.filter(|id| self.notes.get(id).is_some_and(|n| n.folder == folder));
+        match fs::metadata(&file) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                note.is_none() && !self.assets.contains_key(path) && !self.folders.contains(path)
+            }
+            Err(_) => false,
+            Ok(meta) if meta.is_dir() => self.folders.contains(path),
+            Ok(meta) => {
+                let stamp = stamp_of(&meta);
+                match note {
+                    Some(id) => self.stamps.get(&id) == Some(&stamp),
+                    None => self.assets.get(path) == Some(&stamp),
+                }
+            }
+        }
     }
 
     /// A hash of every preamble's text.
@@ -509,5 +549,40 @@ mod tests {
         fs::remove_file(&file).unwrap();
         let changes = vault.refresh().unwrap();
         assert_eq!(changes.removed, vec![note.id]);
+    }
+
+    #[test]
+    fn own_writes_match_the_disk() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let unaddressed = |folder: &str| crate::Placement::Unaddressed {
+            folder: folder.to_owned(),
+        };
+        let note = vault
+            .create_note_of_kind(Some("A".into()), unaddressed(""), None, "")
+            .unwrap();
+        let path = format!("{}.typ", note.id);
+        vault
+            .write_note(note.id, "#metadata((title: \"A\",)) <note>\nbody")
+            .unwrap();
+        let asset = vault.add_asset("Images", "a.png", b"png").unwrap();
+        assert!(vault.matches_disk(&[path.clone(), asset.clone(), "Images".into()]));
+
+        // Moved by the app: neither the old place nor the new one needs a rescan.
+        vault.create_folder("", "Inbox").unwrap();
+        vault.move_to_folder(note.id, "Inbox").unwrap();
+        assert!(vault.matches_disk(&[path.clone(), format!("Inbox/{path}")]));
+
+        // Changed, added or removed outside the app.
+        let moved = dir.0.join("Inbox").join(&path);
+        fs::write(&moved, "#metadata((title: \"A\",)) <note>\nedited outside").unwrap();
+        assert!(!vault.matches_disk(&[format!("Inbox/{path}")]));
+        fs::write(dir.0.join("new.csv"), "x").unwrap();
+        assert!(!vault.matches_disk(&["new.csv".into()]));
+        fs::remove_file(dir.0.join(&asset)).unwrap();
+        assert!(!vault.matches_disk(std::slice::from_ref(&asset)));
+        assert!(!vault.matches_disk(&["Zettelkasten/.zettelkasten".into()]));
+        fs::create_dir(dir.0.join("Outside")).unwrap();
+        assert!(!vault.matches_disk(&["Outside".into()]));
     }
 }

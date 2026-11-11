@@ -295,6 +295,9 @@ pub struct Vault {
     /// so a rescan rereads only changed files and reports only real changes.
     stamps: HashMap<Uuid, Stamp>,
     hashes: HashMap<Uuid, u64>,
+    /// Notes by the address in their header (valid ones only), for resolving
+    /// links without scanning every note. More than one id is a duplicate.
+    by_address: HashMap<Address, BTreeSet<Uuid>>,
     /// The preambles' contents as last read or written, likewise.
     preambles_digest: u64,
 }
@@ -316,6 +319,7 @@ impl Vault {
             assets: BTreeMap::new(),
             stamps: HashMap::new(),
             hashes: HashMap::new(),
+            by_address: HashMap::new(),
             preambles_digest: 0,
         }
     }
@@ -407,6 +411,7 @@ impl Vault {
                 && let Some(summary) = previous.notes.remove(&note.id)
             {
                 let id = note.id;
+                self.add_address(&summary);
                 self.notes.insert(
                     id,
                     NoteSummary {
@@ -959,16 +964,7 @@ impl Vault {
     /// Resolves a wikilink target: an address first, then a uuid.
     pub fn resolve(&self, target: &str) -> Option<Uuid> {
         if let Ok(address) = target.parse::<Address>() {
-            let mut matches: Vec<Uuid> = self
-                .notes
-                .values()
-                .filter(|n| {
-                    n.address.as_deref().and_then(|a| a.parse().ok()) == Some(address.clone())
-                })
-                .map(|n| n.id)
-                .collect();
-            matches.sort();
-            return matches.first().copied();
+            return self.by_address.get(&address)?.first().copied();
         }
         let id = Uuid::parse_str(target).ok()?;
         self.notes.contains_key(&id).then_some(id)
@@ -1506,7 +1502,9 @@ impl Vault {
 
     /// Drops note `id` from the index.
     fn forget(&mut self, id: Uuid) {
-        self.notes.remove(&id);
+        if let Some(old) = self.notes.remove(&id) {
+            self.remove_address(&old);
+        }
         self.links.remove(&id);
         self.citations.remove(&id);
         self.stamps.remove(&id);
@@ -1523,7 +1521,31 @@ impl Vault {
         self.hashes.insert(id, parsed.hash);
         self.links.insert(id, parsed.links);
         self.citations.insert(id, parsed.citations);
+        if let Some(old) = self.notes.remove(&id) {
+            self.remove_address(&old);
+        }
+        self.add_address(&parsed.summary);
         self.notes.insert(id, parsed.summary);
+    }
+
+    fn add_address(&mut self, note: &NoteSummary) {
+        if let Some(address) = note.address.as_deref().and_then(|a| a.parse().ok()) {
+            self.by_address.entry(address).or_default().insert(note.id);
+        }
+    }
+
+    fn remove_address(&mut self, note: &NoteSummary) {
+        if let Some(address) = note
+            .address
+            .as_deref()
+            .and_then(|a| a.parse::<Address>().ok())
+            && let Some(ids) = self.by_address.get_mut(&address)
+        {
+            ids.remove(&note.id);
+            if ids.is_empty() {
+                self.by_address.remove(&address);
+            }
+        }
     }
 
     fn folder_dir(&self, folder: &str) -> PathBuf {
@@ -1552,16 +1574,29 @@ impl Vault {
     /// a crash never leaves a half-written file.
     fn atomic_write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         let tmp_dir = self.root.join(TMP_DIR);
-        fs::create_dir_all(&tmp_dir)?;
         let tmp = tmp_dir.join(Uuid::new_v4().to_string());
-        let mut file = fs::File::create(&tmp)?;
+        let mut file = match fs::File::create(&tmp) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(&tmp_dir)?;
+                fs::File::create(&tmp)?
+            }
+            file => file?,
+        };
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+        if let Err(err) = fs::rename(&tmp, path) {
+            match path.parent() {
+                Some(dir) if err.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(dir)?;
+                    fs::rename(&tmp, path)?;
+                }
+                _ => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(err.into());
+                }
+            }
         }
-        fs::rename(&tmp, path)?;
         Ok(())
     }
 
@@ -2193,6 +2228,19 @@ mod tests {
 
         let reopened = Vault::open(&dir.0).unwrap();
         assert_eq!(ids(reopened.backlinks(b.id).unwrap()), vec![a.id]);
+
+        // A duplicate address resolves to the lower uuid; editing or
+        // deleting it updates the index.
+        vault
+            .write_note(loose.id, "#metadata((address: \"1.1a\")) <note>\n")
+            .unwrap();
+        assert_eq!(vault.resolve("1.1a"), Some(b.id.min(loose.id)));
+        vault
+            .write_note(loose.id, "#metadata((title: \"Loose\")) <note>\n")
+            .unwrap();
+        assert_eq!(vault.resolve("1.1a"), Some(b.id));
+        vault.delete_note(b.id, DeleteMode::Permanent).unwrap();
+        assert_eq!(vault.resolve("1.1a"), None);
     }
 
     #[test]
