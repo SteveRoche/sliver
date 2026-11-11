@@ -1228,9 +1228,13 @@ button.settings-nav-item.active {
   max-width: 280px;
 }
 
+/* A select is as wide as its longest option (a deep folder path) unless
+   allowed to shrink below it. */
 .field-inline .setting-select {
   flex: 1;
+  min-width: 0;
   max-width: none;
+  text-overflow: ellipsis;
 }
 
 .setting-number {
