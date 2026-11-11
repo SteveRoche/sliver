@@ -23,6 +23,7 @@ import Trash2 from 'lucide-solid/icons/trash';
 import TriangleAlert from 'lucide-solid/icons/triangle-exclamation-point';
 import X from 'lucide-solid/icons/x';
 import {
+  createComputed,
   createMemo,
   createSignal,
   For,
@@ -33,6 +34,7 @@ import {
   Show,
   Switch,
 } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
 import { Portal } from 'solid-js/web';
 import { type DropTarget, dropAsset, dropNote } from '../commands/app';
 import { runCommand } from '../commands/registry';
@@ -65,26 +67,36 @@ import type {
 } from '../vault/api';
 import { overlayScrollbar } from './scrollbars';
 
-/** Row data for Ark's tree: folders and notes share one collection. */
+/** What a folder row shows (not its contents, which are its row's children). */
+type FolderRow = Pick<FolderNode, 'name' | 'path' | 'kind' | 'warning'>;
+/** What a note row shows (its next notes are its row's children). */
+type NoteRow = Omit<TreeNode, 'children'>;
+type SectionRow = Pick<SectionNode, 'first' | 'last' | 'name'>;
+
+/**
+ * Row data for Ark's tree: folders and notes share one collection. Rows
+ * carry only what they show, so reconciling a new tree against them (by
+ * `id`, which is unique across kinds) touches each row once.
+ */
 type Node =
   | {
       id: string;
       kind: 'folder';
-      folder: FolderNode;
+      folder: FolderRow;
       depth: number;
       children: Node[];
     }
   | {
       id: string;
       kind: 'note';
-      note: TreeNode;
+      note: NoteRow;
       depth: number;
       children?: Node[];
     }
   | {
       id: string;
       kind: 'section';
-      section: SectionNode;
+      section: SectionRow;
       depth: number;
       children: Node[];
     }
@@ -103,14 +115,13 @@ const SECTION_PREFIX = 'section:';
 const assetId = (path: string) => ASSET_PREFIX + path;
 
 function noteNodes(notes: TreeNode[], depth: number): Node[] {
-  return notes.map(note => ({
+  return notes.map(({ children, ...note }) => ({
     id: note.id,
     kind: 'note',
     note,
     depth,
     // Ark treats a node as a branch whenever it has a children array.
-    children:
-      note.children.length > 0 ? noteNodes(note.children, depth) : undefined,
+    children: children.length > 0 ? noteNodes(children, depth) : undefined,
   }));
 }
 
@@ -132,7 +143,11 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
       (section): Node => ({
         id: SECTION_PREFIX + section.first,
         kind: 'section',
-        section,
+        section: {
+          first: section.first,
+          last: section.last,
+          name: section.name,
+        },
         depth,
         children: noteNodes(section.notes, depth + 1),
       }),
@@ -144,7 +159,12 @@ function folderContents(folder: FolderNode, depth: number): Node[] {
       (sub): Node => ({
         id: folderId(sub.path),
         kind: 'folder',
-        folder: sub,
+        folder: {
+          name: sub.name,
+          path: sub.path,
+          kind: sub.kind,
+          warning: sub.warning,
+        },
         depth,
         children: folderContents(sub, depth + 1),
       }),
@@ -376,8 +396,17 @@ function treeDragging(tree: HTMLElement) {
 const parentPath = (path: string) =>
   path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
 
+const sameStrings = (a: string[], b: string[]) =>
+  a.length === b.length && a.every((value, i) => value === b[i]);
+
 export function Sidebar() {
-  const nodes = createMemo(() => folderContents(tree(), 0));
+  // A store reconciled by id, so a refreshed tree keeps each row's object
+  // (and `<For>` its mounted row) and updates only the fields that changed;
+  // new objects would remount every row.
+  const [nodes, setNodes] = createStore<Node[]>([]);
+  createComputed(() =>
+    setNodes(reconcile(folderContents(tree(), 0), { key: 'id' })),
+  );
   const collection = createMemo(() =>
     createTreeCollection<Node>({
       nodeToValue: node => node.id,
@@ -394,23 +423,29 @@ export function Sidebar() {
         kind: 'folder',
         folder: tree(),
         depth: 0,
-        children: nodes(),
+        children: nodes,
       },
     }),
   );
 
   // Sections and trains of thought start unfolded; ones created later unfold as they appear.
   const [foldedNotes, setFoldedNotes] = createSignal<string[]>([]);
-  const expanded = createMemo(() => {
-    const folded = new Set(foldedNotes());
-    const collapsed = new Set(collapsedFolders());
-    return [
-      ...noteBranchIds(nodes()).filter(id => !folded.has(id)),
-      ...[tree(), ...allSubfolders(tree())]
-        .filter(f => !collapsed.has(f.path))
-        .map(f => folderId(f.path)),
-    ];
-  });
+  // The same array while its contents are, so Ark doesn't recompute every
+  // row's state after a refresh that changed no branch.
+  const expanded = createMemo(
+    () => {
+      const folded = new Set(foldedNotes());
+      const collapsed = new Set(collapsedFolders());
+      return [
+        ...noteBranchIds(nodes).filter(id => !folded.has(id)),
+        ...[tree(), ...allSubfolders(tree())]
+          .filter(f => !collapsed.has(f.path))
+          .map(f => folderId(f.path)),
+      ];
+    },
+    undefined,
+    { equals: sameStrings },
+  );
 
   const onExpandedChange = (open: string[]) => {
     const isOpen = new Set(open);

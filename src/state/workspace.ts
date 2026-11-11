@@ -132,6 +132,14 @@ export interface NoteSession {
   reloadMain(): Promise<void>;
   /** Resends the note's link table (after titles or addresses changed); doesn't recompile. */
   refreshLinks(): Promise<void>;
+  /** The targets the note's last link table covers (what its text links to). */
+  linkTargets(): string[];
+  /**
+   * Changes when what the note links to changed in the tree (a title, an
+   * address, a note gone), so its editor redraws its links.
+   */
+  linksChanged: () => number;
+  markLinksChanged(): void;
   refresh(): void;
   dispose(discard?: boolean): void;
 }
@@ -380,7 +388,9 @@ export const sequenceNotes = (number: number) =>
 export const sections = (): SectionNode[] => zettelkasten()?.sections ?? [];
 
 /** `4–5 Writing`, or `4 Writing` for one sequence. */
-export function sectionLabel(section: SectionNode): string {
+export function sectionLabel(
+  section: Pick<SectionNode, 'first' | 'last' | 'name'>,
+): string {
   const range =
     section.first === section.last
       ? `${section.first}`
@@ -484,12 +494,15 @@ function createSession(id: NoteId): NoteSession {
   // The note's link table covers only the targets its text links to, so it
   // stays small whatever the vault's size; it's resent when they change.
   let tableFor: string | undefined;
+  let tableTargets: string[] = [];
   let tableSent: Promise<void> = Promise.resolve();
+  const [linksChanged, setLinksChanged] = createSignal(0);
   const sendLinkTable = (text: string, force = false) => {
     const targets = linkTargets(text);
     const key = targets.join('\n');
     if (!force && key === tableFor) return tableSent;
     tableFor = key;
+    tableTargets = targets;
     tableSent = tableSent
       .then(async () => {
         const former: Record<string, string> = {};
@@ -692,6 +705,9 @@ function createSession(id: NoteId): NoteSession {
     refreshLinks() {
       return sendLinkTable(this.currentText(), true);
     },
+    linkTargets: () => tableTargets,
+    linksChanged,
+    markLinksChanged: () => setLinksChanged(n => n + 1),
     refresh() {
       preview?.refresh();
     },
@@ -770,10 +786,61 @@ async function closeVault() {
   setVaultRoot(null);
 }
 
-async function refreshTree() {
+/**
+ * What a link to `target` shows with `notes` as the tree: the note it
+ * resolves to (an address, else a uuid) with its title and address. A
+ * title target never resolves.
+ */
+function linkState(notes: ReturnType<typeof index>, target: string): string {
+  const id = notes.byAddress.get(target) ?? target.toLowerCase();
+  const note = notes.byId.get(id);
+  return note ? `${note.id}\u0000${note.title}\u0000${note.address}` : '';
+}
+
+/** Open notes whose links show something else in `after` than in `before`. */
+function linksChangedIn(
+  before: ReturnType<typeof index>,
+  after: ReturnType<typeof index>,
+): NoteSession[] {
+  return [...sessions.values()].filter(session =>
+    session
+      .linkTargets()
+      .some(target => linkState(before, target) !== linkState(after, target)),
+  );
+}
+
+async function fetchTree() {
+  const before = index();
   setTree(await vault.tree());
-  await Promise.all([...sessions.values()].map(s => s.refreshLinks()));
-  invalidatePreviews();
+  // Only notes whose links now show something else need a new link table
+  // and a recompile (and their editors a redraw of their links).
+  const changed = linksChangedIn(before, index());
+  await Promise.all(changed.map(s => s.refreshLinks()));
+  for (const session of changed) session.markLinksChanged();
+  invalidatePreviews(changed);
+}
+
+let treeFetch: Promise<void> | null = null;
+let treeFetchAgain: Promise<void> | null = null;
+
+/**
+ * Refetches the tree. Calls while a fetch runs share one more fetch after
+ * it (which sees their changes), so a burst of saves costs two at most.
+ */
+function refreshTree(): Promise<void> {
+  if (!treeFetch) {
+    treeFetch = fetchTree().finally(() => {
+      treeFetch = null;
+    });
+    return treeFetch;
+  }
+  treeFetchAgain ??= treeFetch
+    .catch(() => undefined)
+    .then(() => {
+      treeFetchAgain = null;
+      return refreshTree();
+    });
+  return treeFetchAgain;
 }
 
 /** Regenerates `links.typ` after the link display setting changed. */
@@ -1645,8 +1712,20 @@ async function afterPathMove(from: string, moved: Moved) {
   await reloadChanged(moved.changed);
   await loadPreambles();
   await reloadMains();
-  await typst.forgetFile(`/${from}`);
-  await typst.forgetFile(`/${moved.path}`);
+  await forgetAssets([from, moved.path]);
+}
+
+/**
+ * Makes the compiler forget `paths` (vault paths), so they're read again
+ * (or found missing), and recompiles the previews that read them.
+ */
+async function forgetAssets(paths: string[]) {
+  const mains = new Set(
+    (await Promise.all(paths.map(path => typst.forgetFile(`/${path}`)))).flat(),
+  );
+  invalidatePreviews(
+    [...sessions.values()].filter(s => mains.has(s.mainPath() ?? '')),
+  );
 }
 
 export async function renameAsset(path: string, name: string) {
@@ -1664,7 +1743,7 @@ export async function deleteAsset(path: string) {
   const tab = assetTab(path);
   if (tab) await closeTab(tab.key);
   await vault.deleteAsset(path, settings.deleteMode);
-  await typst.forgetFile(`/${path}`);
+  await forgetAssets([path]);
   await refreshTree();
 }
 
@@ -1674,6 +1753,7 @@ export async function importAssets(folder: string, sources: string[]) {
   for (const source of sources)
     added.push(await vault.importAsset(folder, source));
   setFolderCollapsed(folder, false);
+  await forgetAssets(added);
   await refreshTree();
   return added;
 }
@@ -1697,6 +1777,7 @@ export async function saveAttachment(
   data: ArrayBuffer,
 ) {
   const path = await vault.addAsset(attachmentFolder(id), name, data);
+  await forgetAssets([path]);
   await refreshTree();
   return path;
 }

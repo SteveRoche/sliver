@@ -42,7 +42,6 @@ import {
   tabOf,
   takeStartCursor,
   titleKey,
-  tree,
 } from '../state/workspace';
 import type { Position } from '../typst/protocol';
 import { type NoteId, vault } from '../vault/api';
@@ -194,7 +193,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
   createEffect(on(() => session?.compiled(), showDiagnostics));
   createEffect(
     on(
-      [tree, () => settings.linkDisplay],
+      [() => session?.linksChanged(), () => settings.linkDisplay],
       () => {
         if (!view) return;
         // A renamed note's title, where a link here shows it as text.

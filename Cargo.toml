@@ -24,3 +24,7 @@ opt-level = 3
 
 [profile.dev.package.sliver-typst]
 opt-level = 3
+
+# Vault open parses every note header; at opt-level 0 that's several times slower.
+[profile.dev.package.sliver-vault]
+opt-level = 3
