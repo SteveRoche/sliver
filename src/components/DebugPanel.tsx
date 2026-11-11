@@ -18,6 +18,10 @@ export function DebugPanel() {
   const latest = () => samples()[samples().length - 1];
   const worst = () => Math.max(0, ...samples().map(s => s.totalMs));
   const scale = () => Math.max(16, worst());
+  const overhead = () => {
+    const s = latest();
+    return s && s.backendMs - s.compileMs - s.renderMs;
+  };
 
   return (
     <Show when={debugVisible()}>
@@ -25,6 +29,12 @@ export function DebugPanel() {
         <div class="debug-row">
           <span>compile {fmt(latest()?.compileMs)}</span>
           <span>render {fmt(latest()?.renderMs)}</span>
+          <span title="Backend time outside compile and render: waiting for the compiler, replacing the source, cache eviction">
+            backend + {fmt(overhead())}
+          </span>
+          <span title="Putting the result on screen: pages, bands, diagnostics">
+            dom {fmt(latest()?.domMs)}
+          </span>
           <span>edit → preview {fmt(latest()?.totalMs)}</span>
           <span>max {fmt(samples().length ? worst() : undefined)}</span>
         </div>

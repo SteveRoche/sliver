@@ -145,6 +145,20 @@ impl Host {
     }
 }
 
+/// Creates the engine on a thread of its own at startup, so the first
+/// compile doesn't wait for it (fonts, the standard library).
+pub fn warm_up(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let compiler = app.state::<Compiler>();
+        let mut guard = compiler
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get_or_insert_with(Host::new);
+    });
+}
+
 /// Runs `f` on the host off the async runtime. A panic rebuilds the engine
 /// and comes back as an error.
 async fn with_host<T: Send + 'static>(
@@ -316,6 +330,7 @@ pub async fn typst_compile(
     source: Option<SourceText>,
     anchor: Option<Anchor>,
 ) -> CommandResult<Response> {
+    let started = std::time::Instant::now();
     with_host(app, move |host, app| {
         if let Some(source) = source {
             host.set_source(&source.path, &source.text)?;
@@ -326,12 +341,15 @@ pub async fn typst_compile(
             y: a.y,
         });
         let out = host.compile(app, &main, render, anchor)?;
-        Ok(Response::new(encode_compile(out)))
+        let backend_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(Response::new(encode_compile(out, backend_ms)))
     })
     .await
 }
 
-fn encode_compile(out: CompileOutput) -> Vec<u8> {
+/// `backend_ms`: from the command arriving to the result, including the wait
+/// for the compiler and replacing the source; for the debug view.
+fn encode_compile(out: CompileOutput, backend_ms: f64) -> Vec<u8> {
     let mut svg = Vec::new();
     let pages = out.pages.map(|pages| {
         pages
@@ -387,6 +405,7 @@ fn encode_compile(out: CompileOutput) -> Vec<u8> {
         "missingPackages": out.missing_packages,
         "compileMs": out.compile_ms,
         "renderMs": out.render_ms,
+        "backendMs": backend_ms,
     });
     let header = serde_json::to_vec(&header).unwrap_or_default();
     let mut body = Vec::with_capacity(4 + header.len() + svg.len());

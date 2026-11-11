@@ -23,7 +23,10 @@ pub fn run() {
         .manage(commands::OpenVault(Mutex::new(None)))
         .manage(compiler::Compiler::default())
         .manage(watch::VaultWatcher::default())
-        .setup(|app| Ok(window::create(app)?))
+        .setup(|app| {
+            compiler::warm_up(app.handle());
+            Ok(window::create(app)?)
+        })
         .invoke_handler(tauri::generate_handler![
             compiler::typst_set_source,
             compiler::typst_set_prefix,

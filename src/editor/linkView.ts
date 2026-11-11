@@ -197,8 +197,23 @@ export function fromFile(
   return { text: out + text.slice(last), links };
 }
 
-/** The editor's text as the file has it: titles that stand for uuids back to their uuids. */
+const fileTexts = new WeakMap<EditorState, string>();
+
+/**
+ * The editor's text as the file has it: titles that stand for uuids back to
+ * their uuids. Cached per state (states are immutable), since a keystroke and
+ * the compile result after it both ask for the same one.
+ */
 export function toFile(state: EditorState): string {
+  let file = fileTexts.get(state);
+  if (file === undefined) {
+    file = computeFile(state);
+    fileTexts.set(state, file);
+  }
+  return file;
+}
+
+function computeFile(state: EditorState): string {
   const text = state.doc.toString();
   const links = intactLinks(state);
   if (links.length === 0) return text;

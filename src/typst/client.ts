@@ -117,6 +117,7 @@ export class TypstClient {
       loadingPackages,
       compileMs: header.compileMs,
       renderMs: header.renderMs,
+      backendMs: header.backendMs,
       anchor: moved,
       pages,
     };
@@ -268,8 +269,11 @@ export class TypstClient {
 export interface CompileTiming {
   compileMs: number;
   renderMs: number;
+  backendMs: number;
   /** From the latest edit it includes to its result arriving. */
   totalMs: number;
+  /** Applying the result: pages into the DOM, diagnostics; set by the receiver. */
+  domMs?: number;
 }
 
 export interface LivePreview {
@@ -349,6 +353,7 @@ export function livePreview(
         options.onResult(result, next, {
           compileMs: result.compileMs,
           renderMs: result.renderMs,
+          backendMs: result.backendMs,
           totalMs: performance.now() - since,
         });
       }

@@ -174,7 +174,8 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
     if (!view || !compiled) return;
     const state = view.state;
     // Older ones keep following the edits until a compile of this text.
-    if (compiled.text !== savedText(state)) return;
+    const file = savedText(state);
+    if (compiled.text !== file) return;
     const at = (p: Position) => fileToDocPosition(state, p);
     view.dispatch({
       effects: setDiagnostics.of({
@@ -228,7 +229,7 @@ export function NoteTab(props: { id: NoteId; hidden: boolean }) {
           return (
             <Editor
               initialDoc={initial.text}
-              onChange={next => s().edit(view ? savedText(view.state) : next)}
+              onChange={next => s().edit(view ? savedText(view.state) : next())}
               onView={attach}
               extensions={[
                 initialLinks(initial.links),
