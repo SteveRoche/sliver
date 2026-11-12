@@ -297,7 +297,7 @@ button.primary {
   pointer-events: none;
 }
 
-/* Zettelkasten notes marked (Shift- or Cmd-click) to make their sequences a section. */
+/* Notes marked with Shift-click or Shift+arrow, which the context menu and dragging act on together. */
 .tree-item.marked {
   background: var(--selected);
   box-shadow: inset 2px 0 0 var(--accent);
@@ -1382,7 +1382,10 @@ button.settings-nav-item.active {
   color: var(--muted);
 }
 
+/* Ark copies this onto the positioner; without it the menu sits at auto,
+   under the overlay scrollbar thumbs (5) shown after a scroll. */
 .menu {
+  z-index: 30;
   min-width: 180px;
   padding: 4px;
   border: 1px solid var(--border);
