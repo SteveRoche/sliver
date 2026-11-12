@@ -4,8 +4,10 @@ import { prompt, promptWithChoice } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
 import {
   clearMarks,
+  markedNotes,
   menuAsset,
   menuFolder,
+  menuNotes,
   menuSection,
   menuTarget,
   sectionCandidates,
@@ -36,7 +38,7 @@ import {
   cycleTab,
   deleteAsset,
   deleteFolder,
-  deleteNote,
+  deleteNotes,
   focusedPane,
   focusedTabs,
   followFrom,
@@ -46,6 +48,7 @@ import {
   layout,
   markSection,
   moveAsset,
+  moveFolder,
   moveToAddress,
   moveToFolder,
   newTab,
@@ -120,15 +123,22 @@ async function rename(id: NoteId) {
   await renameNote(id, title.trim());
 }
 
-async function remove(id: NoteId) {
+async function remove(ids: NoteId[]) {
+  if (ids.length === 0) return;
   const verb =
     settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
-  const ok = await ask(`${verb}: "${noteLabel(noteById(id))}"?`, {
-    title: 'Delete note',
+  const what =
+    ids.length === 1
+      ? `"${noteLabel(noteById(ids[0]))}"`
+      : `${ids.length} notes`;
+  const ok = await ask(`${verb}: ${what}?`, {
+    title: ids.length === 1 ? 'Delete note' : 'Delete notes',
     kind: 'warning',
     okLabel: verb,
   });
-  if (ok) await deleteNote(id);
+  if (!ok) return;
+  await deleteNotes(ids);
+  if (ids.length > 1) clearMarks();
 }
 
 /** Asks where in the Zettelkasten note `id` (or a new note, for null) should go. */
@@ -199,14 +209,41 @@ async function fileAt(id: NoteId, placement: Placement) {
 
 const folderLabel = (path: string) => (path === '' ? 'Vault root' : path);
 
-async function moveNoteToFolder(id: NoteId) {
-  const note = noteById(id);
+async function moveNotesToFolder(ids: NoteId[]) {
+  if (ids.length === 0) return;
   const zk = zettelkasten()?.path;
+  const folders = new Set(ids.map(id => noteById(id)?.folder));
   const choices = ['', ...allFolders().map(f => f.path)]
-    .filter(path => path !== zk && path !== note?.folder)
+    .filter(path => path !== zk && !(folders.size === 1 && folders.has(path)))
     .map(path => ({ label: folderLabel(path), value: path }));
-  const choice = await pick('Move to folder…', choices);
-  if (choice) await moveNoteInto(id, choice.value);
+  const title =
+    ids.length === 1
+      ? 'Move to folder…'
+      : `Move ${ids.length} notes to folder…`;
+  const choice = await pick(title, choices);
+  if (choice) await moveNotesInto(ids, choice.value);
+}
+
+/** Moves notes into `folder`, asking once first if any lose their addresses. */
+async function moveNotesInto(ids: NoteId[], folder: string) {
+  const moving = ids.filter(id => {
+    const note = noteById(id);
+    return note && note.folder !== folder;
+  });
+  if (moving.length === 1) return moveNoteInto(moving[0], folder);
+  if (moving.length === 0) return;
+  const addressed = moving.filter(
+    id => noteById(id)?.address && inZettelkasten(id),
+  ).length;
+  if (addressed > 0) {
+    const ok = await ask(
+      `Moving ${addressed} note(s) out of the Zettelkasten removes their addresses. Links to them will point at their ids instead.`,
+      { title: 'Move notes', kind: 'info', okLabel: 'Move' },
+    );
+    if (!ok) return;
+  }
+  for (const id of moving) await moveToFolder(id, folder);
+  clearMarks();
 }
 
 /** Moves note `id` into folder `folder`, warning first if it loses its address. */
@@ -224,6 +261,35 @@ async function moveNoteInto(id: NoteId, folder: string) {
 
 /** Where a note or file was dropped in the sidebar: a folder, or a note's row. */
 export type DropTarget = { folder: string } | { note: NoteId };
+
+/**
+ * Drops notes in the sidebar: one note as `dropNote` does; several only
+ * into a folder other than the Zettelkasten (or a note's in one).
+ */
+export async function dropNotes(ids: NoteId[], target: DropTarget) {
+  if (ids.length === 1) return dropNote(ids[0], target);
+  const folder =
+    'note' in target ? noteById(target.note)?.folder : target.folder;
+  if (folder === undefined || folder === zettelkasten()?.path) return;
+  await moveNotesInto(ids, folder);
+}
+
+/**
+ * Drops folder `path` in the sidebar: into the folder under it (or the
+ * note's or file's folder), never into the Zettelkasten or itself; the
+ * Zettelkasten moves only to the root.
+ */
+export async function dropFolder(path: string, target: DropTarget) {
+  const into = 'note' in target ? noteById(target.note)?.folder : target.folder;
+  if (into === undefined || into === parentOf(path)) return;
+  const to = joinPath(into, fileName(path));
+  if (!(await confirmPathMove(path, to, 'Move folder'))) return;
+  try {
+    await moveFolder(path, into);
+  } catch (error) {
+    await message(String(error), { title: 'Move folder', kind: 'error' });
+  }
+}
 
 /**
  * Drops note `id` in the sidebar: onto the Zettelkasten, a new sequence;
@@ -626,7 +692,11 @@ const hasAddress = (id: NoteId | null) => !!id && !!noteById(id)?.address;
  * sidebar's right-clicked note (`menu.*`, only enabled while its context
  * menu is open).
  */
-function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
+function onNote(
+  idPrefix: string,
+  target: () => NoteId | null,
+  targets: () => NoteId[],
+): Command[] {
   const withTarget = (f: (id: NoteId) => unknown) => () => {
     const id = target();
     if (id) return f(id);
@@ -657,8 +727,8 @@ function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
     {
       id: `${idPrefix}.moveToFolder`,
       title: 'Move current note to a folder',
-      enabled: enabled(),
-      run: withTarget(moveNoteToFolder),
+      enabled: () => hasVault() && targets().length > 0,
+      run: () => moveNotesToFolder(targets()),
     },
     {
       id: `${idPrefix}.changeKind`,
@@ -676,8 +746,8 @@ function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
     {
       id: `${idPrefix}.delete`,
       title: 'Delete current note',
-      enabled: enabled(),
-      run: withTarget(remove),
+      enabled: () => hasVault() && targets().length > 0,
+      run: () => remove(targets()),
     },
   ];
 }
@@ -835,7 +905,12 @@ export function registerAppCommands(): () => void {
       enabled: hasVault,
       run: () => newNote({ kind: 'unaddressed' }, 'New note'),
     },
-    ...onNote('note', activeNote),
+    // Moving and deleting act on the notes marked in the sidebar, if any.
+    ...onNote('note', activeNote, () => {
+      const id = activeNote();
+      const marked = markedNotes();
+      return marked.length > 0 ? marked : id ? [id] : [];
+    }),
     {
       id: 'menu.markSection',
       title: 'Make section from marked sequences',
@@ -852,7 +927,7 @@ export function registerAppCommands(): () => void {
           if (id) openNote(id);
         },
       },
-      ...onNote('menu', menuTarget),
+      ...onNote('menu', menuTarget, menuNotes),
       ...onFolder(),
       ...onSection(),
       ...onAsset(),

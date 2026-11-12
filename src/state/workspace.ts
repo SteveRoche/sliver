@@ -1394,12 +1394,15 @@ export async function renameNote(id: NoteId, title: string) {
   await refreshTree();
 }
 
-export async function deleteNote(id: NoteId) {
-  const tab = tabOf(id);
-  if (tab) await closeTab(tab.key, true);
-  // Links to the note get rewritten in any note.
+export async function deleteNotes(ids: NoteId[]) {
+  if (ids.length === 0) return;
+  for (const id of ids) {
+    const tab = tabOf(id);
+    if (tab) await closeTab(tab.key, true);
+  }
+  // Links to the notes get rewritten in any note.
   await flushAll();
-  await reloadChanged(await vault.deleteNote(id, settings.deleteMode));
+  await reloadChanged(await vault.deleteNotes(ids, settings.deleteMode));
 }
 
 /** Reloads notes whose files the backend rewrote into their open editors. */
@@ -1451,8 +1454,20 @@ export async function createFolder(parent: string, name: string) {
 
 export async function renameFolder(path: string, name: string) {
   await flushAll();
-  const moved = await vault.renameFolder(path, name);
+  await afterFolderMove(path, await vault.renameFolder(path, name));
+}
+
+/** Moves folder `path` into `parent` (`""` for the root). */
+export async function moveFolder(path: string, parent: string) {
+  if (parentFolder(path) === parent) return;
+  await flushAll();
+  await afterFolderMove(path, await vault.moveFolder(path, parent));
+}
+
+/** Points settings and folded folders under `path` at its new place. */
+async function afterFolderMove(path: string, moved: Moved) {
   const renamed = moved.path;
+  if (renamed === path) return refreshTree();
   for (const key of ['newNoteFolder', 'attachmentFolder'] as const) {
     const target = settings[key];
     if (target === path || target.startsWith(`${path}/`)) {
