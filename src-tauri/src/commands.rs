@@ -125,6 +125,19 @@ pub async fn delete_note(
     })
 }
 
+/// Deletes several notes in one trash operation. Returns the ids of every
+/// note whose file changed (links to the deleted notes were rewritten).
+#[tauri::command]
+pub async fn delete_notes(
+    open: State<'_, OpenVault>,
+    ids: Vec<Uuid>,
+    mode: Option<DeleteMode>,
+) -> CommandResult<Vec<Uuid>> {
+    with_vault(&open, |vault| {
+        vault.delete_notes(&ids, mode.unwrap_or_default())
+    })
+}
+
 #[tauri::command]
 pub async fn create_folder(
     open: State<'_, OpenVault>,
@@ -141,6 +154,15 @@ pub async fn rename_folder(
     name: String,
 ) -> CommandResult<Moved> {
     with_vault(&open, |vault| vault.rename_folder(&path, &name))
+}
+
+#[tauri::command]
+pub async fn move_folder(
+    open: State<'_, OpenVault>,
+    path: String,
+    parent: String,
+) -> CommandResult<Moved> {
+    with_vault(&open, |vault| vault.move_folder(&path, &parent))
 }
 
 /// Returns the ids of every note whose file changed (links to the deleted

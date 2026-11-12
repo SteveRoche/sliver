@@ -36,7 +36,12 @@ import {
 } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { Portal } from 'solid-js/web';
-import { type DropTarget, dropAsset, dropNote } from '../commands/app';
+import {
+  type DropTarget,
+  dropAsset,
+  dropFolder,
+  dropNotes,
+} from '../commands/app';
 import { runCommand } from '../commands/registry';
 import { settings } from '../state/settings';
 import {
@@ -200,30 +205,69 @@ const [menuSection, setMenuSection] = createSignal<number | null>(null);
 export { menuAsset, menuFolder, menuSection, menuTarget };
 
 /**
- * Zettelkasten notes marked with Shift-click, whose sequences can be made a
- * section. A plain click or Escape clears them.
+ * Notes marked with Shift-click or Shift+arrow, which the context menu,
+ * dragging and (in the Zettelkasten) "Make section" act on together. A
+ * plain click, arrow move or Escape clears them.
  */
 const [marked, setMarked] = createSignal<ReadonlySet<NoteId>>(new Set());
 let markAnchor: NoteId | null = null;
 
-/** The notes "Make section" acts on: the marked ones, else the right-clicked one. */
-export function sectionCandidates(): NoteId[] {
-  if (marked().size > 0) return [...marked()];
+/** The notes the context menu acts on: the marked ones if it opened on one of them. */
+export function menuNotes(): NoteId[] {
   const target = menuTarget();
-  return target && isMarkable(target) ? [target] : [];
+  if (!target) return [];
+  return marked().has(target) ? markedNotes() : [target];
+}
+
+/** The notes "Make section" acts on: the menu's notes, if all are addressed Zettelkasten notes. */
+export function sectionCandidates(): NoteId[] {
+  const notes = menuNotes();
+  return notes.length > 0 && notes.every(inSequence) ? notes : [];
 }
 
 export const clearMarks = () => setMarked(new Set<NoteId>());
 
-const isMarkable = (id: NoteId | undefined): id is NoteId =>
-  !!id && inZettelkasten(id) && isNoteAddress(noteById(id)?.address ?? null);
+/** The marked notes that still exist. */
+export const markedNotes = (): NoteId[] =>
+  [...marked()].filter(id => noteById(id));
+
+const inSequence = (id: NoteId) =>
+  inZettelkasten(id) && isNoteAddress(noteById(id)?.address ?? null);
+
+/** Marks the visible notes from the anchor (the last row clicked or moved to) to `id`. */
+function markRun(tree: HTMLElement, id: NoteId) {
+  const rows = [...tree.querySelectorAll<HTMLElement>('[data-note-id]')].map(
+    row => row.dataset.noteId,
+  );
+  const from = markAnchor ? rows.indexOf(markAnchor) : -1;
+  const to = rows.indexOf(id);
+  if (from < 0 || to < 0) {
+    markAnchor = id;
+    setMarked(new Set([id]));
+    return;
+  }
+  setMarked(
+    new Set(
+      rows
+        .slice(Math.min(from, to), Math.max(from, to) + 1)
+        .filter((row): row is NoteId => !!row),
+    ),
+  );
+}
+
+/** Every row the tree shows, in order: folded branches render none. */
+const ROW = '[data-part="item"], [data-part="branch-control"]';
+
+/** How long arrowing stays on a note before it opens, so holding a key doesn't open each one. */
+const OPEN_DELAY_MS = 100;
 
 /**
  * Clicks on rows that the tree's selection doesn't cover, in the capture
  * phase so they never reach it (which would open the note in place):
  * Cmd/Ctrl-click and middle-click open a note in a new tab, and Shift-click
- * marks the run of Zettelkasten notes from the last one clicked (or marked)
- * to this one, for a section (sections are runs of sequences).
+ * marks the run of notes from the last one clicked (or marked) to this one.
+ * Keys: Up and Down (and j and k with Vim on) move to the previous or next
+ * row and open a note there in place, with Shift they mark instead.
  */
 function rowClicks(tree: HTMLElement) {
   const onClick = (event: MouseEvent) => {
@@ -239,23 +283,13 @@ function rowClicks(tree: HTMLElement) {
     }
     if (!event.shiftKey) {
       if (marked().size > 0) clearMarks();
-      markAnchor = isMarkable(id) ? id : null;
+      markAnchor = id ?? null;
       return;
     }
-    if (!isMarkable(id)) return;
+    if (!id) return;
     event.preventDefault();
     event.stopPropagation();
-    const rows = [...tree.querySelectorAll<HTMLElement>('[data-note-id]')]
-      .map(row => row.dataset.noteId)
-      .filter(isMarkable);
-    const from = markAnchor ? rows.indexOf(markAnchor) : -1;
-    const to = rows.indexOf(id);
-    if (from < 0 || to < 0) {
-      markAnchor = id;
-      setMarked(new Set([id]));
-      return;
-    }
-    setMarked(new Set(rows.slice(Math.min(from, to), Math.max(from, to) + 1)));
+    markRun(tree, id);
   };
   const onAuxClick = (event: MouseEvent) => {
     if (event.button !== 1) return;
@@ -265,27 +299,109 @@ function rowClicks(tree: HTMLElement) {
     event.preventDefault();
     openNote(id);
   };
+  let openTimer: ReturnType<typeof setTimeout> | undefined;
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && marked().size > 0) clearMarks();
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey) return;
+    if (event.altKey) return;
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    const vim = settings.vim;
+    const step =
+      key === 'ArrowDown' || (vim && key === 'j')
+        ? 1
+        : key === 'ArrowUp' || (vim && key === 'k')
+          ? -1
+          : 0;
+    if (step === 0) return;
+    const current = (event.target as Element).closest<HTMLElement>(ROW);
+    if (!current || !tree.contains(current)) return;
+    // Ark's tree skips events already handled (its arrows only move focus, and j and k would typeahead).
+    event.preventDefault();
+    const rows = [...tree.querySelectorAll<HTMLElement>(ROW)];
+    const next = rows[rows.indexOf(current) + step];
+    if (!next) return;
+    next.focus();
+    next.scrollIntoView({ block: 'nearest' });
+    const id = next.dataset.noteId;
+    clearTimeout(openTimer);
+    if (event.shiftKey) {
+      if (marked().size === 0) markAnchor = current.dataset.noteId ?? null;
+      if (id) markRun(tree, id);
+      return;
+    }
+    if (marked().size > 0) clearMarks();
+    markAnchor = id ?? null;
+    if (id) openTimer = setTimeout(() => void openNoteHere(id), OPEN_DELAY_MS);
   };
   tree.addEventListener('click', onClick, { capture: true });
   tree.addEventListener('auxclick', onAuxClick);
-  tree.addEventListener('keydown', onKey);
+  tree.addEventListener('keydown', onKey, { capture: true });
   return () => {
+    clearTimeout(openTimer);
     tree.removeEventListener('click', onClick, { capture: true });
     tree.removeEventListener('auxclick', onAuxClick);
-    tree.removeEventListener('keydown', onKey);
+    tree.removeEventListener('keydown', onKey, { capture: true });
   };
 }
 
 /** How far the pointer moves before a press on a row becomes a drag. */
 const DRAG_PX = 5;
 
+/** What a drag in the sidebar carries. */
+type Dragged = { notes: NoteId[] } | { asset: string } | { folder: string };
+
+/** Whether `path` is `folder` or inside it. */
+const within = (path: string, folder: string) =>
+  path === folder || path.startsWith(`${folder}/`);
+
 /**
- * Dragging notes and files onto folders or note rows to move them (pointer
- * events: HTML5 drag and drop is unreliable in the webview). The row under
- * the pointer is marked; the click that ends a drag is swallowed, so it
- * doesn't open the row.
+ * Where `dragged` would go if dropped on `over` (a row, or null for the
+ * tree's empty space, the vault root), or null where it can't go. Only a
+ * single note can become a Zettelkasten note's next note or aside; nothing
+ * goes into its own folder or below itself, no folder into the
+ * Zettelkasten, and the Zettelkasten only to the root.
+ */
+function dropTargetFor(
+  dragged: Dragged,
+  over: HTMLElement | null,
+): DropTarget | null {
+  const zk = zettelkasten()?.path;
+  const onNote = over?.dataset.noteId;
+  if (onNote && 'notes' in dragged && dragged.notes.length === 1) {
+    return dragged.notes[0] === onNote ? null : { note: onNote };
+  }
+  const folder = onNote
+    ? noteById(onNote)?.folder
+    : over?.dataset.section !== undefined
+      ? zk
+      : over?.dataset.folderPath !== undefined
+        ? over.dataset.folderPath
+        : over?.dataset.assetPath !== undefined
+          ? parentPath(over.dataset.assetPath)
+          : '';
+  if (folder === undefined) return null;
+  if ('notes' in dragged) {
+    if (dragged.notes.length > 1 && folder === zk) return null;
+    return { folder };
+  }
+  if ('folder' in dragged) {
+    const path = dragged.folder;
+    const invalid =
+      folder === zk ||
+      within(folder, path) ||
+      folder === parentPath(path) ||
+      (path === zk && folder !== '');
+    return invalid ? null : { folder };
+  }
+  return { folder };
+}
+
+/**
+ * Dragging notes, files and folders onto folders or rows to move them
+ * (pointer events: HTML5 drag and drop is unreliable in the webview). A
+ * marked note drags every marked note. The row under the pointer is marked
+ * when the drop would do something; the click that ends a drag is
+ * swallowed, so it doesn't open (or fold) the row.
  */
 function treeDragging(tree: HTMLElement) {
   const rowAt = (x: number, y: number) =>
@@ -294,23 +410,30 @@ function treeDragging(tree: HTMLElement) {
       ?.closest<HTMLElement>(
         '[data-folder-path], [data-note-id], [data-asset-path], [data-section]',
       );
-  let marked: HTMLElement | null = null;
-  const mark = (el: HTMLElement | null) => {
-    if (el === marked) return;
-    marked?.classList.remove('drop-target');
+  let highlighted: HTMLElement | null = null;
+  const highlight = (el: HTMLElement | null) => {
+    if (el === highlighted) return;
+    highlighted?.classList.remove('drop-target');
     el?.classList.add('drop-target');
-    marked = el;
+    highlighted = el;
   };
 
   const onDown = (down: PointerEvent) => {
-    if (down.button !== 0) return;
+    if (down.button !== 0 || down.shiftKey) return;
     const row = (down.target as Element).closest<HTMLElement>(
-      '[data-note-id], [data-asset-path]',
+      '[data-note-id], [data-asset-path], [data-folder-path]',
     );
     if (!row || (down.target as Element).closest('.fold-toggle')) return;
-    const dragged: { note: NoteId } | { asset: string } = row.dataset.noteId
-      ? { note: row.dataset.noteId }
-      : { asset: row.dataset.assetPath ?? '' };
+    const note = row.dataset.noteId;
+    const dragged: Dragged = note
+      ? { notes: marked().has(note) ? [...marked()] : [note] }
+      : row.dataset.assetPath !== undefined
+        ? { asset: row.dataset.assetPath }
+        : { folder: row.dataset.folderPath ?? '' };
+    const sources = (): HTMLElement[] =>
+      'notes' in dragged && dragged.notes.length > 1
+        ? [...tree.querySelectorAll<HTMLElement>('.tree-item.marked')]
+        : [row];
     let dragging = false;
     let target: DropTarget | null = null;
     let ghost: HTMLElement | undefined;
@@ -328,11 +451,13 @@ function treeDragging(tree: HTMLElement) {
         ghost = document.createElement('div');
         ghost.className = 'drag-ghost';
         ghost.textContent =
-          'note' in dragged
-            ? noteLabel(noteById(dragged.note))
-            : dragged.asset.slice(dragged.asset.lastIndexOf('/') + 1);
+          'notes' in dragged
+            ? dragged.notes.length > 1
+              ? `${dragged.notes.length} notes`
+              : noteLabel(noteById(dragged.notes[0]))
+            : fileName('asset' in dragged ? dragged.asset : dragged.folder);
         document.body.appendChild(ghost);
-        row.classList.add('drag-source');
+        for (const el of sources()) el.classList.add('drag-source');
       }
       dragging = true;
       tree.classList.add('dragging');
@@ -340,34 +465,21 @@ function treeDragging(tree: HTMLElement) {
         ghost.style.left = `${move.clientX + 12}px`;
         ghost.style.top = `${move.clientY + 8}px`;
       }
-      const over = rowAt(move.clientX, move.clientY);
+      const over = rowAt(move.clientX, move.clientY) ?? null;
       const inTree = over
         ? tree.contains(over)
         : tree.contains(document.elementFromPoint(move.clientX, move.clientY));
-      if (over === row || !inTree) {
-        target = null;
-        mark(null);
-        return;
-      }
-      target = over?.dataset.noteId
-        ? { note: over.dataset.noteId }
-        : over?.dataset.section !== undefined
-          ? { folder: zettelkasten()?.path ?? '' }
-          : over?.dataset.folderPath !== undefined
-            ? { folder: over.dataset.folderPath }
-            : over?.dataset.assetPath !== undefined
-              ? { folder: parentPath(over.dataset.assetPath) }
-              : { folder: '' };
-      mark(over ?? null);
+      target = over !== row && inTree ? dropTargetFor(dragged, over) : null;
+      highlight(target ? over : null);
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
       tree.classList.remove('dragging');
-      row.classList.remove('drag-source');
+      for (const el of sources()) el.classList.remove('drag-source');
       ghost?.remove();
-      mark(null);
+      highlight(null);
       if (!dragging) return;
       // The click that follows the release would open the row.
       window.addEventListener(
@@ -380,9 +492,11 @@ function treeDragging(tree: HTMLElement) {
       );
       if (!target) return;
       const done =
-        'note' in dragged
-          ? dropNote(dragged.note, target)
-          : dropAsset(dragged.asset, target);
+        'notes' in dragged
+          ? dropNotes(dragged.notes, target)
+          : 'asset' in dragged
+            ? dropAsset(dragged.asset, target)
+            : dropFolder(dragged.folder, target);
       void done.catch(error => console.error('could not move:', error));
     };
     window.addEventListener('pointermove', onMove);
@@ -392,6 +506,8 @@ function treeDragging(tree: HTMLElement) {
   tree.addEventListener('pointerdown', onDown);
   return () => tree.removeEventListener('pointerdown', onDown);
 }
+
+const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 
 const parentPath = (path: string) =>
   path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
@@ -466,7 +582,10 @@ export function Sidebar() {
     const row = (event.target as Element).closest<HTMLElement>(
       '[data-note-id], [data-folder-path], [data-asset-path], [data-section]',
     );
-    setMenuTarget(row?.dataset.noteId ?? null);
+    const note = row?.dataset.noteId;
+    // Like a file manager: a menu on an unmarked note is for that note alone.
+    if (note && !marked().has(note) && marked().size > 0) clearMarks();
+    setMenuTarget(note ?? null);
     setMenuFolder(row?.dataset.folderPath ?? null);
     setMenuAsset(row?.dataset.assetPath ?? null);
     const section = row?.dataset.section;
@@ -600,6 +719,7 @@ export function Sidebar() {
                     <NoteMenu
                       addressed={!!note().address && inZettelkasten(note().id)}
                       filed={inZettelkasten(note().id)}
+                      count={menuNotes().length}
                       sequences={sectionCandidates()}
                     />
                   )}
@@ -629,6 +749,8 @@ function allSubfolders(folder: FolderNode): FolderNode[] {
 function NoteMenu(props: {
   addressed: boolean;
   filed: boolean;
+  /** How many notes the menu acts on: more than one when opened on marked notes. */
+  count: number;
   /** The notes whose sequences "Make section" would name. */
   sequences: NoteId[];
 }) {
@@ -640,19 +762,22 @@ function NoteMenu(props: {
     const last = Math.max(...numbers);
     return first === last ? `sequence ${first}` : `sequences ${first}–${last}`;
   };
+  const single = () => props.count === 1;
   return (
     <>
-      <Menu.Item value="menu.openInNewTab">
-        <PanelTop size={14} /> Open in new tab
-      </Menu.Item>
-      <Menu.Separator class="menu-separator" />
+      <Show when={single()}>
+        <Menu.Item value="menu.openInNewTab">
+          <PanelTop size={14} /> Open in new tab
+        </Menu.Item>
+        <Menu.Separator class="menu-separator" />
+      </Show>
       <Show when={props.sequences.length > 0}>
         <Menu.Item value="menu.markSection">
           <Group size={14} /> Make {range()} a section…
         </Menu.Item>
         <Menu.Separator class="menu-separator" />
       </Show>
-      <Show when={props.addressed}>
+      <Show when={single() && props.addressed}>
         <Menu.Item value="menu.next">
           <CornerDownRight size={14} /> New next note…
         </Menu.Item>
@@ -661,22 +786,31 @@ function NoteMenu(props: {
         </Menu.Item>
         <Menu.Separator class="menu-separator" />
       </Show>
-      <Menu.Item value="menu.moveToAddress" disabled={!zettelkasten()}>
-        <Milestone size={14} />{' '}
-        {props.filed ? 'Move to address…' : 'File into Zettelkasten…'}
-      </Menu.Item>
+      <Show when={single()}>
+        <Menu.Item value="menu.moveToAddress" disabled={!zettelkasten()}>
+          <Milestone size={14} />{' '}
+          {props.filed ? 'Move to address…' : 'File into Zettelkasten…'}
+        </Menu.Item>
+      </Show>
       <Menu.Item value="menu.moveToFolder">
-        <FolderInput size={14} /> Move to folder…
+        <FolderInput size={14} />{' '}
+        {single() ? 'Move to folder…' : `Move ${props.count} notes to folder…`}
       </Menu.Item>
-      <Menu.Item value="menu.changeKind">
-        <Shapes size={14} /> Change kind…
-      </Menu.Item>
-      <Menu.Separator class="menu-separator" />
-      <Menu.Item value="menu.rename">
-        <Pencil size={14} /> Rename…
-      </Menu.Item>
+      <Show when={single()}>
+        <Menu.Item value="menu.changeKind">
+          <Shapes size={14} /> Change kind…
+        </Menu.Item>
+        <Menu.Separator class="menu-separator" />
+        <Menu.Item value="menu.rename">
+          <Pencil size={14} /> Rename…
+        </Menu.Item>
+      </Show>
+      <Show when={!single()}>
+        <Menu.Separator class="menu-separator" />
+      </Show>
       <Menu.Item value="menu.delete" class="danger">
-        <Trash2 size={14} /> Delete
+        <Trash2 size={14} />{' '}
+        {single() ? 'Delete' : `Delete ${props.count} notes`}
       </Menu.Item>
     </>
   );

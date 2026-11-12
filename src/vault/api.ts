@@ -216,11 +216,17 @@ export const vault = {
   /** Resolves to the ids of every note whose file changed (links to it). */
   deleteNote: (id: NoteId, mode?: DeleteMode) =>
     invoke<NoteId[]>('delete_note', { id, mode }),
+  /** Deletes several notes in one trash operation; resolves like `deleteNote`. */
+  deleteNotes: (ids: NoteId[], mode?: DeleteMode) =>
+    invoke<NoteId[]>('delete_notes', { ids, mode }),
   createFolder: (parent: string, name: string) =>
     invoke<string>('create_folder', { parent, name }),
   /** Paths into the folder are rewritten in notes, preambles and templates. */
   renameFolder: (path: string, name: string) =>
     invoke<Moved>('rename_folder', { path, name }),
+  /** Moves a folder into `parent` (`""` for the root); paths into it are rewritten. */
+  moveFolder: (path: string, parent: string) =>
+    invoke<Moved>('move_folder', { path, parent }),
   /** Resolves to the ids of the notes deleted with the folder. */
   /** Resolves to the ids of every note whose file changed (links into it). */
   deleteFolder: (path: string, mode?: DeleteMode) =>

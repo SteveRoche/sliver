@@ -880,9 +880,32 @@ impl Vault {
     /// Deletes note `id`; links to it then name its title. Returns every
     /// note whose file changed.
     pub fn delete_note(&mut self, id: Uuid, mode: DeleteMode) -> Result<Vec<Uuid>> {
-        remove_path(&self.note_path(id)?, mode)?;
-        let orphaned = self.orphaned_links(&[id]);
-        self.forget(id);
+        self.delete_notes(&[id], mode)
+    }
+
+    /// Deletes several notes at once: their files go in one trash operation
+    /// (one Finder animation and sound on macOS, not one per note), and
+    /// links to them are rewritten in one pass. Returns the ids of the
+    /// notes whose files changed.
+    pub fn delete_notes(&mut self, ids: &[Uuid], mode: DeleteMode) -> Result<Vec<Uuid>> {
+        let paths = ids
+            .iter()
+            .map(|&id| self.note_path(id))
+            .collect::<Result<Vec<_>>>()?;
+        match mode {
+            DeleteMode::Trash => {
+                trash::delete_all(&paths).map_err(|e| VaultError::Trash(e.to_string()))?;
+            }
+            DeleteMode::Permanent => {
+                for path in &paths {
+                    fs::remove_file(path)?;
+                }
+            }
+        }
+        let orphaned = self.orphaned_links(ids);
+        for &id in ids {
+            self.forget(id);
+        }
         self.prune_sections()?;
         self.unlink(&orphaned)
     }
@@ -1374,7 +1397,49 @@ impl Vault {
         self.require_folder(path)?;
         let parent = parent_folder(path).to_owned();
         self.check_free_name(&parent, name, Some(path))?;
-        let new_path = join_folder(&parent, name);
+        self.relocate_folder(path, join_folder(&parent, name))
+    }
+
+    /// Moves a folder with everything in it into `parent` (`""` for the
+    /// root) and returns its new path. Nothing moves into the Zettelkasten
+    /// (it holds no folders), the Zettelkasten moves only to the root, and a
+    /// folder holding it doesn't move. Paths into the folder are rewritten
+    /// as for [`Vault::rename_folder`].
+    pub fn move_folder(&mut self, path: &str, parent: &str) -> Result<Moved> {
+        if path.is_empty() {
+            return Err(VaultError::Refused("the vault root can't be moved".into()));
+        }
+        self.require_folder(path)?;
+        self.require_folder(parent)?;
+        if rebase_folder(parent, path, "").is_some() {
+            return Err(VaultError::Refused(
+                "a folder can't be moved into itself".into(),
+            ));
+        }
+        if let Some(zk) = self.zettelkasten.as_deref() {
+            if zk == parent {
+                return Err(VaultError::Refused(
+                    "the Zettelkasten can't contain folders".into(),
+                ));
+            }
+            if rebase_folder(zk, path, "").is_some() && !(zk == path && parent.is_empty()) {
+                return Err(VaultError::Refused(
+                    "the Zettelkasten can't be moved into a folder".into(),
+                ));
+            }
+        }
+        if parent_folder(path) == parent {
+            return Ok(Moved {
+                path: path.to_owned(),
+                changed: Vec::new(),
+            });
+        }
+        self.check_free_name(parent, folder_name(path), None)?;
+        self.relocate_folder(path, join_folder(parent, folder_name(path)))
+    }
+
+    /// Renames or moves folder `path` to `new_path`, whose parent exists.
+    fn relocate_folder(&mut self, path: &str, new_path: String) -> Result<Moved> {
         if new_path == path {
             return Ok(Moved {
                 path: new_path,
@@ -2096,6 +2161,36 @@ mod tests {
         ));
         assert!(!dir.0.join(format!("{}.typ", note.id)).exists());
     }
+
+    #[test]
+    fn deleting_several_notes_unlinks_them_in_one_pass() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let root = || Placement::Unaddressed {
+            folder: String::new(),
+        };
+        let a = vault.create_note(Some("Alpha".into()), root()).unwrap();
+        let b = vault.create_note(Some("Beta".into()), root()).unwrap();
+        let c = vault.create_note(Some("Gamma".into()), root()).unwrap();
+        let text = vault.read_note(c.id).unwrap();
+        vault
+            .write_note(c.id, &format!("{text}[[{}]] [[{}]]\n", a.id, b.id))
+            .unwrap();
+        let changed = vault
+            .delete_notes(&[a.id, b.id], DeleteMode::Permanent)
+            .unwrap();
+        assert_eq!(changed, [c.id]);
+        assert!(
+            vault
+                .read_note(c.id)
+                .unwrap()
+                .ends_with("[[Alpha]] [[Beta]]\n")
+        );
+        for id in [a.id, b.id] {
+            assert!(!dir.0.join(format!("{id}.typ")).exists());
+            assert!(vault.note(id).is_err());
+        }
+    }
     fn render(vault: &Vault, id: Uuid) -> (String, Vec<String>) {
         render_themed(vault, id, false)
     }
@@ -2386,13 +2481,41 @@ mod tests {
             "Slip box"
         );
         assert_eq!(vault.zettelkasten().unwrap(), "Slip box");
+
+        assert_eq!(
+            vault.move_folder("Work/Sliver", "Inbox").unwrap().path,
+            "Inbox/Sliver"
+        );
+        assert_eq!(vault.note(in_project.id).unwrap().folder, "Inbox/Sliver");
+        assert!(dir.0.join("Inbox/Sliver").is_dir());
+        assert_eq!(
+            vault.move_folder("Inbox/Sliver", "").unwrap().path,
+            "Sliver"
+        );
+        for (from, to) in [
+            ("Inbox", "Slip box"),
+            ("Slip box", "Inbox"),
+            ("Work", "Work"),
+            ("", "Inbox"),
+        ] {
+            assert!(
+                matches!(vault.move_folder(from, to), Err(VaultError::Refused(_))),
+                "{from:?} -> {to:?}"
+            );
+        }
+        vault.move_folder("Sliver", "Work").unwrap();
+        vault.create_folder("", "Sliver").unwrap();
+        assert!(matches!(
+            vault.move_folder("Sliver", "Work"),
+            Err(VaultError::FolderExists(_))
+        ));
         vault.move_to_folder(in_project.id, "Inbox").unwrap();
 
         let reopened = Vault::open(&dir.0).unwrap();
         let tree = reopened.tree();
         assert_eq!(
             folder_paths(&tree),
-            ["Inbox", "Slip box", "Work", "Work/Sliver"]
+            ["Inbox", "Slip box", "Sliver", "Work", "Work/Sliver"]
         );
         assert_eq!(reopened.zettelkasten().unwrap(), "Slip box");
         assert_eq!(zk_addresses(zettelkasten(&tree)), ["1.1"]);
