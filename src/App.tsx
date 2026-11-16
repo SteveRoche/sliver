@@ -11,6 +11,7 @@ import { PromptHost } from './components/Prompt';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Welcome } from './components/Welcome';
 import { Workspace } from './components/Workspace';
+import { installSync } from './state/sync';
 import {
   applyDiskChanges,
   firstPreviews,
@@ -52,6 +53,7 @@ function App() {
     });
     onCleanup(() => void unlistenChanges.then(f => f()));
     onCleanup(installFileDrop());
+    onCleanup(installSync());
 
     try {
       const last = await vault.last();

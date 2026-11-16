@@ -34,6 +34,16 @@ pub fn watch(app: &AppHandle, root: &Path) {
             // An error (say, events dropped) may hide changes: rescan.
             let paths = match result {
                 Ok(events) => {
+                    // Sync cares about the app's own writes too, so this
+                    // comes before they're filtered out below.
+                    if events
+                        .iter()
+                        .flat_map(|event| &event.paths)
+                        .filter_map(|path| vault_path(&watched, path))
+                        .any(|path| crate::sync::affects_sync(&path))
+                    {
+                        crate::sync::local_change(&handle);
+                    }
                     let paths: Vec<String> = events
                         .iter()
                         .flat_map(|event| &event.paths)
@@ -45,7 +55,10 @@ pub fn watch(app: &AppHandle, root: &Path) {
                     }
                     Some(paths)
                 }
-                Err(_) => None,
+                Err(_) => {
+                    crate::sync::local_change(&handle);
+                    None
+                }
             };
             refresh(&handle, &watched, paths.as_deref());
         },

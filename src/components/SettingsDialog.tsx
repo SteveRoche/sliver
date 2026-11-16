@@ -5,6 +5,7 @@ import FileCode from 'lucide-solid/icons/file-code';
 import FileText from 'lucide-solid/icons/file-text';
 import Keyboard from 'lucide-solid/icons/keyboard';
 import Quote from 'lucide-solid/icons/quote';
+import RefreshCw from 'lucide-solid/icons/refresh-cw';
 import RotateCcw from 'lucide-solid/icons/rotate-ccw';
 import SquarePen from 'lucide-solid/icons/square-pen';
 import SunMoon from 'lucide-solid/icons/sun-moon';
@@ -28,11 +29,13 @@ import {
   settings,
   updateSettings,
 } from '../state/settings';
+import { syncAvailable } from '../state/sync';
 import { refreshLinks } from '../state/workspace';
 import { handleEditorEscape } from './Editor';
 import { KeybindingSettings } from './KeybindingSettings';
 import { PreambleSettings } from './PreambleSettings';
 import { MIN_PREVIEW_PX } from './Preview';
+import { SyncSettings } from './SyncSettings';
 import { withOverlayScrollbar } from './scrollbars';
 import {
   FolderSetting,
@@ -50,7 +53,8 @@ type SectionId =
   | 'notes'
   | 'citations'
   | 'keybindings'
-  | 'preambles';
+  | 'preambles'
+  | 'sync';
 
 const SECTIONS: {
   id: SectionId;
@@ -64,7 +68,12 @@ const SECTIONS: {
   { id: 'citations', label: 'Citations', icon: Quote },
   { id: 'keybindings', label: 'Keybindings', icon: Keyboard },
   { id: 'preambles', label: 'Templates', icon: FileCode },
+  { id: 'sync', label: 'Sync', icon: RefreshCw },
 ];
+
+/** Sync shows only in builds that have it. */
+const sections = () =>
+  SECTIONS.filter(item => item.id !== 'sync' || syncAvailable());
 
 const [open, setOpen] = createSignal(false);
 const [section, setSection] = createSignal<SectionId>('appearance');
@@ -107,7 +116,7 @@ export function SettingsDialog() {
           <Dialog.Content class="dialog settings">
             <nav class="settings-nav" aria-label="Settings sections">
               <Dialog.Title class="settings-heading">Settings</Dialog.Title>
-              <For each={SECTIONS}>
+              <For each={sections()}>
                 {item => (
                   <button
                     type="button"
@@ -406,6 +415,9 @@ export function SettingsDialog() {
                 </Match>
                 <Match when={section() === 'preambles'}>
                   <PreambleSettings />
+                </Match>
+                <Match when={section() === 'sync'}>
+                  <SyncSettings />
                 </Match>
               </Pick>
             </div>

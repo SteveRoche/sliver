@@ -388,3 +388,46 @@ export function autosave(
     hasPending: () => pending !== undefined,
   };
 }
+
+/** A paired device of the open vault, as sync last saw it. */
+export interface PeerStatus {
+  id: string;
+  name: string;
+  state: 'idle' | 'syncing' | 'offline' | 'error';
+  /** Unix milliseconds. */
+  lastSync?: number;
+  error?: string;
+}
+
+export interface SyncStatus {
+  /** Whether this build has sync at all. */
+  available: boolean;
+  /** Whether this device is online for sync now. */
+  running: boolean;
+  deviceName: string;
+  deviceId?: string;
+  peers: PeerStatus[];
+  /** The ticket of a pairing in progress. */
+  pairing?: string;
+}
+
+/** What a sync round changed that the vault's own refresh doesn't cover. */
+export interface SyncedFiles {
+  settings: boolean;
+  templates: boolean;
+  references: boolean;
+  styles: boolean;
+}
+
+export const sync = {
+  available: () => invoke<boolean>('sync_available'),
+  status: () => invoke<SyncStatus>('sync_status'),
+  now: () => invoke<void>('sync_now'),
+  pairStart: () => invoke<string>('sync_pair_start'),
+  pairCancel: () => invoke<void>('sync_pair_cancel'),
+  join: (ticket: string, folder: string) =>
+    invoke<void>('sync_join', { ticket, folder }),
+  removeDevice: (id: string) => invoke<void>('sync_remove_device', { id }),
+  setDeviceName: (name: string) =>
+    invoke<void>('sync_set_device_name', { name }),
+};

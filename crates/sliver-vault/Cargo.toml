@@ -10,6 +10,9 @@ serde = { version = "1", features = ["derive"] }
 typst-syntax = "0.15.1"
 trash = { version = "5.2.9", default-features = false, features = ["coinit_apartmentthreaded"] }
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
+diffy = "0.5.2"
+blake3 = "1.8.7"
+serde_json = "1.0.154"
 
 [dev-dependencies]
 # Only to check that generated headers compile as plain Typst.
