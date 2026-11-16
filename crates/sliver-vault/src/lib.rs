@@ -26,6 +26,7 @@ pub use preambles::{PreambleWarning, default_text, preamble_path};
 pub use syntax::{Analysis, CitationRange, LinkRange, analyze};
 pub use theme::{THEME_PATH, theme_library};
 pub use uuid::Uuid;
+pub use vault::sync;
 pub use vault::{
     AddressChange, AddressPlace, AssetNode, CitationStyle, DeleteMode, DiskChanges, FolderDeletion,
     FolderKind, FolderNode, LinkEdits, MovePlan, Moved, NotePreview, NoteSummary, PathPlan,

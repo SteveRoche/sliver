@@ -7,6 +7,7 @@
 
 mod files;
 mod moves;
+pub mod sync;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -1638,31 +1639,7 @@ impl Vault {
     /// Writes via a temp file in `.sliver/tmp/` and a rename (same volume), so
     /// a crash never leaves a half-written file.
     fn atomic_write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        let tmp_dir = self.root.join(TMP_DIR);
-        let tmp = tmp_dir.join(Uuid::new_v4().to_string());
-        let mut file = match fs::File::create(&tmp) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(&tmp_dir)?;
-                fs::File::create(&tmp)?
-            }
-            file => file?,
-        };
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        if let Err(err) = fs::rename(&tmp, path) {
-            match path.parent() {
-                Some(dir) if err.kind() == io::ErrorKind::NotFound => {
-                    fs::create_dir_all(dir)?;
-                    fs::rename(&tmp, path)?;
-                }
-                _ => {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(err.into());
-                }
-            }
-        }
-        Ok(())
+        atomic_write_in(&self.root, path, bytes)
     }
 
     /// `.sliver/pkg/<namespace>/<name>-<version>.tar.gz`, as downloaded.
@@ -1731,6 +1708,35 @@ fn title_key(title: &str) -> Option<String> {
         .collect::<String>()
         .to_lowercase();
     (!key.is_empty()).then_some(key)
+}
+
+/// `Vault::atomic_write` for a vault at `root`, open or not.
+fn atomic_write_in(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp_dir = root.join(TMP_DIR);
+    let tmp = tmp_dir.join(Uuid::new_v4().to_string());
+    let mut file = match fs::File::create(&tmp) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(&tmp_dir)?;
+            fs::File::create(&tmp)?
+        }
+        file => file?,
+    };
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(err) = fs::rename(&tmp, path) {
+        match path.parent() {
+            Some(dir) if err.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(dir)?;
+                fs::rename(&tmp, path)?;
+            }
+            _ => {
+                let _ = fs::remove_file(&tmp);
+                return Err(err.into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn remove_path(path: &Path, mode: DeleteMode) -> Result<()> {

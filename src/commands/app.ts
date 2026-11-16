@@ -25,6 +25,7 @@ import {
   moveAlong,
 } from '../state/navigation';
 import { settings, updateSettings } from '../state/settings';
+import { syncAvailable, syncStatus } from '../state/sync';
 import {
   active,
   activeNote,
@@ -86,6 +87,7 @@ import {
   type NoteId,
   type NoteSummary,
   type Placement,
+  sync as syncApi,
   vault,
 } from '../vault/api';
 import { type Command, registerCommands } from './registry';
@@ -97,6 +99,31 @@ export async function chooseAndOpenVault(create: boolean) {
   });
   if (typeof path !== 'string') return;
   await openVault(path, create);
+}
+
+/**
+ * Receives a vault from another device: asks for the ticket it shows
+ * (Settings, Sync, "Pair a device…") and an empty folder, pairs, and opens
+ * the folder, which the first sync round fills.
+ */
+export async function joinVaultFromDevice() {
+  const ticket = await prompt({
+    title: 'Join a vault from another device',
+    label: 'Ticket from Settings › Sync › Pair a device… on the other device',
+    confirm: 'Next',
+    validate: text =>
+      !text.trim() || text.trim().startsWith('sliver')
+        ? null
+        : 'Paste the whole ticket the other device shows.',
+  });
+  if (!ticket?.trim()) return;
+  const path = await open({
+    directory: true,
+    title: 'Choose an empty folder for the vault',
+  });
+  if (typeof path !== 'string') return;
+  await syncApi.join(ticket.trim(), path);
+  await openVault(path);
 }
 
 async function newNote(placement: Placement, heading: string, kind?: string) {
@@ -1185,6 +1212,32 @@ export function registerAppCommands(): () => void {
       id: 'vault.create',
       title: 'Create a new vault…',
       run: () => chooseAndOpenVault(true),
+    },
+    {
+      id: 'vault.join',
+      title: 'Join a vault from another device…',
+      enabled: syncAvailable,
+      run: () =>
+        joinVaultFromDevice().catch(error =>
+          message(String(error), { title: 'Could not join', kind: 'error' }),
+        ),
+    },
+    {
+      id: 'sync.pair',
+      title: 'Pair a device…',
+      enabled: () => hasVault() && syncAvailable(),
+      run: () => openSettings('sync'),
+    },
+    {
+      id: 'sync.now',
+      title: 'Sync now',
+      enabled: () => hasVault() && (syncStatus()?.peers.length ?? 0) > 0,
+      run: () =>
+        syncApi
+          .now()
+          .catch(error =>
+            message(String(error), { title: 'Could not sync', kind: 'error' }),
+          ),
     },
   ]);
 }

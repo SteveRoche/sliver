@@ -1670,6 +1670,102 @@ button.keybinding-button.recording {
   font-size: 12px;
 }
 
+/* --- settings: sync --- */
+
+.setting-input,
+.sync-ticket textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.setting-input {
+  flex-shrink: 0;
+  width: 220px;
+}
+
+.setting-input:focus,
+.sync-ticket textarea:focus {
+  outline: none;
+}
+
+:root[data-input="keyboard"] .setting-input:focus,
+:root[data-input="keyboard"] .sync-ticket textarea:focus {
+  border-color: var(--accent);
+}
+
+.sync-ticket {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+/* Sized to fit a ticket, so it never needs to scroll. */
+.sync-ticket textarea {
+  box-sizing: border-box;
+  width: 100%;
+  overflow: hidden;
+  resize: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.sync-ticket-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-ticket-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-devices {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sync-devices li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 0 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sync-devices .sync-error .setting-description,
+.setting-note.sync-error {
+  color: var(--error);
+}
+
+.setting-note.sync-paired {
+  color: var(--fg);
+}
+
+.icon-button.sync-indicator.error {
+  color: var(--error);
+}
+
+.icon-button.sync-indicator.syncing svg {
+  animation: sync-spin 1s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* --- preview: cursor marker, debug view --- */
 
 .preview-marker {

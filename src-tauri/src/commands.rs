@@ -41,6 +41,7 @@ fn activate(app: &AppHandle, open: &OpenVault, vault: Vault) -> CommandResult<Fo
     app_state.last_vault = Some(vault.root().to_path_buf());
     state::save(app, &app_state)?;
     watch::watch(app, vault.root());
+    crate::sync::vault_opened(app, vault.root());
     *lock(open) = Some(vault);
     Ok(tree)
 }

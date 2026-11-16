@@ -3,6 +3,7 @@ mod compiler;
 #[cfg(target_os = "macos")]
 mod menu;
 mod state;
+mod sync;
 mod watch;
 mod window;
 mod zotero;
@@ -25,6 +26,7 @@ pub fn run() {
         .manage(watch::VaultWatcher::default())
         .setup(|app| {
             compiler::warm_up(app.handle());
+            sync::init(app.handle());
             Ok(window::create(app)?)
         })
         .invoke_handler(tauri::generate_handler![
@@ -108,6 +110,14 @@ pub fn run() {
             commands::open_asset,
             commands::open_url,
             commands::restore_note,
+            sync::sync_available,
+            sync::sync_status,
+            sync::sync_now,
+            sync::sync_pair_start,
+            sync::sync_pair_cancel,
+            sync::sync_join,
+            sync::sync_remove_device,
+            sync::sync_set_device_name,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
