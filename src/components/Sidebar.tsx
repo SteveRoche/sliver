@@ -70,6 +70,7 @@ import type {
   SectionNode,
   TreeNode,
 } from '../vault/api';
+import { SyncIndicator } from './SyncSettings';
 import { overlayScrollbar } from './scrollbars';
 
 /** What a folder row shows (not its contents, which are its row's children). */
@@ -623,6 +624,7 @@ export function Sidebar() {
       <div class="sidebar-header">
         <span>Notes</span>
         <div class="sidebar-actions">
+          <SyncIndicator />
           <button
             type="button"
             class="icon-button"
