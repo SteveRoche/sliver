@@ -1,0 +1,12 @@
+.git
+.direnv
+.claude
+.vscode
+.DS_Store
+node_modules
+dist
+target
+docs
+docs.md
+Dockerfile
+.dockerignore
