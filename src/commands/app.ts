@@ -456,7 +456,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * Mod-click (or Mod+Enter) on a broken wikilink in note `source`. A title
  * that notes have asks which one to link to, with their folders, or to
  * create another (the new-note dialog); one no note has creates the note
- * in the vault root. An address creates the note there when that leaves no
+ * in the vault's new-note folder (newNoteFolder). An address creates the note there when that leaves no
  * gap in the Zettelkasten, else offers the address that doesn't (or a note
  * titled as the target). A uuid whose note is gone counts as the title it
  * had, if known (else it does nothing). Either way the note's links to the
@@ -518,8 +518,8 @@ export async function followBrokenLink(source: NoteId, raw: string) {
     }
   }
 
-  // An uninitialized link's note goes in the vault root.
-  const note = await noteInFolder('', name);
+  // An uninitialized link's note goes in the chosen folder.
+  const note = await noteInFolder(newNoteFolder(source), name);
   if (note) relink(note);
 }
 
