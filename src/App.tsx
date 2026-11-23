@@ -11,13 +11,24 @@ import { PromptHost } from './components/Prompt';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Welcome } from './components/Welcome';
 import { Workspace } from './components/Workspace';
+import { installSync } from './state/sync';
 import {
   applyDiskChanges,
+  firstPreviews,
   flushAll,
   openVault,
   vaultRoot,
 } from './state/workspace';
 import { type DiskChanges, vault } from './vault/api';
+
+/** Longest the app stays hidden waiting for its first previews. */
+const FIRST_PREVIEWS_MS = 3000;
+
+/** Resolves after the next frame has been painted. */
+const nextPaint = () =>
+  new Promise<void>(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
 
 function App() {
   const [starting, setStarting] = createSignal(true);
@@ -42,6 +53,7 @@ function App() {
     });
     onCleanup(() => void unlistenChanges.then(f => f()));
     onCleanup(installFileDrop());
+    onCleanup(installSync());
 
     try {
       const last = await vault.last();
@@ -49,7 +61,12 @@ function App() {
     } catch (error) {
       console.warn('could not reopen the last vault:', error);
     } finally {
+      // The app mounts hidden and fades in once the previews on screen have
+      // their first pages, so it doesn't appear in pieces.
       setStarting(false);
+      await firstPreviews(FIRST_PREVIEWS_MS);
+      await nextPaint();
+      document.documentElement.classList.add('app-ready');
       document.getElementById('startup')?.remove();
     }
   });

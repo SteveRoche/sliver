@@ -113,7 +113,7 @@ function PreambleEditor(props: {
         <Editor
           initialDoc={props.initial}
           onChange={text => {
-            pending = text;
+            pending = text();
             clearTimeout(timer);
             timer = setTimeout(save, settings.autosaveDelay);
           }}
@@ -264,7 +264,8 @@ export function PreambleSettings() {
           <code>YYYY</code> <code>MM</code> <code>MMMM</code> <code>DD</code>{' '}
           <code>dddd</code> <code>HH</code> <code>hh</code> <code>mm</code>{' '}
           <code>ss</code> <code>A</code> and shorter forms; text in{' '}
-          <code>[brackets]</code> stays as it is.
+          <code>[brackets]</code> stays as it is. <code>{'{{cursor}}'}</code>{' '}
+          marks where the cursor starts.
         </p>
       </Show>
       <div class="preamble-toolbar">

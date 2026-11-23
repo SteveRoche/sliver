@@ -41,6 +41,7 @@ fn activate(app: &AppHandle, open: &OpenVault, vault: Vault) -> CommandResult<Fo
     app_state.last_vault = Some(vault.root().to_path_buf());
     state::save(app, &app_state)?;
     watch::watch(app, vault.root());
+    crate::sync::vault_opened(app, vault.root());
     *lock(open) = Some(vault);
     Ok(tree)
 }
@@ -112,15 +113,29 @@ pub async fn rename_note(
     with_vault(&open, |vault| vault.rename_note(id, &title))
 }
 
-/// `mode` defaults to the OS trash; the settings view will choose it later.
+/// `mode` defaults to the OS trash. Returns the ids of every note whose
+/// file changed (links to the deleted note were rewritten).
 #[tauri::command]
 pub async fn delete_note(
     open: State<'_, OpenVault>,
     id: Uuid,
     mode: Option<DeleteMode>,
-) -> CommandResult<()> {
+) -> CommandResult<Vec<Uuid>> {
     with_vault(&open, |vault| {
         vault.delete_note(id, mode.unwrap_or_default())
+    })
+}
+
+/// Deletes several notes in one trash operation. Returns the ids of every
+/// note whose file changed (links to the deleted notes were rewritten).
+#[tauri::command]
+pub async fn delete_notes(
+    open: State<'_, OpenVault>,
+    ids: Vec<Uuid>,
+    mode: Option<DeleteMode>,
+) -> CommandResult<Vec<Uuid>> {
+    with_vault(&open, |vault| {
+        vault.delete_notes(&ids, mode.unwrap_or_default())
     })
 }
 
@@ -142,7 +157,17 @@ pub async fn rename_folder(
     with_vault(&open, |vault| vault.rename_folder(&path, &name))
 }
 
-/// Returns the ids of the notes deleted with the folder.
+#[tauri::command]
+pub async fn move_folder(
+    open: State<'_, OpenVault>,
+    path: String,
+    parent: String,
+) -> CommandResult<Moved> {
+    with_vault(&open, |vault| vault.move_folder(&path, &parent))
+}
+
+/// Returns the ids of every note whose file changed (links to the deleted
+/// notes were rewritten).
 #[tauri::command]
 pub async fn delete_folder(
     open: State<'_, OpenVault>,
@@ -150,7 +175,9 @@ pub async fn delete_folder(
     mode: Option<DeleteMode>,
 ) -> CommandResult<Vec<Uuid>> {
     with_vault(&open, |vault| {
-        vault.delete_folder(&path, mode.unwrap_or_default())
+        Ok(vault
+            .delete_folder(&path, mode.unwrap_or_default())?
+            .changed)
     })
 }
 
@@ -178,6 +205,41 @@ pub async fn plan_move(
     with_vault(&open, |vault| vault.plan_move(id, &placement))
 }
 
+/// Names the Zettelkasten sequences `first..=last` as a section.
+#[tauri::command]
+pub async fn mark_section(
+    open: State<'_, OpenVault>,
+    first: u32,
+    last: u32,
+    name: String,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.mark_section(first, last, &name))
+}
+
+#[tauri::command]
+pub async fn rename_section(
+    open: State<'_, OpenVault>,
+    first: u32,
+    name: String,
+) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.rename_section(first, &name))
+}
+
+/// Removes a section's heading; its notes stay.
+#[tauri::command]
+pub async fn unmark_section(open: State<'_, OpenVault>, first: u32) -> CommandResult<()> {
+    with_vault(&open, |vault| vault.unmark_section(first))
+}
+
+/// Where a note created for a link to `target` goes, if it's an address.
+#[tauri::command]
+pub async fn place_for_address(
+    open: State<'_, OpenVault>,
+    target: String,
+) -> CommandResult<Option<sliver_vault::AddressPlace>> {
+    with_vault(&open, |vault| vault.place_for_address(&target))
+}
+
 /// Returns the ids of every note whose file changed.
 #[tauri::command]
 pub async fn apply_move(
@@ -199,26 +261,36 @@ pub struct SourceFile {
     text: String,
 }
 
-/// The generated `/.sliver/links.typ` (link table + `wikilinks` show rule).
+/// The generated `/.sliver/links.typ` (the `wikilinks` show rule).
 #[tauri::command]
-pub async fn link_library(
-    open: State<'_, OpenVault>,
-    show_addresses: Option<bool>,
-) -> CommandResult<SourceFile> {
+pub async fn link_library(show_addresses: Option<bool>) -> SourceFile {
     let display = if show_addresses.unwrap_or(false) {
         LinkDisplay::Address
     } else {
         LinkDisplay::Title
     };
+    SourceFile {
+        path: sliver_vault::LINKS_PATH.to_owned(),
+        text: sliver_vault::link_library(display),
+    }
+}
+
+/// Note `id`'s link table, for the targets its text links to now.
+#[tauri::command]
+pub async fn link_table(
+    open: State<'_, OpenVault>,
+    id: Uuid,
+    targets: Vec<String>,
+    former: Option<std::collections::HashMap<String, String>>,
+) -> CommandResult<SourceFile> {
     with_vault(&open, |vault| {
         Ok(SourceFile {
-            path: sliver_vault::LINKS_PATH.to_owned(),
-            text: vault.link_library(display),
+            path: sliver_vault::link_table_path(&id.to_string()),
+            text: vault.link_table(&targets, &former.unwrap_or_default()),
         })
     })
 }
 
-/// Highlighting and wikilink ranges for the editor. Doesn't need a vault.
 #[tauri::command]
 pub async fn analyze(text: String) -> sliver_vault::Analysis {
     sliver_vault::analyze(&text)
@@ -359,7 +431,7 @@ pub async fn save_settings(open: State<'_, OpenVault>, json: String) -> CommandR
 }
 
 /// The vault's cached `.tar.gz` for a package as raw bytes; empty if there is
-/// none or no vault is open (the worker then downloads it).
+/// none or no vault is open (the frontend then downloads it).
 #[tauri::command]
 pub async fn load_package(open: State<'_, OpenVault>, spec: String) -> CommandResult<Response> {
     let bytes = match lock(&open).as_ref() {

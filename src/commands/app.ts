@@ -1,10 +1,20 @@
-import { ask, open } from '@tauri-apps/plugin-dialog';
+import { ask, message, open } from '@tauri-apps/plugin-dialog';
 import { openPalette, pick } from '../components/Palette';
-import { prompt } from '../components/Prompt';
+import { prompt, promptWithChoice } from '../components/Prompt';
 import { openSettings } from '../components/SettingsDialog';
-import { menuAsset, menuFolder, menuTarget } from '../components/Sidebar';
+import {
+  clearMarks,
+  markedNotes,
+  menuAsset,
+  menuFolder,
+  menuNotes,
+  menuSection,
+  menuTarget,
+  sectionCandidates,
+} from '../components/Sidebar';
 import { toggleWrap } from '../editor/format';
 import { triggerSignature } from '../editor/signature';
+import { followLinkAtCursor, linkAtCursor } from '../editor/wikilinks';
 import { insertCitation, refreshReferences } from '../state/citations';
 import { toggleDebug } from '../state/debug';
 import {
@@ -15,6 +25,7 @@ import {
   moveAlong,
 } from '../state/navigation';
 import { settings, updateSettings } from '../state/settings';
+import { syncAvailable, syncStatus } from '../state/sync';
 import {
   active,
   activeNote,
@@ -28,37 +39,57 @@ import {
   cycleTab,
   deleteAsset,
   deleteFolder,
-  deleteNote,
+  deleteNotes,
   focusedPane,
   focusedTabs,
+  followFrom,
+  formerTitle,
   inZettelkasten,
   kinds,
   layout,
+  markSection,
   moveAsset,
+  moveFolder,
   moveToAddress,
   moveToFolder,
   newTab,
   noteById,
   noteLabel,
   openAsset,
+  openNote,
   openVault,
   previewLayout,
   refreshLinks,
   renameAsset,
   renameFolder,
   renameNote,
+  renameSection,
+  resolveTarget,
   saveNote,
+  sectionLabel,
+  sections,
+  sequenceOf,
   sessionFor,
   setNoteKind,
   setPreviewLayout,
   setZettelkasten,
   splitFocused,
+  titleClash,
+  titleKey,
   togglePreview,
   toggleReading,
+  unmarkSection,
   vaultRoot,
   zettelkasten,
 } from '../state/workspace';
-import { type NoteId, type Placement, vault } from '../vault/api';
+import {
+  type AddressPlace,
+  type NoteId,
+  type NoteSummary,
+  type Placement,
+  sync as syncApi,
+  vault,
+} from '../vault/api';
 import { type Command, registerCommands } from './registry';
 
 export async function chooseAndOpenVault(create: boolean) {
@@ -70,11 +101,37 @@ export async function chooseAndOpenVault(create: boolean) {
   await openVault(path, create);
 }
 
+/**
+ * Receives a vault from another device: asks for the ticket it shows
+ * (Settings, Sync, "Pair a device…") and an empty folder, pairs, and opens
+ * the folder, which the first sync round fills.
+ */
+export async function joinVaultFromDevice() {
+  const ticket = await prompt({
+    title: 'Join a vault from another device',
+    label: 'Ticket from Settings › Sync › Pair a device… on the other device',
+    confirm: 'Next',
+    validate: text =>
+      !text.trim() || text.trim().startsWith('sliver')
+        ? null
+        : 'Paste the whole ticket the other device shows.',
+  });
+  if (!ticket?.trim()) return;
+  const path = await open({
+    directory: true,
+    title: 'Choose an empty folder for the vault',
+  });
+  if (typeof path !== 'string') return;
+  await syncApi.join(ticket.trim(), path);
+  await openVault(path);
+}
+
 async function newNote(placement: Placement, heading: string, kind?: string) {
   const title = await prompt({
     title: kind ? `${heading} (${kind})` : heading,
     label: 'Title',
     confirm: 'Create',
+    validate: text => titleClash(text),
   });
   if (title === null) return;
   await createNote(placement, title.trim(), kind);
@@ -87,20 +144,28 @@ async function rename(id: NoteId) {
     label: 'Title',
     initial: note?.title ?? '',
     confirm: 'Rename',
+    validate: text => titleClash(text, id),
   });
   if (title === null || !title.trim()) return;
   await renameNote(id, title.trim());
 }
 
-async function remove(id: NoteId) {
+async function remove(ids: NoteId[]) {
+  if (ids.length === 0) return;
   const verb =
     settings.deleteMode === 'trash' ? 'Move to trash' : 'Delete permanently';
-  const ok = await ask(`${verb}: "${noteLabel(noteById(id))}"?`, {
-    title: 'Delete note',
+  const what =
+    ids.length === 1
+      ? `"${noteLabel(noteById(ids[0]))}"`
+      : `${ids.length} notes`;
+  const ok = await ask(`${verb}: ${what}?`, {
+    title: ids.length === 1 ? 'Delete note' : 'Delete notes',
     kind: 'warning',
     okLabel: verb,
   });
-  if (ok) await deleteNote(id);
+  if (!ok) return;
+  await deleteNotes(ids);
+  if (ids.length > 1) clearMarks();
 }
 
 /** Asks where in the Zettelkasten note `id` (or a new note, for null) should go. */
@@ -111,15 +176,16 @@ async function chooseAddress(id: NoteId | null): Promise<Placement | null> {
     n =>
       n.address &&
       inZettelkasten(n.id) &&
+      resolveTarget(n.address) === n.id &&
       // A note can't be filed after or beside itself or the notes after it.
       !(filed && subtreeOf && isUnder(n.address, subtreeOf)),
   );
-  const target = await pick<NoteId | null>('File after or beside...', [
-    { label: 'New top-level address', value: null },
+  const target = await pick<NoteId | null>('File after or beside…', [
+    { label: 'New sequence', value: null },
     ...targets.map(n => ({ label: noteLabel(n), value: n.id })),
   ]);
   if (!target) return null;
-  if (target.value === null) return { kind: 'top' };
+  if (target.value === null) return { kind: 'newSequence' };
   const of = target.value;
   const label = noteLabel(noteById(of));
   const how = await pick<'next' | 'aside'>('Next note or aside?', [
@@ -170,14 +236,41 @@ async function fileAt(id: NoteId, placement: Placement) {
 
 const folderLabel = (path: string) => (path === '' ? 'Vault root' : path);
 
-async function moveNoteToFolder(id: NoteId) {
-  const note = noteById(id);
+async function moveNotesToFolder(ids: NoteId[]) {
+  if (ids.length === 0) return;
   const zk = zettelkasten()?.path;
+  const folders = new Set(ids.map(id => noteById(id)?.folder));
   const choices = ['', ...allFolders().map(f => f.path)]
-    .filter(path => path !== zk && path !== note?.folder)
+    .filter(path => path !== zk && !(folders.size === 1 && folders.has(path)))
     .map(path => ({ label: folderLabel(path), value: path }));
-  const choice = await pick('Move to folder...', choices);
-  if (choice) await moveNoteInto(id, choice.value);
+  const title =
+    ids.length === 1
+      ? 'Move to folder…'
+      : `Move ${ids.length} notes to folder…`;
+  const choice = await pick(title, choices);
+  if (choice) await moveNotesInto(ids, choice.value);
+}
+
+/** Moves notes into `folder`, asking once first if any lose their addresses. */
+async function moveNotesInto(ids: NoteId[], folder: string) {
+  const moving = ids.filter(id => {
+    const note = noteById(id);
+    return note && note.folder !== folder;
+  });
+  if (moving.length === 1) return moveNoteInto(moving[0], folder);
+  if (moving.length === 0) return;
+  const addressed = moving.filter(
+    id => noteById(id)?.address && inZettelkasten(id),
+  ).length;
+  if (addressed > 0) {
+    const ok = await ask(
+      `Moving ${addressed} note(s) out of the Zettelkasten removes their addresses. Links to them will point at their ids instead.`,
+      { title: 'Move notes', kind: 'info', okLabel: 'Move' },
+    );
+    if (!ok) return;
+  }
+  for (const id of moving) await moveToFolder(id, folder);
+  clearMarks();
 }
 
 /** Moves note `id` into folder `folder`, warning first if it loses its address. */
@@ -197,9 +290,38 @@ async function moveNoteInto(id: NoteId, folder: string) {
 export type DropTarget = { folder: string } | { note: NoteId };
 
 /**
- * Drops note `id` in the sidebar: onto the Zettelkasten, a new top-level
- * address; onto a Zettelkasten note, a next note or aside of it (asked);
- * onto another folder (or a note in one), into that folder.
+ * Drops notes in the sidebar: one note as `dropNote` does; several only
+ * into a folder other than the Zettelkasten (or a note's in one).
+ */
+export async function dropNotes(ids: NoteId[], target: DropTarget) {
+  if (ids.length === 1) return dropNote(ids[0], target);
+  const folder =
+    'note' in target ? noteById(target.note)?.folder : target.folder;
+  if (folder === undefined || folder === zettelkasten()?.path) return;
+  await moveNotesInto(ids, folder);
+}
+
+/**
+ * Drops folder `path` in the sidebar: into the folder under it (or the
+ * note's or file's folder), never into the Zettelkasten or itself; the
+ * Zettelkasten moves only to the root.
+ */
+export async function dropFolder(path: string, target: DropTarget) {
+  const into = 'note' in target ? noteById(target.note)?.folder : target.folder;
+  if (into === undefined || into === parentOf(path)) return;
+  const to = joinPath(into, fileName(path));
+  if (!(await confirmPathMove(path, to, 'Move folder'))) return;
+  try {
+    await moveFolder(path, into);
+  } catch (error) {
+    await message(String(error), { title: 'Move folder', kind: 'error' });
+  }
+}
+
+/**
+ * Drops note `id` in the sidebar: onto the Zettelkasten, a new sequence;
+ * onto a Zettelkasten note, a next note or aside of it (asked); onto
+ * another folder (or a note in one), into that folder.
  */
 export async function dropNote(id: NoteId, target: DropTarget) {
   const zk = zettelkasten()?.path;
@@ -219,7 +341,7 @@ export async function dropNote(id: NoteId, target: DropTarget) {
     return dropNote(id, { folder: onto.folder });
   }
   if (target.folder === zk) {
-    if (!inZettelkasten(id)) await fileAt(id, { kind: 'top' });
+    if (!inZettelkasten(id)) await fileAt(id, { kind: 'newSequence' });
     return;
   }
   if (noteById(id)?.folder !== target.folder) {
@@ -286,7 +408,7 @@ async function moveAssetPrompt(path: string) {
   const choices = ['', ...allFolders().map(f => f.path)]
     .filter(folder => folder !== parentOf(path))
     .map(folder => ({ label: folderLabel(folder), value: folder }));
-  const choice = await pick('Move file to folder...', choices);
+  const choice = await pick('Move file to folder…', choices);
   if (choice) await dropAsset(path, { folder: choice.value });
 }
 
@@ -305,22 +427,178 @@ async function removeAsset(path: string) {
 const existingFolder = (path: string) =>
   path === '' || allFolders().some(f => f.path === path) ? path : '';
 
-/** Mod+N: a note where the vault's settings say new notes go. */
-async function newNoteDefault(kind?: string) {
-  const current = activeNote();
+/** The folder the vault's settings say new notes go in, `current` being the note they're made from. */
+function newNoteFolder(current: NoteId | null): string {
   const wanted =
     settings.newNoteLocation === 'folder'
       ? settings.newNoteFolder
       : settings.newNoteLocation === 'current' && current
         ? (noteById(current)?.folder ?? '')
         : '';
-  await newNoteIn(existingFolder(wanted), kind);
+  return existingFolder(wanted);
+}
+
+/** Mod+N: a note where the vault's settings say new notes go. */
+async function newNoteDefault(kind?: string) {
+  const result = await promptWithChoice({
+    title: kind ? `New note (${kind})` : 'New note',
+    label: 'Title',
+    confirm: 'Create',
+    choice: folderChoice(newNoteFolder(activeNote())),
+    validate: text => titleClash(text),
+  });
+  if (result) await noteInFolder(result.choice, result.text.trim(), true, kind);
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Mod-click (or Mod+Enter) on a broken wikilink in note `source`. A title
+ * that notes have asks which one to link to, with their folders, or to
+ * create another (the new-note dialog); one no note has creates the note
+ * in the vault's new-note folder (newNoteFolder). An address creates the note there when that leaves no
+ * gap in the Zettelkasten, else offers the address that doesn't (or a note
+ * titled as the target). A uuid whose note is gone counts as the title it
+ * had, if known (else it does nothing). Either way the note's links to the
+ * target then point at the note (its address, or uuid without one); other
+ * notes' stay as they are.
+ */
+export async function followBrokenLink(source: NoteId, raw: string) {
+  const target = sessionFor(source)?.sourceTarget(raw) ?? raw.trim();
+  // What the link names: the target, or a dead uuid's former title.
+  const name = UUID.test(target) ? formerTitle(target) : target;
+  if (!target || !name) return;
+  const relink = (note: NoteSummary) => {
+    const next = note.address ?? note.id;
+    if (next !== target) sessionFor(source)?.retarget(target, next);
+  };
+
+  const key = titleKey(name);
+  const titled = allNotes().filter(n => n.title && titleKey(n.title) === key);
+  if (titled.length > 0) {
+    const choice = await pick<NoteId | null>(`Link to "${name}"`, [
+      ...titled.map(n => ({
+        label: `${noteLabel(n)} (${folderLabel(n.folder)})`,
+        value: n.id,
+      })),
+      { label: `Create a new note titled "${name}"…`, value: null },
+    ]);
+    if (!choice) return;
+    if (choice.value !== null) {
+      const note = noteById(choice.value);
+      if (note) relink(note);
+      void followFrom(source, choice.value, false);
+      return;
+    }
+    const note = await newLinkedNote(source, name, true);
+    if (note) relink(note);
+    return;
+  } else {
+    // Fails without a Zettelkasten: then it's only a title.
+    const place = await vault.placeForAddress(name).catch(() => null);
+    if (place) {
+      if (place.address !== name) {
+        const where = placeLabel(place.placement);
+        const choice = await pick<'address' | 'title'>(`No note ${name}`, [
+          {
+            label: `Create ${place.address}, ${where}, and link to it (${name} would leave a gap)`,
+            value: 'address',
+          },
+          { label: `Create a note titled "${name}"`, value: 'title' },
+        ]);
+        if (!choice) return;
+        if (choice.value === 'address') {
+          await linkedNoteAt(place, relink);
+          return;
+        }
+      } else {
+        await linkedNoteAt(place, relink);
+        return;
+      }
+    }
+  }
+
+  // An uninitialized link's note goes in the chosen folder.
+  const note = await noteInFolder(newNoteFolder(source), name);
+  if (note) relink(note);
+}
+
+/** Creates a note titled `title` in `folder`, asking for an address in the Zettelkasten. */
+async function noteInFolder(
+  folder: string,
+  title: string,
+  open = true,
+  kind?: string,
+) {
+  let placement: Placement | null = { kind: 'unaddressed', folder };
+  if (folder === zettelkasten()?.path) placement = await chooseAddress(null);
+  return placement && createNote(placement, title, kind, open);
+}
+
+/** The "In:" folder dropdown of the new-note prompts, starting at `initial`. */
+const folderChoice = (initial: string) => ({
+  label: 'In:',
+  options: ['', ...allFolders().map(f => f.path)].map(path => ({
+    label: folderLabel(path),
+    value: path,
+  })),
+  initial,
+});
+
+/**
+ * Create a new note in `[[` completion in note `source`: asks for a
+ * title (starting from what was typed) and a folder, and creates the note without opening it.
+ * Resolves to the note, or null when cancelled.
+ */
+export async function newLinkedNote(
+  source: NoteId,
+  query: string,
+  open = false,
+) {
+  const result = await promptWithChoice({
+    title: 'New linked note',
+    label: 'Title',
+    initial: query.trim(),
+    confirm: 'Create',
+    choice: folderChoice(newNoteFolder(source)),
+    validate: text => titleClash(text),
+  });
+  if (result === null) return null;
+  // Stays on the linking note unless `open`.
+  return noteInFolder(result.choice, result.text.trim(), open);
+}
+
+/** "the next note after 1.2 Title", "an aside to ...", "a new sequence". */
+function placeLabel(placement: Placement): string {
+  switch (placement.kind) {
+    case 'next':
+      return `the next note after ${noteLabel(noteById(placement.of))}`;
+    case 'aside':
+      return `an aside to ${noteLabel(noteById(placement.of))}`;
+    default:
+      return 'a new sequence';
+  }
+}
+
+/** Asks for a title and creates a note at `place`. */
+async function linkedNoteAt(
+  place: AddressPlace,
+  relink: (note: NoteSummary) => void,
+) {
+  const title = await prompt({
+    title: `New note ${place.address}`,
+    label: 'Title',
+    confirm: 'Create',
+    validate: text => titleClash(text),
+  });
+  if (title === null) return;
+  relink(await createNote(place.placement, title.trim()));
 }
 
 /** Asks for a kind, then creates a note in that kind's folder (else where Mod+N would). */
 async function newNoteOfKind() {
   const choice = await pick(
-    'New note of kind...',
+    'New note of kind…',
     kinds().map(kind => ({ label: kind, value: kind })),
   );
   if (!choice) return;
@@ -332,12 +610,55 @@ async function newNoteOfKind() {
 
 async function changeKind(id: NoteId) {
   const current = noteById(id)?.kind ?? null;
-  const choice = await pick<string | null>('Change note kind...', [
+  const choice = await pick<string | null>('Change note kind…', [
     { label: 'No kind', value: null },
     ...kinds().map(kind => ({ label: kind, value: kind })),
   ]);
   if (!choice || choice.value === current) return;
   await setNoteKind(id, choice.value);
+}
+
+const sectionAt = (first: number) => sections().find(s => s.first === first);
+
+async function renameSectionPrompt(first: number) {
+  const section = sectionAt(first);
+  const name = await prompt({
+    title: `Rename section ${section ? sectionLabel(section) : first}`,
+    label: 'Name',
+    initial: section?.name ?? '',
+    confirm: 'Rename',
+  });
+  if (name?.trim()) await renameSection(first, name.trim());
+}
+
+/**
+ * Names the sequences of the notes marked in the sidebar (or of the
+ * right-clicked note) as a section: the run from the lowest to the highest.
+ */
+async function markSectionPrompt() {
+  const numbers = sectionCandidates()
+    .map(id => sequenceOf(noteById(id)?.address ?? null))
+    .filter((n): n is number => n !== undefined);
+  if (numbers.length === 0) return;
+  const first = Math.min(...numbers);
+  const last = Math.max(...numbers);
+  const range =
+    first === last ? `sequence ${first}` : `sequences ${first}–${last}`;
+  const name = await prompt({
+    title: `Make ${range} a section`,
+    label: 'Name',
+    confirm: 'Make section',
+  });
+  if (!name?.trim()) return;
+  try {
+    await markSection(first, last, name.trim());
+    clearMarks();
+  } catch (error) {
+    await message(`Can't make ${range} a section: ${error}`, {
+      title: 'Make section',
+      kind: 'warning',
+    });
+  }
 }
 
 async function newFolder(parent: string) {
@@ -398,7 +719,11 @@ const hasAddress = (id: NoteId | null) => !!id && !!noteById(id)?.address;
  * sidebar's right-clicked note (`menu.*`, only enabled while its context
  * menu is open).
  */
-function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
+function onNote(
+  idPrefix: string,
+  target: () => NoteId | null,
+  targets: () => NoteId[],
+): Command[] {
   const withTarget = (f: (id: NoteId) => unknown) => () => {
     const id = target();
     if (id) return f(id);
@@ -429,8 +754,8 @@ function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
     {
       id: `${idPrefix}.moveToFolder`,
       title: 'Move current note to a folder',
-      enabled: enabled(),
-      run: withTarget(moveNoteToFolder),
+      enabled: () => hasVault() && targets().length > 0,
+      run: () => moveNotesToFolder(targets()),
     },
     {
       id: `${idPrefix}.changeKind`,
@@ -448,8 +773,8 @@ function onNote(idPrefix: string, target: () => NoteId | null): Command[] {
     {
       id: `${idPrefix}.delete`,
       title: 'Delete current note',
-      enabled: enabled(),
-      run: withTarget(remove),
+      enabled: () => hasVault() && targets().length > 0,
+      run: () => remove(targets()),
     },
   ];
 }
@@ -491,6 +816,29 @@ function onFolder(): Command[] {
       title: 'Use folder as the Zettelkasten',
       enabled: () => enabled() && zettelkasten() === null,
       run: withFolder(setZettelkasten),
+    },
+  ];
+}
+
+/** Commands for the sidebar's right-clicked section; only enabled while its menu is open. */
+function onSection(): Command[] {
+  const withSection = (f: (first: number) => unknown) => () => {
+    const first = menuSection();
+    if (first !== null) return f(first);
+  };
+  const enabled = () => hasVault() && menuSection() !== null;
+  return [
+    {
+      id: 'section.menu.rename',
+      title: 'Rename section',
+      enabled,
+      run: withSection(renameSectionPrompt),
+    },
+    {
+      id: 'section.menu.unmark',
+      title: 'Remove section heading',
+      enabled,
+      run: withSection(unmarkSection),
     },
   ];
 }
@@ -584,13 +932,36 @@ export function registerAppCommands(): () => void {
       enabled: hasVault,
       run: () => newNote({ kind: 'unaddressed' }, 'New note'),
     },
-    ...onNote('note', activeNote),
-    ...[...onNote('menu', menuTarget), ...onFolder(), ...onAsset()].map(
-      command => ({
-        ...command,
-        contextMenu: true,
-      }),
-    ),
+    // Moving and deleting act on the notes marked in the sidebar, if any.
+    ...onNote('note', activeNote, () => {
+      const id = activeNote();
+      const marked = markedNotes();
+      return marked.length > 0 ? marked : id ? [id] : [];
+    }),
+    {
+      id: 'menu.markSection',
+      title: 'Make section from marked sequences',
+      enabled: () => hasVault() && sectionCandidates().length > 0,
+      run: markSectionPrompt,
+    },
+    ...[
+      {
+        id: 'menu.openInNewTab',
+        title: 'Open note in new tab',
+        enabled: () => menuTarget() !== null,
+        run: () => {
+          const id = menuTarget();
+          if (id) openNote(id);
+        },
+      },
+      ...onNote('menu', menuTarget, menuNotes),
+      ...onFolder(),
+      ...onSection(),
+      ...onAsset(),
+    ].map(command => ({
+      ...command,
+      contextMenu: true,
+    })),
     {
       id: 'folder.new',
       title: 'New folder',
@@ -650,7 +1021,12 @@ export function registerAppCommands(): () => void {
       title: 'Toggle reading view',
       keybinding: 'Mod+E',
       enabled: hasVault,
-      run: toggleReading,
+      run: () => {
+        const wasReading = focusedPane().mode === 'read';
+        toggleReading();
+        // Back to editing, the editor takes the keys (Vim keeps its mode).
+        if (wasReading) requestAnimationFrame(() => shownEditor()?.focus());
+      },
     },
     {
       id: 'view.togglePreviewLayout',
@@ -747,6 +1123,33 @@ export function registerAppCommands(): () => void {
       },
     },
     {
+      id: 'editor.followLink',
+      title: 'Follow link at cursor',
+      keybinding: 'Mod+Enter',
+      // Otherwise Mod+Enter stays CodeMirror's (a blank line below).
+      enabled: () => {
+        const view = shownEditor();
+        return !!view?.hasFocus && !!linkAtCursor(view);
+      },
+      run: () => {
+        const view = shownEditor();
+        if (view) followLinkAtCursor(view);
+      },
+    },
+    {
+      id: 'editor.followLinkInNewTab',
+      title: 'Follow link at cursor in new tab',
+      keybinding: 'Mod+Shift+Enter',
+      enabled: () => {
+        const view = shownEditor();
+        return !!view?.hasFocus && !!linkAtCursor(view);
+      },
+      run: () => {
+        const view = shownEditor();
+        if (view) followLinkAtCursor(view, true);
+      },
+    },
+    {
       id: 'citation.insert',
       title: 'Insert citation from Zotero',
       keybinding: 'Mod+Shift+C',
@@ -802,13 +1205,39 @@ export function registerAppCommands(): () => void {
     },
     {
       id: 'vault.open',
-      title: 'Open another vault...',
+      title: 'Open another vault…',
       run: () => chooseAndOpenVault(false),
     },
     {
       id: 'vault.create',
-      title: 'Create a new vault...',
+      title: 'Create a new vault…',
       run: () => chooseAndOpenVault(true),
+    },
+    {
+      id: 'vault.join',
+      title: 'Join a vault from another device…',
+      enabled: syncAvailable,
+      run: () =>
+        joinVaultFromDevice().catch(error =>
+          message(String(error), { title: 'Could not join', kind: 'error' }),
+        ),
+    },
+    {
+      id: 'sync.pair',
+      title: 'Pair a device…',
+      enabled: () => hasVault() && syncAvailable(),
+      run: () => openSettings('sync'),
+    },
+    {
+      id: 'sync.now',
+      title: 'Sync now',
+      enabled: () => hasVault() && (syncStatus()?.peers.length ?? 0) > 0,
+      run: () =>
+        syncApi
+          .now()
+          .catch(error =>
+            message(String(error), { title: 'Could not sync', kind: 'error' }),
+          ),
     },
   ]);
 }

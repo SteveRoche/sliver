@@ -280,6 +280,29 @@ button.primary {
   background: var(--selected);
 }
 
+/* An unfolded folder's rows get a vertical line below the folder's icon
+   (14px wide at 8px + depth * 14px). */
+.tree-children.indent-guide {
+  position: relative;
+}
+
+.tree-children.indent-guide::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(14px + var(--depth, 0) * 14px);
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
+/* Notes marked with Shift-click or Shift+arrow, which the context menu and dragging act on together. */
+.tree-item.marked {
+  background: var(--selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 /* The note or file being dragged in the sidebar. */
 .tree-item.drag-source {
   opacity: 0.5;
@@ -358,6 +381,19 @@ button.primary {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A Zettelkasten section: a heading over its notes, not a note. */
+.section-number {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: inherit;
+  color: var(--muted);
+}
+
+.section-name {
+  font-weight: 600;
 }
 
 .note-warning {
@@ -919,15 +955,19 @@ button.primary {
 
 /* --- dialogs, palette, menu --- */
 
+/* Above the app's own layers (scrollbar thumbs, drop overlays, the debug
+   panel), below tooltips and cards, which a dialog's editor shows too. */
 .dialog-backdrop {
   position: fixed;
   inset: 0;
+  z-index: 20;
   background: rgb(0 0 0 / 0.3);
 }
 
 .dialog-positioner {
   position: fixed;
   inset: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -966,6 +1006,17 @@ button.primary {
   flex-direction: column;
   gap: 4px;
   margin-top: 12px;
+}
+
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-error {
+  margin: 8px 0 0;
+  color: var(--error);
 }
 
 .field input,
@@ -1177,6 +1228,15 @@ button.settings-nav-item.active {
   max-width: 280px;
 }
 
+/* A select is as wide as its longest option (a deep folder path) unless
+   allowed to shrink below it. */
+.field-inline .setting-select {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  text-overflow: ellipsis;
+}
+
 .setting-number {
   display: flex;
   flex-shrink: 0;
@@ -1312,7 +1372,20 @@ button.settings-nav-item.active {
   color: var(--muted);
 }
 
+.palette-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Ark copies this onto the positioner; without it the menu sits at auto,
+   under the overlay scrollbar thumbs (5) shown after a scroll. */
 .menu {
+  z-index: 30;
   min-width: 180px;
   padding: 4px;
   border: 1px solid var(--border);
@@ -1595,6 +1668,102 @@ button.keybinding-button.recording {
 .setting-note code {
   font-family: var(--mono);
   font-size: 12px;
+}
+
+/* --- settings: sync --- */
+
+.setting-input,
+.sync-ticket textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.setting-input {
+  flex-shrink: 0;
+  width: 220px;
+}
+
+.setting-input:focus,
+.sync-ticket textarea:focus {
+  outline: none;
+}
+
+:root[data-input="keyboard"] .setting-input:focus,
+:root[data-input="keyboard"] .sync-ticket textarea:focus {
+  border-color: var(--accent);
+}
+
+.sync-ticket {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+/* Sized to fit a ticket, so it never needs to scroll. */
+.sync-ticket textarea {
+  box-sizing: border-box;
+  width: 100%;
+  overflow: hidden;
+  resize: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.sync-ticket-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-ticket-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sync-devices {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sync-devices li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 0 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sync-devices .sync-error .setting-description,
+.setting-note.sync-error {
+  color: var(--error);
+}
+
+.setting-note.sync-paired {
+  color: var(--fg);
+}
+
+.icon-button.sync-indicator.error {
+  color: var(--error);
+}
+
+.icon-button.sync-indicator.syncing svg {
+  animation: sync-spin 1s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* --- preview: cursor marker, debug view --- */

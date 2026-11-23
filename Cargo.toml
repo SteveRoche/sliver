@@ -9,16 +9,22 @@ license = "MIT"
 
 # Profiles only take effect at the workspace root.
 # See https://tauri.app/concept/size/#cargo-configuration
+# Unwinding (not `panic = "abort"`): a panic inside Typst must not take the app
+# down; the compiler host catches it and restarts the engine.
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
 strip = true
 
-# Fast-to-build optimized profile for the preview WASM; a debug build of typst is too slow to use.
-[profile.wasm]
-inherits = "release"
-lto = false
-codegen-units = 16
-incremental = true
+# A debug build of Typst is too slow to preview with, so `tauri dev` optimizes
+# every dependency and the engine crate; the rest stays a fast debug build.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.sliver-typst]
+opt-level = 3
+
+# Vault open parses every note header; at opt-level 0 that's several times slower.
+[profile.dev.package.sliver-vault]
+opt-level = 3

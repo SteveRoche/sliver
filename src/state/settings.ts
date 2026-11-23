@@ -25,6 +25,8 @@ export interface Settings {
   /** The folder for `attachmentLocation: "folder"`, created when first used. */
   attachmentFolder: string;
   theme: 'system' | 'light' | 'dark';
+  /** Vertical lines in the sidebar below each unfolded folder. */
+  indentGuides: boolean;
   /** The preview's theme: the app's, or fixed. */
   previewTheme: 'app' | 'light' | 'dark';
   /** Widest preview page, in CSS px. */
@@ -62,6 +64,7 @@ const DEFAULTS: Settings = {
   attachmentLocation: 'folder',
   attachmentFolder: 'Attachments',
   theme: 'system',
+  indentGuides: true,
   previewTheme: 'app',
   maxPreviewWidth: 560,
   previewFollowsCursor: true,

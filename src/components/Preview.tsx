@@ -13,7 +13,7 @@ import type { Diagnostic, Page, PagePoint } from '../typst/protocol';
 import { type NoteId, vault } from '../vault/api';
 import { SeverityIcon } from './SeverityIcon';
 import { withOverlayScrollbar } from './scrollbars';
-import { CITE_SCHEME, LINK_SCHEME } from './wikilinks';
+import { CITE_SCHEME, LINK_SCHEME, NEW_LINK_SCHEME } from './wikilinks';
 
 interface PreviewProps {
   /** The note shown; its page is compiled as wide as this preview. */
@@ -29,8 +29,10 @@ interface PreviewProps {
   onAnchor?: (get: (() => PagePoint | null) | undefined) => void;
   diagnostics: Diagnostic[];
   loadingPackages?: string[];
-  /** Called with the note id when a `sliver://` link is clicked. */
-  onOpenNote?: (id: string) => void;
+  /** A click on a working wikilink; with Cmd/Ctrl, for a new tab. */
+  onOpenNote?: (id: string, newTab: boolean) => void;
+  /** Mod-click on a broken wikilink, with its target. */
+  onBrokenLink?: (target: string) => void;
   /** The keys cited in a run of link areas on a line (in points). */
   citationsAt?: (
     page: number,
@@ -214,7 +216,9 @@ function reconcilePages(host: HTMLElement, pages: Page[]) {
       host.appendChild(el);
     }
     el.dataset.width = String(page.width);
-    el.style.aspectRatio = `${page.width} / ${page.height}`;
+    el.dataset.height = String(page.height);
+    const ratio = `${page.width} / ${page.height}`;
+    if (el.style.aspectRatio !== ratio) el.style.aspectRatio = ratio;
     const fill = el.firstElementChild as HTMLElement;
     // Our own compiler's SVG, so innerHTML is safe (as for the bands).
     if (bandSvgs.get(fill) !== page.background) {
@@ -222,40 +226,65 @@ function reconcilePages(host: HTMLElement, pages: Page[]) {
       bandSvgs.set(fill, page.background);
     }
 
-    const old = [...el.children].slice(1) as HTMLElement[];
+    const old = new Map<string, HTMLElement>();
+    for (const child of [...el.children].slice(1) as HTMLElement[]) {
+      const key = child.dataset.key ?? '';
+      // Identical bands share a key; the first keeps its element.
+      if (old.has(key)) child.remove();
+      else old.set(key, child);
+    }
     let after: Element = fill;
     for (const band of page.bands) {
-      const reused = old.findIndex(b => b.dataset.key === band.key);
-      let bandEl = reused < 0 ? undefined : old.splice(reused, 1)[0];
-      if (!bandEl) {
+      let bandEl = old.get(band.key);
+      if (bandEl) old.delete(band.key);
+      else {
         bandEl = document.createElement('div');
         bandEl.className = 'band';
         bandEl.dataset.key = band.key;
         bandSvgs.set(bandEl, band.svg);
       }
-      bandEl.dataset.top = String(band.top);
-      bandEl.style.top = percent(band.top, page.height);
-      bandEl.style.height = percent(band.height, page.height);
+      const top = String(band.top);
+      const height = String(band.height);
+      // Unchanged bands (most of them, after an edit) cost no style writes.
+      if (bandEl.dataset.top !== top || bandEl.dataset.height !== height) {
+        bandEl.dataset.top = top;
+        bandEl.dataset.height = height;
+        bandEl.style.top = percent(band.top, page.height);
+        bandEl.style.height = percent(band.height, page.height);
+      }
       if (after.nextElementSibling !== bandEl) after.after(bandEl);
       after = bandEl;
     }
-    for (const unused of old) unused.remove();
+    for (const unused of old.values()) unused.remove();
   });
 }
 
-/** Puts the SVG of bands near `container`'s visible area in, and takes it out of the others. */
+/**
+ * Puts the SVG of bands near `container`'s visible area in, and takes it out
+ * of the others. Measures only the pages (a band's place follows from its
+ * page's box and its position in points), and reads all of them before
+ * writing anything, so the layout is computed once.
+ */
 function showNearBands(container: HTMLElement) {
   const view = container.getBoundingClientRect();
   const margin = view.height * BAND_MARGIN;
-  for (const band of container.querySelectorAll<HTMLElement>('.band')) {
-    const box = band.getBoundingClientRect();
-    const near =
-      box.bottom >= view.top - margin && box.top <= view.bottom + margin;
-    if (near && !band.firstChild) {
-      band.innerHTML = bandSvgs.get(band) ?? '';
-    } else if (!near && band.firstChild) {
-      band.textContent = '';
+  const changes: [HTMLElement, boolean][] = [];
+  for (const page of container.querySelectorAll<HTMLElement>('.page')) {
+    const box = page.getBoundingClientRect();
+    const height = Number(page.dataset.height);
+    const scale = height > 0 ? box.height / height : 0;
+    const bands = page.children;
+    for (let i = 1; i < bands.length; i++) {
+      const band = bands[i] as HTMLElement;
+      const top = box.top + Number(band.dataset.top) * scale;
+      const bottom = top + Number(band.dataset.height) * scale;
+      const near = bottom >= view.top - margin && top <= view.bottom + margin;
+      if (near !== !!band.firstChild) changes.push([band, near]);
     }
+  }
+  for (const [band, near] of changes) {
+    if (near) band.innerHTML = bandSvgs.get(band) ?? '';
+    else band.textContent = '';
   }
 }
 
@@ -283,7 +312,14 @@ export function Preview(props: PreviewProps) {
     event.preventDefault();
     const href = hrefOf(anchor) ?? '';
     if (href.startsWith(LINK_SCHEME)) {
-      props.onOpenNote?.(href.slice(LINK_SCHEME.length));
+      props.onOpenNote?.(
+        href.slice(LINK_SCHEME.length),
+        event.metaKey || event.ctrlKey,
+      );
+    } else if (href.startsWith(NEW_LINK_SCHEME)) {
+      if (event.metaKey || event.ctrlKey) {
+        props.onBrokenLink?.(href.slice(NEW_LINK_SCHEME.length));
+      }
     } else if (EXTERNAL.test(href)) {
       void vault
         .openUrl(href)

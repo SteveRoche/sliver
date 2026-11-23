@@ -178,6 +178,17 @@ pub struct Position {
     pub column: u32,
 }
 
+/// The embedded fonts, parsed once per process: an engine rebuilt after a
+/// panic reuses them.
+static EMBEDDED_FONTS: std::sync::LazyLock<(Vec<Font>, FontBook)> =
+    std::sync::LazyLock::new(|| {
+        let fonts: Vec<Font> = typst_assets::fonts()
+            .flat_map(|data| Font::iter(Bytes::new(data)))
+            .collect();
+        let book = FontBook::from_fonts(&fonts);
+        (fonts, book)
+    });
+
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
@@ -186,13 +197,11 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        let fonts: Vec<Font> = typst_assets::fonts()
-            .flat_map(|data| Font::iter(Bytes::new(data)))
-            .collect();
+        let (fonts, book) = &*EMBEDDED_FONTS;
         Self {
             library: LazyHash::new(Library::default()),
-            book: LazyHash::new(FontBook::from_fonts(&fonts)),
-            fonts,
+            book: LazyHash::new(book.clone()),
+            fonts: fonts.clone(),
             sources: HashMap::new(),
             binaries: HashMap::new(),
             packages: HashSet::new(),
@@ -982,18 +991,6 @@ fn signature_at(world: &CompileWorld, source: &Source, cursor: usize) -> Option<
 }
 
 /// Milliseconds from an arbitrary start, for timing compiles.
-#[cfg(target_arch = "wasm32")]
-fn now_ms() -> f64 {
-    use wasm_bindgen::prelude::wasm_bindgen;
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = performance, js_name = now)]
-        fn performance_now() -> f64;
-    }
-    performance_now()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn now_ms() -> f64 {
     use std::sync::OnceLock;
     use std::time::Instant;

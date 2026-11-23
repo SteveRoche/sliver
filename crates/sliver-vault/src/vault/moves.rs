@@ -41,6 +41,10 @@ impl Vault {
     /// Dry run of [`Vault::apply_move`].
     pub fn plan_move(&self, id: Uuid, placement: &Placement) -> Result<MovePlan> {
         let moves = self.address_moves(id, placement)?;
+        Ok(self.plan_of(moves))
+    }
+
+    fn plan_of(&self, moves: Vec<(Uuid, Option<String>, Address)>) -> MovePlan {
         let map = self.link_map(&moves);
         let mut link_edits: Vec<LinkEdits> = self
             .links
@@ -55,7 +59,7 @@ impl Vault {
             .filter(|edits| edits.count > 0)
             .collect();
         link_edits.sort_by_key(|e| e.id);
-        Ok(MovePlan {
+        MovePlan {
             moves: moves
                 .into_iter()
                 .map(|(id, from, to)| AddressChange {
@@ -65,7 +69,7 @@ impl Vault {
                 })
                 .collect(),
             link_edits,
-        })
+        }
     }
 
     /// Gives note `id` the address `placement` asks for, moving its file into
@@ -87,7 +91,8 @@ impl Vault {
             self.write_note(*note, &text)?;
             changed.push(*note);
         }
-        changed.extend(self.rewrite_links(&map)?);
+        self.prune_sections()?;
+        changed.extend(self.rewrite_links(|t| replacement(&map, t).map(str::to_owned))?);
         Ok(dedup(changed))
     }
 
@@ -112,9 +117,11 @@ impl Vault {
         }
         let text = set_address(&self.read_note(id)?, None)?;
         self.write_note(id, &text)?;
+        self.prune_sections()?;
         let mut changed = vec![id];
         if let Some(address) = unfiled {
-            changed.extend(self.rewrite_links(&HashMap::from([(address, id.to_string())]))?);
+            let map = HashMap::from([(address, id.to_string())]);
+            changed.extend(self.rewrite_links(|t| replacement(&map, t).map(str::to_owned))?);
         }
         Ok(dedup(changed))
     }
@@ -175,19 +182,48 @@ impl Vault {
     }
 
     fn owns(&self, id: Uuid, address: &Address) -> bool {
-        self.resolve(&address.to_string()) == Some(id)
+        self.by_address.get(address).and_then(|ids| ids.first()) == Some(&id)
     }
 
-    /// Rewrites the target of every wikilink whose address is in `map`,
-    /// keeping the rest of the link (custom text, spacing) as it was.
-    fn rewrite_links(&mut self, map: &LinkMap) -> Result<Vec<Uuid>> {
-        if map.is_empty() {
+    /// What links to the notes in `gone`, about to be deleted, should say
+    /// instead: each one's title, for its uuid and the address it owns. Taken
+    /// before they leave the index; applied with [`Vault::unlink`].
+    pub(super) fn orphaned_links(&self, gone: &[Uuid]) -> Orphaned {
+        let mut orphaned = Orphaned::default();
+        for &id in gone {
+            let Ok(note) = self.note(id) else { continue };
+            let target = title_target(note.title.as_deref().unwrap_or(""));
+            if let Some(address) = self.address_of(note).filter(|a| self.owns(id, a)) {
+                orphaned.addresses.insert(address, target.clone());
+            }
+            orphaned.ids.insert(id, target);
+        }
+        orphaned
+    }
+
+    /// Points links to deleted notes at their titles, which read as links to
+    /// notes yet to be written (Mod-click creates one). Returns every note
+    /// whose file changed.
+    pub(super) fn unlink(&mut self, orphaned: &Orphaned) -> Result<Vec<Uuid>> {
+        if orphaned.ids.is_empty() {
             return Ok(Vec::new());
         }
+        self.rewrite_links(|target| match Uuid::parse_str(target) {
+            Ok(id) => orphaned.ids.get(&id).cloned(),
+            Err(_) => orphaned
+                .addresses
+                .get(&target.parse::<Address>().ok()?)
+                .cloned(),
+        })
+    }
+
+    /// Rewrites the target of every wikilink that `new_target` maps,
+    /// keeping the rest of the link (custom text, spacing) as it was.
+    fn rewrite_links(&mut self, new_target: impl Fn(&str) -> Option<String>) -> Result<Vec<Uuid>> {
         let mut sources: Vec<Uuid> = self
             .links
             .iter()
-            .filter(|(_, links)| links.iter().any(|l| replacement(map, &l.target).is_some()))
+            .filter(|(_, links)| links.iter().any(|l| new_target(&l.target).is_some()))
             .map(|(id, _)| *id)
             .collect();
         sources.sort();
@@ -197,10 +233,10 @@ impl Vault {
             let edits: Vec<_> = links_in(&typst_syntax::parse(&text))
                 .into_iter()
                 .filter_map(|link| {
-                    let new = replacement(map, &link.target)?;
+                    let new = new_target(&link.target)?;
                     let inner = link.range.start + 2;
                     let at = inner + text[inner..link.range.end].find(&link.target)?;
-                    Some((at..at + link.target.len(), new.to_owned()))
+                    Some((at..at + link.target.len(), new))
                 })
                 .collect();
             for (range, new) in edits.into_iter().rev() {
@@ -209,6 +245,49 @@ impl Vault {
             self.write_note(id, &text)?;
         }
         Ok(sources)
+    }
+}
+
+/// Link targets replacing those of deleted notes ([`Vault::orphaned_links`]).
+#[derive(Default)]
+pub(super) struct Orphaned {
+    ids: HashMap<Uuid, String>,
+    addresses: HashMap<Address, String>,
+}
+
+/// `title` as a link target that links by title: whitespace collapsed, and
+/// if that still wouldn't read back as the same plain-text target (markup
+/// characters, brackets, `|`, or what looks like an address or uuid), only
+/// its letters, digits and plain punctuation; "Untitled" when nothing's left.
+fn title_target(title: &str) -> String {
+    let collapse = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reads_back = |t: &str| {
+        let source = format!("[[{t}]]");
+        let links = links_in(&typst_syntax::parse(&source));
+        matches!(links.as_slice(), [link] if link.target == t && link.text.is_none() && link.range == (0..source.len()))
+            && t.parse::<Address>().is_err()
+            && Uuid::parse_str(t).is_err()
+    };
+    let whole = collapse(title);
+    if reads_back(&whole) {
+        return whole;
+    }
+    let plain = collapse(
+        &title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || "'\",.;:?!()&".contains(c) {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>(),
+    );
+    if reads_back(&plain) {
+        plain
+    } else {
+        "Untitled".to_owned()
     }
 }
 
@@ -227,7 +306,8 @@ fn dedup(mut ids: Vec<Uuid>) -> Vec<Uuid> {
 mod tests {
     use super::super::tests::TempDir;
     use super::*;
-    use crate::vault::{FolderNode, TreeNode};
+    use crate::vault::{DeleteMode, FolderNode, TreeNode};
+    use std::fs;
 
     fn addresses(tree: &[TreeNode]) -> Vec<String> {
         tree.iter()
@@ -257,12 +337,24 @@ mod tests {
         id
     }
 
+    /// Each section's address tree, then the notes without an address.
+    fn zk(tree: &FolderNode) -> Vec<String> {
+        let folder = zettelkasten(tree);
+        folder
+            .sections
+            .iter()
+            .flat_map(|s| addresses(&s.notes))
+            .chain(addresses(&folder.notes))
+            .collect()
+    }
+
     #[test]
     fn filing_assigns_an_address_and_moves_the_file() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
         vault.create_folder("", "Inbox").unwrap();
-        let one = note(&mut vault, Placement::Top, "");
+        let first = Placement::NewSequence;
+        let one = note(&mut vault, first, "");
         let fleeting = note(
             &mut vault,
             Placement::Unaddressed {
@@ -270,11 +362,12 @@ mod tests {
             },
             "",
         );
-        let linker = note(&mut vault, Placement::Top, &format!("[[{fleeting}]]"));
+        let second = Placement::NewSequence;
+        let linker = note(&mut vault, second, &format!("[[{fleeting}]]"));
 
         let next = Placement::Next { of: one };
         let plan = vault.plan_move(fleeting, &next).unwrap();
-        assert_eq!(plan.moves[0].to, "1.1");
+        assert_eq!(plan.moves[0].to, "1.1a");
         assert!(plan.link_edits.is_empty(), "uuid links need no rewrite");
 
         let changed = vault.apply_move(fleeting, &next).unwrap();
@@ -285,37 +378,39 @@ mod tests {
         assert_eq!(vault.backlinks(fleeting).unwrap()[0].id, linker);
 
         let reopened = Vault::open(&dir.0).unwrap();
-        assert_eq!(
-            addresses(&zettelkasten(&reopened.tree()).notes),
-            ["1[1.1]", "2"]
-        );
+        assert_eq!(zk(&reopened.tree()), ["1.1[1.1a]", "2.1"]);
     }
 
     #[test]
     fn readdressing_moves_the_subtree_and_rewrites_links() {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
-        let one = note(&mut vault, Placement::Top, "");
-        let one_one = note(&mut vault, Placement::Next { of: one }, "");
-        let child = note(&mut vault, Placement::Next { of: one_one }, "");
-        let two = note(&mut vault, Placement::Top, "");
-        // An orphan under 2.1 blocks it, so the move lands on 2.2.
-        let orphan = note(&mut vault, Placement::Top, "");
+        let first = Placement::NewSequence;
+        let one = note(&mut vault, first, "");
+        let one_a = note(&mut vault, Placement::Next { of: one }, "");
+        let child = note(&mut vault, Placement::Next { of: one_a }, "");
+        let second = Placement::NewSequence;
+        let two = note(&mut vault, second, "");
+        // An orphan under 2.1a blocks it, so the move lands on 2.1b.
+        let third = Placement::NewSequence;
+        let orphan = note(&mut vault, third, "");
         let text = vault
             .read_note(orphan)
             .unwrap()
-            .replace("\"3\"", "\"2.1a\"");
+            .replace("\"3.1\"", "\"2.1a1\"");
         vault.write_note(orphan, &text).unwrap();
+        // Sequence 3 went with its only note, so the next one is 3 again.
+        let fourth = Placement::NewSequence;
         let linker = note(
             &mut vault,
-            Placement::Top,
-            "[[1.1]] [[ 1.1a | the child ]] `[[1.1]]` [[1]]",
+            fourth,
+            "[[1.1a]] [[ 1.1a1 | the child ]] `[[1.1a]]` [[1]]",
         );
 
         let next = Placement::Next { of: two };
-        let plan = vault.plan_move(one_one, &next).unwrap();
+        let plan = vault.plan_move(one_a, &next).unwrap();
         let moved: Vec<_> = plan.moves.iter().map(|m| m.to.as_str()).collect();
-        assert_eq!(moved, ["2.2", "2.2a"]);
+        assert_eq!(moved, ["2.1b", "2.1b1"]);
         assert_eq!(
             plan.link_edits,
             vec![LinkEdits {
@@ -324,22 +419,19 @@ mod tests {
             }]
         );
 
-        let mut changed = vault.apply_move(one_one, &next).unwrap();
+        let mut changed = vault.apply_move(one_a, &next).unwrap();
         changed.sort();
-        let mut expected = vec![one_one, child, linker];
+        let mut expected = vec![one_a, child, linker];
         expected.sort();
         assert_eq!(changed, expected);
         assert!(
             vault
                 .read_note(linker)
                 .unwrap()
-                .ends_with("[[2.2]] [[ 2.2a | the child ]] `[[1.1]]` [[1]]")
+                .ends_with("[[2.1b]] [[ 2.1b1 | the child ]] `[[1.1a]]` [[1]]")
         );
-        assert_eq!(vault.resolve("2.2a"), Some(child));
-        assert_eq!(
-            addresses(&zettelkasten(&vault.tree()).notes),
-            ["1", "2[2.1a 2.2[2.2a]]", "3"]
-        );
+        assert_eq!(vault.resolve("2.1b1"), Some(child));
+        assert_eq!(zk(&vault.tree()), ["1.1", "2.1[2.1a1 2.1b[2.1b1]]", "3.1"]);
 
         assert!(matches!(
             vault.apply_move(one, &Placement::Next { of: one }),
@@ -356,9 +448,11 @@ mod tests {
         let dir = TempDir::new();
         let mut vault = Vault::create(&dir.0).unwrap();
         vault.create_folder("", "Inbox").unwrap();
-        let one = note(&mut vault, Placement::Top, "");
+        let first = Placement::NewSequence;
+        let one = note(&mut vault, first, "");
         let child = note(&mut vault, Placement::Next { of: one }, "");
-        let linker = note(&mut vault, Placement::Top, "[[1|first]]");
+        let second = Placement::NewSequence;
+        let linker = note(&mut vault, second, "[[1.1|first]]");
 
         let changed = vault.move_to_folder(one, "Inbox").unwrap();
         assert_eq!(changed, vec![one, linker]);
@@ -370,11 +464,126 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!("[[{one}|first]]"))
         );
-        assert_eq!(vault.resolve("1.1"), Some(child));
-        assert_eq!(addresses(&zettelkasten(&vault.tree()).notes), ["1.1", "2"]);
+        assert_eq!(vault.resolve("1.1a"), Some(child));
+        assert_eq!(zk(&vault.tree()), ["1.1a", "2.1"]);
         assert!(matches!(
             vault.move_to_folder(child, "Zettelkasten"),
             Err(VaultError::Refused(_))
         ));
+    }
+
+    #[test]
+    fn deleting_points_links_at_the_title() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        let inbox = Placement::Unaddressed {
+            folder: String::new(),
+        };
+        let filed = note(&mut vault, Placement::NewSequence, "");
+        vault.rename_note(filed, "Filed note").unwrap();
+        let loose = note(&mut vault, inbox.clone(), "");
+        vault.rename_note(loose, "Loose *note*").unwrap();
+        let linker = note(
+            &mut vault,
+            inbox,
+            &format!("[[1.1]] [[{loose}|here]] [[ {filed} ]]"),
+        );
+
+        assert_eq!(
+            vault.delete_note(loose, DeleteMode::Permanent).unwrap(),
+            vec![linker]
+        );
+        assert_eq!(
+            vault.delete_note(filed, DeleteMode::Permanent).unwrap(),
+            vec![linker]
+        );
+        assert!(
+            vault
+                .read_note(linker)
+                .unwrap()
+                .ends_with("[[Filed note]] [[Loose note|here]] [[ Filed note ]]")
+        );
+    }
+
+    #[test]
+    fn title_targets_read_back_as_titles() {
+        assert_eq!(title_target("Markov's  inequality"), "Markov's inequality");
+        assert_eq!(title_target("a [b] | c"), "a b c");
+        assert_eq!(title_target("1.2"), "Untitled");
+        assert_eq!(title_target(""), "Untitled");
+    }
+
+    #[test]
+    fn sections_name_runs_of_sequences_until_they_empty() {
+        let dir = TempDir::new();
+        let mut vault = Vault::create(&dir.0).unwrap();
+        vault.create_folder("", "Inbox").unwrap();
+        let first = |vault: &mut Vault| note(vault, Placement::NewSequence, "");
+        let one = first(&mut vault);
+        let four: Vec<Uuid> = (2..=6).map(|_| first(&mut vault)).collect();
+        let four_b = note(&mut vault, Placement::Aside { of: four[2] }, "");
+        assert_eq!(vault.note(four_b).unwrap().address.as_deref(), Some("4.2"));
+
+        vault.mark_section(4, 5, "Writing").unwrap();
+        vault.mark_section(1, 1, "Probability").unwrap();
+        for (first, last) in [(5, 6), (3, 4), (8, 9), (0, 1), (3, 2)] {
+            assert!(
+                matches!(
+                    vault.mark_section(first, last, "X"),
+                    Err(VaultError::Refused(_))
+                ),
+                "{first}-{last}"
+            );
+        }
+        assert!(matches!(
+            vault.mark_section(2, 2, " "),
+            Err(VaultError::Refused(_))
+        ));
+
+        let shape = |vault: &Vault| {
+            let tree = vault.tree();
+            let zk = zettelkasten(&tree);
+            let sections: Vec<String> = zk
+                .sections
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}-{} {} {:?}",
+                        s.first,
+                        s.last,
+                        s.name,
+                        addresses(&s.notes)
+                    )
+                })
+                .collect();
+            (sections, addresses(&zk.notes))
+        };
+        assert_eq!(
+            shape(&vault),
+            (
+                vec![
+                    "1-1 Probability [\"1.1\"]".to_owned(),
+                    "4-5 Writing [\"4.1\", \"4.2\", \"5.1\"]".to_owned(),
+                ],
+                vec!["2.1".into(), "3.1".into(), "6.1".into()],
+            )
+        );
+        assert_eq!(shape(&Vault::open(&dir.0).unwrap()), shape(&vault));
+
+        vault.rename_section(4, "Drafts").unwrap();
+        // Emptying the end of a section trims it; emptying all of it removes it.
+        vault.delete_note(four[3], DeleteMode::Permanent).unwrap();
+        assert_eq!(shape(&vault).0[1], "4-4 Drafts [\"4.1\", \"4.2\"]");
+        vault.move_to_folder(one, "Inbox").unwrap();
+        assert_eq!(shape(&vault).0, ["4-4 Drafts [\"4.1\", \"4.2\"]"]);
+        let marker = fs::read_to_string(dir.0.join("Zettelkasten/.zettelkasten")).unwrap();
+        assert!(!marker.contains("Probability") && marker.contains("\"4\": \"Drafts\""));
+
+        vault.unmark_section(4).unwrap();
+        assert!(shape(&vault).0.is_empty());
+        assert_eq!(
+            fs::read_to_string(dir.0.join("Zettelkasten/.zettelkasten")).unwrap(),
+            ""
+        );
     }
 }

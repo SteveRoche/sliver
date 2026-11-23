@@ -23,6 +23,7 @@ export function editorElement(id: NoteId): HTMLElement {
       const hidden = () => !isEditorShown(id);
       createEffect(() => {
         el.hidden = hidden();
+        if (hidden()) dropFocus(el);
       });
       return <NoteTab id={id} hidden={hidden()} />;
     }, el);
@@ -30,6 +31,23 @@ export function editorElement(id: NoteId): HTMLElement {
     hosts.set(id, host);
   }
   return host.el;
+}
+
+/**
+ * Takes focus and the text selection out of an editor being hidden. WebKit
+ * keeps the selection in its (now hidden) content, and once the editor
+ * shows again, typing goes straight into that content as a native edit
+ * that neither Vim nor the keymaps see: in Vim's normal mode, a key would
+ * be inserted instead of acting.
+ */
+function dropFocus(el: HTMLElement) {
+  if (el.contains(document.activeElement)) {
+    (document.activeElement as HTMLElement).blur();
+  }
+  const selection = document.getSelection();
+  if (selection?.anchorNode && el.contains(selection.anchorNode)) {
+    selection.removeAllRanges();
+  }
 }
 
 // Editors of notes no longer in any tab are destroyed.

@@ -8,6 +8,8 @@ import {
   on,
 } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
+import { fileToDocPosition, linksIn } from '../editor/linkView';
+import { reloadSpec, retargetLinks, savedText } from '../editor/wikilinks';
 import { type LivePreview, livePreview } from '../typst/client';
 import { typst } from '../typst/instance';
 import type {
@@ -30,10 +32,16 @@ import {
   type Placement,
   type Preamble,
   type PreambleWarning,
+  type SectionNode,
   type TreeNode,
   vault,
 } from '../vault/api';
-import { loadCitations, syncReferences, unloadCitations } from './citations';
+import {
+  checkDeferredReferences,
+  loadCitations,
+  syncReferences,
+  unloadCitations,
+} from './citations';
 import { recordCompile } from './debug';
 import {
   type DropZone,
@@ -102,15 +110,19 @@ export interface NoteSession {
   conflict: () => DiskConflict | null;
   setConflict(conflict: DiskConflict | null): void;
   /** Takes the file's text from disk, dropping unsaved edits. */
-  loadFromDisk(text: string): void;
+  loadFromDisk(text: string): Promise<void>;
   /** The editor's text now. */
   currentText(): string;
   edit(text: string): void;
   flush(): Promise<void>;
   /** Swaps in text changed outside the editor (e.g. a rename), keeping the cursor. */
-  replaceText(text: string): void;
+  replaceText(text: string): Promise<void>;
   /** Replaces the editor's selection with `text` (inserts at the cursor) and focuses it. */
   insert(text: string): void;
+  /** Points the editor's wikilinks to `from` at `to` instead, keeping their custom text (one undo step). */
+  retarget(from: string, to: string): void;
+  /** The target as the note's source writes it, for a target from the preview (see `plainQuotes`). */
+  sourceTarget(target: string): string | undefined;
   /** The note's editor while it's on screen. */
   shownView(): EditorView | undefined;
   attachView(view: EditorView | undefined): void;
@@ -118,6 +130,16 @@ export interface NoteSession {
   mainPath(): string | undefined;
   /** Refetches the wrapper main and prefix (after its kind or a preamble changed); doesn't recompile. */
   reloadMain(): Promise<void>;
+  /** Resends the note's link table (after titles or addresses changed); doesn't recompile. */
+  refreshLinks(): Promise<void>;
+  /** The targets the note's last link table covers (what its text links to). */
+  linkTargets(): string[];
+  /**
+   * Changes when what the note links to changed in the tree (a title, an
+   * address, a note gone), so its editor redraws its links.
+   */
+  linksChanged: () => number;
+  markLinksChanged(): void;
   refresh(): void;
   dispose(discard?: boolean): void;
 }
@@ -151,6 +173,7 @@ const EMPTY_ROOT: FolderNode = {
   folders: [],
   notes: [],
   assets: [],
+  sections: [],
 };
 
 const [vaultRoot, setVaultRoot] = createSignal<string | null>(null);
@@ -238,12 +261,53 @@ const visibleNotes = createRoot(() =>
   }),
 );
 
+/**
+ * Resolves once every preview on screen has its first pages (or a compile
+ * that failed with nothing left loading), or after `timeoutMs` at the latest.
+ */
+export function firstPreviews(timeoutMs: number): Promise<void> {
+  return new Promise(resolve => {
+    createRoot(dispose => {
+      const done = () => {
+        clearTimeout(timer);
+        dispose();
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      createEffect(() => {
+        const ready = [...visibleNotes()].every(id => {
+          const session = sessions.get(id);
+          const result = session?.result();
+          if (!session || !result) return false;
+          return (
+            session.pages().length > 0 || result.loadingPackages.length === 0
+          );
+        });
+        if (ready) queueMicrotask(done);
+      });
+    });
+  });
+}
+
+/**
+ * The last title of every note seen since the app started, deleted ones
+ * included: a link to a note deleted outside the app (or before the delete
+ * rewrote it) shows that title, as an uninitialized link.
+ */
+const lastTitles = new Map<NoteId, string>();
+
+/** The title note `id` had when it was last seen, if it's gone now. */
+export const formerTitle = (id: string): string | undefined =>
+  index().byId.has(id) ? undefined : lastTitles.get(id.toLowerCase());
+
 const index = createRoot(() =>
   createMemo(() => {
     const byId = new Map<NoteId, TreeNode>();
     const byAddress = new Map<string, NoteId>();
     /** Each Zettelkasten note's parent in the address tree. */
     const parents = new Map<NoteId, TreeNode>();
+    /** Each sequence's first-level notes (`4.1`, `4.2`; not `4.1a`), by number. */
+    const sequences = new Map<number, TreeNode[]>();
     /** Notes in sidebar order, depth first. */
     const notes: TreeNode[] = [];
     const folders: FolderNode[] = [];
@@ -252,9 +316,10 @@ const index = createRoot(() =>
     const walkNotes = (nodes: TreeNode[], parent?: TreeNode) => {
       for (const node of nodes) {
         byId.set(node.id, node);
+        if (node.title) lastTitles.set(node.id.toLowerCase(), node.title);
         if (parent) parents.set(node.id, parent);
         notes.push(node);
-        if (node.address && !byAddress.has(node.address)) {
+        if (isNoteAddress(node.address) && !byAddress.has(node.address)) {
           byAddress.set(node.address, node.id);
         }
         walkNotes(node.children, node);
@@ -267,10 +332,33 @@ const index = createRoot(() =>
         folders.push(sub);
         walkFolder(sub);
       }
+      for (const section of folder.sections) walkNotes(section.notes);
       walkNotes(folder.notes);
+      if (folder.kind === 'zettelkasten') {
+        const roots = [
+          ...folder.sections.flatMap(s => s.notes),
+          ...folder.notes,
+        ];
+        for (const root of roots) {
+          const sequence = sequenceOf(root.address);
+          if (sequence === undefined) continue;
+          const list = sequences.get(sequence) ?? [];
+          list.push(root);
+          sequences.set(sequence, list);
+        }
+      }
     };
     walkFolder(tree());
-    return { byId, byAddress, parents, notes, folders, assets, zettelkasten };
+    return {
+      byId,
+      byAddress,
+      parents,
+      sequences,
+      notes,
+      folders,
+      assets,
+      zettelkasten,
+    };
   }),
 );
 
@@ -278,6 +366,37 @@ export const noteById = (id: NoteId) => index().byId.get(id);
 
 /** A Zettelkasten note's parent in the address tree (its nearest existing ancestor). */
 export const parentNote = (id: NoteId) => index().parents.get(id);
+
+const NOTE_ADDRESS = /^[1-9]\d*\.[1-9]\d*(?:[a-z]+[1-9]\d*)*[a-z]*$/;
+
+/** Whether `address` is a note's (`4.1`, `4.1a`), not a bare sequence number or invalid. */
+export const isNoteAddress = (address: string | null): address is string =>
+  !!address && NOTE_ADDRESS.test(address);
+
+/** The sequence of a note address: `4` for `4.2a`. */
+export function sequenceOf(address: string | null): number | undefined {
+  return isNoteAddress(address)
+    ? Number(address.slice(0, address.indexOf('.')))
+    : undefined;
+}
+
+/** The first-level notes of sequence `number` (`4.1`, `4.2`), in order. */
+export const sequenceNotes = (number: number) =>
+  index().sequences.get(number) ?? [];
+
+/** The Zettelkasten's sections in order. */
+export const sections = (): SectionNode[] => zettelkasten()?.sections ?? [];
+
+/** `4–5 Writing`, or `4 Writing` for one sequence. */
+export function sectionLabel(
+  section: Pick<SectionNode, 'first' | 'last' | 'name'>,
+): string {
+  const range =
+    section.first === section.last
+      ? `${section.first}`
+      : `${section.first}–${section.last}`;
+  return `${range} ${section.name}`;
+}
 
 /** Notes in sidebar order, for the quick switcher. */
 export const allNotes = () => index().notes;
@@ -311,6 +430,25 @@ export function resolveTarget(target: string): NoteId | undefined {
 export const sessionFor = (id: NoteId) => sessions.get(id);
 
 const notePath = (id: NoteId) => `/notes/${id}.typ`;
+
+/** Same pattern as the `wikilinks` show rule (`link_library`). */
+const WIKILINK = /\[\[([^[\]\n]+)\]\]/g;
+
+/** The targets `text` links to, as the show rule sees them: sorted, once each. */
+function linkTargets(text: string): string[] {
+  const targets = new Set<string>();
+  for (const match of text.matchAll(WIKILINK)) {
+    const target = match[1].split('|')[0].trim();
+    if (target) targets.add(target);
+  }
+  return [...targets].sort();
+}
+
+/**
+ * Resolves once the vault's shared files (links rule, preambles, theme,
+ * citations) have reached the compiler; notes compile only after that.
+ */
+let vaultSources: Promise<unknown> = Promise.resolve();
 /** Must match `sliver_vault::preview_main_path`. */
 const previewMainPath = (id: NoteId) => `/.sliver/view/${id}.typ`;
 
@@ -353,11 +491,39 @@ function createSession(id: NoteId): NoteSession {
   );
   let latestText: string | undefined;
 
+  // The note's link table covers only the targets its text links to, so it
+  // stays small whatever the vault's size; it's resent when they change.
+  let tableFor: string | undefined;
+  let tableTargets: string[] = [];
+  let tableSent: Promise<void> = Promise.resolve();
+  const [linksChanged, setLinksChanged] = createSignal(0);
+  const sendLinkTable = (text: string, force = false) => {
+    const targets = linkTargets(text);
+    const key = targets.join('\n');
+    if (!force && key === tableFor) return tableSent;
+    tableFor = key;
+    tableTargets = targets;
+    tableSent = tableSent
+      .then(async () => {
+        const former: Record<string, string> = {};
+        for (const target of targets) {
+          const title = formerTitle(target);
+          if (title) former[target] = title;
+        }
+        const table = await vault.linkTable(id, targets, former);
+        if (!disposed) await typst.setSource(table.path, table.text);
+      })
+      .catch(error => console.warn(`could not update ${id}'s links:`, error));
+    return tableSent;
+  };
+
   const text = (async () => {
     const [main, source] = await Promise.all([
       vault.previewMain(id),
       vault.readNote(id),
     ]);
+    latestText ??= source;
+    const table = sendLinkTable(source);
     // Checked after each step: a closed tab has already removed its files.
     if (disposed) return source;
     await typst.setPrefix(notePath(id), main.prefix);
@@ -371,6 +537,7 @@ function createSession(id: NoteId): NoteSession {
       visible: () => visibleNotes().has(id),
       anchor: () => anchor?.() ?? null,
       onResult: (r, compiledText, timing) => {
+        const applying = performance.now();
         setResult(r);
         if (r.pages) {
           // Bands sent before come back without SVG: take it from what's shown.
@@ -395,7 +562,13 @@ function createSession(id: NoteId): NoteSession {
           text: compiledText,
           diagnostics: r.diagnostics.filter(d => d.path === notePath(id)),
         });
-        recordCompile({ note: id, ...timing });
+        const domMs = performance.now() - applying;
+        recordCompile({
+          note: id,
+          ...timing,
+          domMs,
+          totalMs: timing.totalMs + domMs,
+        });
       },
       onError: error =>
         setResult({
@@ -407,8 +580,12 @@ function createSession(id: NoteId): NoteSession {
           loadingPackages: [],
           compileMs: 0,
           renderMs: 0,
+          backendMs: 0,
         }),
     });
+    await table;
+    await vaultSources;
+    if (disposed) return source;
     preview.update(source);
     return source;
   })();
@@ -436,9 +613,9 @@ function createSession(id: NoteId): NoteSession {
       if (next) saver.hold();
       setConflict(next);
     },
-    currentText: () => view?.state.doc.toString() ?? latestText ?? '',
-    loadFromDisk(next) {
-      this.replaceText(next);
+    currentText: () => (view && savedText(view.state)) ?? latestText ?? '',
+    async loadFromDisk(next) {
+      await this.replaceText(next);
       // The edit the replacement made goes nowhere: it's what's on disk.
       saver.cancel();
       setDirty(false);
@@ -448,7 +625,8 @@ function createSession(id: NoteId): NoteSession {
       if (!mainPath || !view) return;
       const found = await typst.jumpFromClick(mainPath, page, x, y);
       if (!found || found.path !== notePath(id) || !view) return;
-      const { line, column } = found.position;
+      // The compiler sees the file, where uuids stand for titles.
+      const { line, column } = fileToDocPosition(view.state, found.position);
       const doc = view.state.doc;
       if (line >= doc.lines) return;
       const at = Math.min(doc.line(line + 1).from + column, doc.length);
@@ -472,39 +650,47 @@ function createSession(id: NoteId): NoteSession {
       return typst.jumpFromCursor(mainPath, notePath(id), position);
     },
     edit(next) {
+      // Showing or hiding a link's uuid changes the editor, not the file.
+      if (next === latestText) return;
       latestText = next;
-      preview?.update(next);
+      // A new link target needs its table entry before the compile.
+      void sendLinkTable(next).then(() => preview?.update(next));
       saver.update(next);
       setDirty(true);
     },
     async flush() {
       await saver.flush();
     },
-    replaceText(next) {
+    async replaceText(next) {
       if (!view) return;
-      const current = view.state.doc.toString();
-      if (current === next) return;
-      let start = 0;
-      while (start < current.length && current[start] === next[start]) start++;
-      let end = 0;
-      while (
-        end < current.length - start &&
-        end < next.length - start &&
-        current[current.length - 1 - end] === next[next.length - 1 - end]
-      ) {
-        end++;
-      }
-      view.dispatch({
-        changes: {
-          from: start,
-          to: current.length - end,
-          insert: next.slice(start, next.length - end),
-        },
-      });
+      // Which `[[...]]` are links (not raw or comments), for showing uuids as titles.
+      const links = await vault.analyze(next).catch(() => null);
+      if (!view) return;
+      const spec = reloadSpec(
+        view.state,
+        next,
+        links?.links.map(l => ({ from: l.targetFrom, to: l.targetTo })),
+      );
+      if (spec) view.dispatch(spec);
     },
     shownView() {
       // Hidden tabs and reading view hide the editor with `display: none`.
       return view?.dom.offsetParent ? view : undefined;
+    },
+    retarget(from, to) {
+      if (!view) return;
+      const links = linksIn(view.state).filter(link =>
+        sameTarget(link.target, from),
+      );
+      if (links.length > 0) {
+        view.dispatch(retargetLinks(view.state, links, to));
+      }
+    },
+    sourceTarget(target) {
+      if (!view) return undefined;
+      return linksIn(view.state)
+        .find(link => sameTarget(link.target, target))
+        ?.target.trim();
     },
     insert(text) {
       if (!view) return;
@@ -516,6 +702,12 @@ function createSession(id: NoteId): NoteSession {
     },
     mainPath: () => mainPath,
     reloadMain,
+    refreshLinks() {
+      return sendLinkTable(this.currentText(), true);
+    },
+    linkTargets: () => tableTargets,
+    linksChanged,
+    markLinksChanged: () => setLinksChanged(n => n + 1),
     refresh() {
       preview?.refresh();
     },
@@ -524,11 +716,12 @@ function createSession(id: NoteId): NoteSession {
       if (discard) saver.cancel();
       else void saver.flush();
       preview?.dispose();
-      // Everything the worker holds for this note: its text, its wrapper
+      // Everything the compiler holds for this note: its text, its wrapper
       // (with the last layout and rendered page hashes) and its page width.
       void typst.removeSource(notePath(id));
       void typst.removeSource(previewMainPath(id));
       void typst.removeSource(pagePath(id));
+      void typst.removeSource(`/.sliver/links/${id}.typ`);
       pageWidths.delete(id);
       stalePreviews.delete(id);
     },
@@ -554,13 +747,22 @@ export async function openVault(path: string, create = false) {
   const nodes = create ? await vault.create(path) : await vault.open(path);
   setTree(nodes);
   await loadSettings();
-  await loadLinks();
-  await loadPreambles();
-  await sendTheme();
-  await loadCitations();
+  // Fetched together; open notes load meanwhile and compile once these are in.
+  const shared = Promise.all([
+    loadLinks(),
+    loadPreambles(),
+    sendTheme(),
+    loadCitations(),
+  ]);
+  vaultSources = shared.catch(() => undefined);
   await restoreWorkspace();
   // Last, so the workspace mounts with the restored tabs and pane sizes.
   setVaultRoot(path);
+  await shared;
+  // Off the startup path: checks that only matter if something's wrong.
+  void firstPreviews(3000)
+    .then(checkDeferredReferences)
+    .catch(error => console.warn('could not check references:', error));
   // Picks up edits made in Zotero; previews use the vault's copy meanwhile.
   void syncReferences(true).catch(error =>
     console.warn('could not refresh references:', error),
@@ -584,12 +786,64 @@ async function closeVault() {
   setVaultRoot(null);
 }
 
-async function refreshTree() {
-  setTree(await vault.tree());
-  await loadLinks();
+/**
+ * What a link to `target` shows with `notes` as the tree: the note it
+ * resolves to (an address, else a uuid) with its title and address. A
+ * title target never resolves.
+ */
+function linkState(notes: ReturnType<typeof index>, target: string): string {
+  const id = notes.byAddress.get(target) ?? target.toLowerCase();
+  const note = notes.byId.get(id);
+  return note ? `${note.id}\u0000${note.title}\u0000${note.address}` : '';
 }
 
-/** Regenerates `links.typ` so open previews show current titles. */
+/** Open notes whose links show something else in `after` than in `before`. */
+function linksChangedIn(
+  before: ReturnType<typeof index>,
+  after: ReturnType<typeof index>,
+): NoteSession[] {
+  return [...sessions.values()].filter(session =>
+    session
+      .linkTargets()
+      .some(target => linkState(before, target) !== linkState(after, target)),
+  );
+}
+
+async function fetchTree() {
+  const before = index();
+  setTree(await vault.tree());
+  // Only notes whose links now show something else need a new link table
+  // and a recompile (and their editors a redraw of their links).
+  const changed = linksChangedIn(before, index());
+  await Promise.all(changed.map(s => s.refreshLinks()));
+  for (const session of changed) session.markLinksChanged();
+  invalidatePreviews(changed);
+}
+
+let treeFetch: Promise<void> | null = null;
+let treeFetchAgain: Promise<void> | null = null;
+
+/**
+ * Refetches the tree. Calls while a fetch runs share one more fetch after
+ * it (which sees their changes), so a burst of saves costs two at most.
+ */
+function refreshTree(): Promise<void> {
+  if (!treeFetch) {
+    treeFetch = fetchTree().finally(() => {
+      treeFetch = null;
+    });
+    return treeFetch;
+  }
+  treeFetchAgain ??= treeFetch
+    .catch(() => undefined)
+    .then(() => {
+      treeFetchAgain = null;
+      return refreshTree();
+    });
+  return treeFetchAgain;
+}
+
+/** Regenerates `links.typ` after the link display setting changed. */
 export async function refreshLinks() {
   if (vaultRoot()) await loadLinks();
 }
@@ -780,6 +1034,25 @@ export async function navigate(paneId: string, id: NoteId) {
       found.asset = undefined;
     }
   });
+}
+
+/**
+ * The usual way to open a note (sidebar, note switcher): in the focused
+ * pane's current tab, so jumping around doesn't pile up tabs. A modifier
+ * opens a new tab instead (`openNote`).
+ */
+export const openNoteHere = (id: NoteId) => navigate(focusedPane().id, id);
+
+/**
+ * Follows a link from note `source` to `id`: in a new tab, or in place of
+ * the note in the pane showing `source` (not necessarily the focused one,
+ * e.g. from the global preview column).
+ */
+export function followFrom(source: NoteId, id: NoteId, newTab: boolean) {
+  if (newTab) return openNote(id);
+  const tab = tabOf(source);
+  const pane = tab && paneOfTab(layout.root, tab.key);
+  return navigate(pane?.id ?? focusedPane().id, id);
 }
 
 export function newTab() {
@@ -1048,21 +1321,68 @@ async function restoreWorkspace() {
 
 // --- notes ---
 
+/**
+ * `text` with curly quotes made straight. The preview sees a link's text
+ * after Typst turned `'` and `"` into smart quotes; the source has them
+ * straight, and titles may have either.
+ */
+export const plainQuotes = (text: string) =>
+  text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"');
+
+/** A title as links match it: trimmed, case-insensitive, quotes straight. */
+export const titleKey = (title: string) =>
+  plainQuotes(title.trim()).toLowerCase();
+
+/**
+ * Why a note can't be titled `title` (another note in the vault has that
+ * title: a title names exactly one note), or null. `except` is the note
+ * being renamed. The backend refuses the same.
+ */
+export function titleClash(title: string, except?: NoteId): string | null {
+  const key = titleKey(title);
+  if (!key) return null;
+  const other = allNotes().find(
+    n => n.id !== except && n.title && titleKey(n.title) === key,
+  );
+  if (!other) return null;
+  const place = other.folder ? `"${other.folder}"` : 'the vault root';
+  return `A note titled "${title.trim()}" is already in ${place}.`;
+}
+
+const sameTarget = (a: string, b: string) =>
+  plainQuotes(a.trim()) === plainQuotes(b.trim());
+
+/** Where new notes' editors put the cursor, as an offset from the end of the text. */
+const startCursors = new Map<NoteId, number>();
+
+/** Where note `id`'s new editor puts its cursor, once (from its template). */
+export function takeStartCursor(id: NoteId, text: string): number | undefined {
+  const fromEnd = startCursors.get(id);
+  startCursors.delete(id);
+  return fromEnd === undefined ? undefined : Math.max(0, text.length - fromEnd);
+}
+
 export async function createNote(
   placement: Placement,
   title: string,
   kind?: string,
+  open = true,
 ) {
   const template = await vault.noteTemplate(kind);
-  const body = expandTemplate(template, { title, now: new Date() });
+  const { body, cursor } = expandTemplate(template, {
+    title,
+    now: new Date(),
+  });
   const note = await vault.createNote(
     placement,
     title || undefined,
     kind,
     body,
   );
+  // The body ends the note's text (see `create_note_of_kind`).
+  if (cursor !== null) startCursors.set(note.id, body.length - cursor);
   await refreshTree();
-  openNote(note.id);
+  if (open) openNote(note.id);
   return note;
 }
 
@@ -1070,22 +1390,26 @@ export async function renameNote(id: NoteId, title: string) {
   const session = sessions.get(id);
   await session?.flush();
   await vault.renameNote(id, title);
-  if (session) session.replaceText(await vault.readNote(id));
+  if (session) await session.replaceText(await vault.readNote(id));
   await refreshTree();
 }
 
-export async function deleteNote(id: NoteId) {
-  const tab = tabOf(id);
-  if (tab) await closeTab(tab.key, true);
-  await vault.deleteNote(id, settings.deleteMode);
-  await refreshTree();
+export async function deleteNotes(ids: NoteId[]) {
+  if (ids.length === 0) return;
+  for (const id of ids) {
+    const tab = tabOf(id);
+    if (tab) await closeTab(tab.key, true);
+  }
+  // Links to the notes get rewritten in any note.
+  await flushAll();
+  await reloadChanged(await vault.deleteNotes(ids, settings.deleteMode));
 }
 
 /** Reloads notes whose files the backend rewrote into their open editors. */
 async function reloadChanged(ids: NoteId[]) {
   for (const id of ids) {
     const session = sessions.get(id);
-    if (session) session.replaceText(await vault.readNote(id));
+    if (session) await session.replaceText(await vault.readNote(id));
   }
   await refreshTree();
 }
@@ -1097,6 +1421,23 @@ async function reloadChanged(ids: NoteId[]) {
 export async function moveToAddress(id: NoteId, placement: Placement) {
   await flushAll();
   await reloadChanged(await vault.applyMove(id, placement));
+}
+
+/** Names the sequences `first` to `last` as a section. */
+export async function markSection(first: number, last: number, name: string) {
+  await vault.markSection(first, last, name);
+  await refreshTree();
+}
+
+export async function renameSection(first: number, name: string) {
+  await vault.renameSection(first, name);
+  await refreshTree();
+}
+
+/** Removes a section's heading; its notes stay. */
+export async function unmarkSection(first: number) {
+  await vault.unmarkSection(first);
+  await refreshTree();
 }
 
 export async function moveToFolder(id: NoteId, folder: string) {
@@ -1113,8 +1454,20 @@ export async function createFolder(parent: string, name: string) {
 
 export async function renameFolder(path: string, name: string) {
   await flushAll();
-  const moved = await vault.renameFolder(path, name);
+  await afterFolderMove(path, await vault.renameFolder(path, name));
+}
+
+/** Moves folder `path` into `parent` (`""` for the root). */
+export async function moveFolder(path: string, parent: string) {
+  if (parentFolder(path) === parent) return;
+  await flushAll();
+  await afterFolderMove(path, await vault.moveFolder(path, parent));
+}
+
+/** Points settings and folded folders under `path` at its new place. */
+async function afterFolderMove(path: string, moved: Moved) {
   const renamed = moved.path;
+  if (renamed === path) return refreshTree();
   for (const key of ['newNoteFolder', 'attachmentFolder'] as const) {
     const target = settings[key];
     if (target === path || target.startsWith(`${path}/`)) {
@@ -1142,10 +1495,11 @@ export async function deleteFolder(path: string) {
       await closeTab(tab.key, true);
     }
   }
-  await vault.deleteFolder(path, settings.deleteMode);
+  await flushAll();
+  const changed = await vault.deleteFolder(path, settings.deleteMode);
   setCollapsedFolders(list => list.filter(p => !inside(p)));
   persistWorkspace();
-  await refreshTree();
+  await reloadChanged(changed);
 }
 
 export async function setZettelkasten(path: string) {
@@ -1250,7 +1604,7 @@ export async function setNoteKind(id: NoteId, kind: string | null) {
   const session = sessions.get(id);
   await session?.flush();
   await vault.setKind(id, kind);
-  if (session) session.replaceText(await vault.readNote(id));
+  if (session) await session.replaceText(await vault.readNote(id));
   await refreshTree();
   await session?.reloadMain();
   invalidatePreviews();
@@ -1373,8 +1727,20 @@ async function afterPathMove(from: string, moved: Moved) {
   await reloadChanged(moved.changed);
   await loadPreambles();
   await reloadMains();
-  await typst.forgetFile(`/${from}`);
-  await typst.forgetFile(`/${moved.path}`);
+  await forgetAssets([from, moved.path]);
+}
+
+/**
+ * Makes the compiler forget `paths` (vault paths), so they're read again
+ * (or found missing), and recompiles the previews that read them.
+ */
+async function forgetAssets(paths: string[]) {
+  const mains = new Set(
+    (await Promise.all(paths.map(path => typst.forgetFile(`/${path}`)))).flat(),
+  );
+  invalidatePreviews(
+    [...sessions.values()].filter(s => mains.has(s.mainPath() ?? '')),
+  );
 }
 
 export async function renameAsset(path: string, name: string) {
@@ -1392,7 +1758,7 @@ export async function deleteAsset(path: string) {
   const tab = assetTab(path);
   if (tab) await closeTab(tab.key);
   await vault.deleteAsset(path, settings.deleteMode);
-  await typst.forgetFile(`/${path}`);
+  await forgetAssets([path]);
   await refreshTree();
 }
 
@@ -1402,6 +1768,7 @@ export async function importAssets(folder: string, sources: string[]) {
   for (const source of sources)
     added.push(await vault.importAsset(folder, source));
   setFolderCollapsed(folder, false);
+  await forgetAssets(added);
   await refreshTree();
   return added;
 }
@@ -1425,6 +1792,7 @@ export async function saveAttachment(
   data: ArrayBuffer,
 ) {
   const path = await vault.addAsset(attachmentFolder(id), name, data);
+  await forgetAssets([path]);
   await refreshTree();
   return path;
 }
@@ -1460,7 +1828,7 @@ export async function applyDiskChanges(changes: DiskChanges) {
     const session = sessions.get(id);
     if (!session) continue;
     if (session.dirty()) session.setConflict('changed');
-    else session.loadFromDisk(await vault.readNote(id));
+    else await session.loadFromDisk(await vault.readNote(id));
   }
   for (const id of changes.removed) {
     const session = sessions.get(id);
@@ -1501,7 +1869,7 @@ export async function resolveConflict(id: NoteId, keep: 'mine' | 'disk') {
       const tab = tabOf(id);
       if (tab) await closeTab(tab.key, true);
     } else {
-      session.loadFromDisk(await vault.readNote(id));
+      await session.loadFromDisk(await vault.readNote(id));
     }
     return;
   }

@@ -1,5 +1,6 @@
 import { Splitter, useSplitter } from '@ark-ui/solid';
 import { createEffect, For, type JSX, Show } from 'solid-js';
+import { followBrokenLink } from '../commands/app';
 import { keybindingFor } from '../commands/registry';
 import {
   citationsAt,
@@ -10,13 +11,13 @@ import { type LayoutNode, paneNote, type Split } from '../state/layout';
 import {
   focusedPane,
   focusPane,
+  followFrom,
   globalPreviewNote,
   globalShown,
   globalSizes,
   layout,
   noteById,
   noteLabel,
-  openNote,
   type Pane,
   paneSizes,
   previewFocus,
@@ -177,7 +178,8 @@ function NotePreview(props: { note: NoteId; jumps?: () => boolean }) {
       onAnchor={get => session()?.setAnchor(get)}
       diagnostics={session()?.result()?.diagnostics ?? []}
       loadingPackages={session()?.result()?.loadingPackages ?? []}
-      onOpenNote={openNote}
+      onOpenNote={(id, newTab) => void followFrom(props.note, id, newTab)}
+      onBrokenLink={target => void followBrokenLink(props.note, target)}
       citationsAt={(page, box) => citationsAt(props.note, page, box)}
       onCitation={keys => void openCitations(keys)}
       citationCard={keys => citationCard(props.note, keys)}

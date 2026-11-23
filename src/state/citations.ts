@@ -81,10 +81,11 @@ async function sendLibrary() {
 
 /** Hands the custom CSL styles to the compiler. */
 async function loadStyles() {
-  if (builtinStyles().length === 0) {
-    setBuiltinStyles(await typst.citationStyles());
-  }
-  const styles = await vault.citationStyles();
+  const [builtin, styles] = await Promise.all([
+    builtinStyles().length === 0 ? typst.citationStyles() : builtinStyles(),
+    vault.citationStyles(),
+  ]);
+  setBuiltinStyles(builtin);
   for (const old of customStyles()) {
     if (!styles.some(s => s.path === old.path)) {
       await typst.removeSource(old.path);
@@ -96,31 +97,61 @@ async function loadStyles() {
 
 /**
  * Hands `references.bib` and the citation library to the compiler. A file
- * Typst can't read would fail every preview, so it's checked first and left
- * out (every citation then shows as unknown) if it doesn't parse.
+ * Typst can't read would fail every preview, so it's checked and left out
+ * (every citation then shows as unknown) if it doesn't parse. At startup
+ * (`deferCheck`) the file is assumed fine and checked once the first
+ * previews are in, so the check doesn't hold them up.
  */
-async function loadReferences() {
-  const references = await vault.references();
-  await typst.setSource(references.path, references.text);
+async function loadReferences(
+  references?: Awaited<ReturnType<typeof vault.references>>,
+  deferCheck = false,
+) {
+  const loaded = references ?? (await vault.references());
+  await typst.setSource(loaded.path, loaded.text);
+  setEntries(new Map(loaded.entries.map(e => [e.key, e.title])));
+  rendered.clear();
+  if (deferCheck) {
+    enabled = true;
+    setReferencesError(null);
+    await sendLibrary();
+    deferredCheck = loaded.path;
+  } else {
+    await checkReferences(loaded.path, false);
+    await sendLibrary();
+  }
+}
+
+let deferredCheck: string | null = null;
+
+/** Runs the check `loadCitations` put off; call once the first previews are in. */
+export async function checkDeferredReferences() {
+  const path = deferredCheck;
+  deferredCheck = null;
+  if (path && active) await checkReferences(path);
+}
+
+/** Whether `references.bib` parses; turns citations off if not (resending the library when `resend`). */
+async function checkReferences(path: string, resend = true) {
   const check = await typst.standalone(
     CHECK_PATH,
-    `#bibliography(${typstString(references.path)})\n`,
+    `#bibliography(${typstString(path)})\n`,
     false,
   );
-  enabled = check.errors.length === 0;
+  const ok = check.errors.length === 0;
   setReferencesError(
-    enabled ? null : `references.bib can't be read: ${check.errors[0]}`,
+    ok ? null : `references.bib can't be read: ${check.errors[0]}`,
   );
-  setEntries(new Map(references.entries.map(e => [e.key, e.title])));
+  if (ok === enabled) return;
+  enabled = ok;
   rendered.clear();
-  await sendLibrary();
+  if (resend) await sendLibrary();
 }
 
 /** Loads the open vault's references and styles; call after the theme is sent. */
 export async function loadCitations() {
   active = true;
-  await loadStyles();
-  await loadReferences();
+  const [, references] = await Promise.all([loadStyles(), vault.references()]);
+  await loadReferences(references, true);
 }
 
 export function unloadCitations() {

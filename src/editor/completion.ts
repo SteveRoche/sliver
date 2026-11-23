@@ -3,9 +3,21 @@ import {
   type Completion,
   type CompletionContext,
   type CompletionResult,
+  completionStatus,
+  currentCompletions,
+  pickedCompletion,
+  selectedCompletionIndex,
   snippet,
 } from '@codemirror/autocomplete';
-import type { Extension } from '@codemirror/state';
+import { isolateHistory } from '@codemirror/commands';
+import {
+  EditorState,
+  type Extension,
+  StateEffect,
+  StateField,
+  type TransactionSpec,
+} from '@codemirror/state';
+import { type EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import ALargeSmall from 'lucide-solid/icons/a-large-small';
 import Code from 'lucide-solid/icons/code';
 import File from 'lucide-solid/icons/file';
@@ -13,12 +25,14 @@ import Link from 'lucide-solid/icons/link';
 import Omega from 'lucide-solid/icons/omega';
 import Package from 'lucide-solid/icons/package';
 import Pi from 'lucide-solid/icons/pi';
+import Plus from 'lucide-solid/icons/plus';
 import Quote from 'lucide-solid/icons/quote';
 import SquareFunction from 'lucide-solid/icons/square-function';
 import Tag from 'lucide-solid/icons/tag';
 import TypeIcon from 'lucide-solid/icons/type';
 import Variable from 'lucide-solid/icons/variable';
 import { type Component, createRoot } from 'solid-js';
+import { overlayScrollbar } from '../components/scrollbars';
 import type { CompletionItem, Completions, Position } from '../typst/protocol';
 import { inRaw } from './analysis';
 
@@ -38,6 +52,11 @@ export interface CompletionOptions {
   /** Notes `[[` can link to. */
   notes(): LinkCandidate[];
   /**
+   * Creates a note for a link being typed (`query` is the text after `[[`),
+   * resolving to its link target, or null when cancelled.
+   */
+  newNote?(query: string): Promise<string | null>;
+  /**
    * Zotero items matching what follows an `@`, for citing what
    * `references.bib` doesn't have yet; none while Zotero isn't running.
    */
@@ -53,21 +72,183 @@ export interface CompletionOptions {
 /** An unfinished `[[target` before the cursor. */
 const OPEN_LINK = /\[\[[^[\]|\n]*/;
 
+interface Pending {
+  id: number;
+  from: number;
+  to: number;
+}
+
+const addPending = StateEffect.define<Pending>();
+const removePending = StateEffect.define<number>();
+let pendingIds = 0;
+
+/** Unfinished links whose note is being created, kept in step with edits. */
+const pendingLinks = StateField.define<Pending[]>({
+  create: () => [],
+  update(value, tr) {
+    let next = tr.docChanged
+      ? value.map(p => ({
+          id: p.id,
+          from: tr.changes.mapPos(p.from, 1),
+          to: tr.changes.mapPos(p.to, -1),
+        }))
+      : value;
+    for (const effect of tr.effects) {
+      if (effect.is(addPending)) next = [...next, effect.value];
+      if (effect.is(removePending)) {
+        next = next.filter(p => p.id !== effect.value);
+      }
+    }
+    return next;
+  },
+});
+
+/**
+ * Replaces the unfinished link `[[query` (and the rest of its target, and a `]]` after it) at
+ * `from`..`to` with a link to a new note, once `create` has made it.
+ */
+async function linkToNewNote(
+  view: EditorView,
+  create: (query: string) => Promise<string | null>,
+  completion: Completion,
+  from: number,
+  to: number,
+) {
+  const query = view.state.sliceDoc(from, to);
+  const rest = linkRest(view.state, to);
+  // Up to the `|` before custom text, else past the `]]`.
+  const end = rest.close === null ? to : rest.bar ? rest.end : rest.close;
+  const id = ++pendingIds;
+  view.dispatch({
+    effects: addPending.of({ id, from: from - 2, to: end }),
+    annotations: pickedCompletion.of(completion),
+  });
+  const target = await create(query).catch(() => null);
+  const pending = view.state.field(pendingLinks).find(p => p.id === id);
+  view.dispatch({ effects: removePending.of(id) });
+  // Unless the link's text was deleted meanwhile.
+  if (target === null || !pending || pending.to - pending.from < 2) return;
+  // The pending range ends where the target's replacement does.
+  completeLink(view, target, pending.from + 2, pending.to, undefined);
+  view.focus();
+}
+
+/**
+ * What follows the cursor in a link being completed: the rest of its
+ * target, which the completion replaces too (`end`), whether custom text
+ * comes next (`bar`), and where the link's `]]` ends (`close`), or null
+ * when the link isn't closed: then `end` is the cursor.
+ */
+function linkRest(state: EditorState, at: number) {
+  const line = state.doc.lineAt(at);
+  const rest = state.sliceDoc(at, line.to);
+  const word = /^[^[\]|\n]*/.exec(rest)?.[0] ?? '';
+  const closing = /^(?:\|[^[\]\n]*)?\]\]/.exec(rest.slice(word.length));
+  if (!closing) return { end: at, bar: false, close: null };
+  return {
+    end: at + word.length,
+    bar: closing[0].startsWith('|'),
+    close: at + word.length + closing[0].length,
+  };
+}
+
+/**
+ * Puts `target` into the link being completed: the text after `[[` at
+ * `from` up to `to` and the rest of the target, closing the link if it
+ * isn't. One undoable step; a uuid shows as its note's title right away
+ * (the incoming filter in `linkView.ts`).
+ */
+function completeLink(
+  view: EditorView,
+  target: string,
+  from: number,
+  to: number,
+  annotations: TransactionSpec['annotations'],
+) {
+  const { state } = view;
+  const rest = linkRest(state, to);
+  const changes = state.changes({
+    from,
+    to: rest.end,
+    insert: rest.close === null ? `${target}]]` : target,
+  });
+  const end =
+    rest.close === null ? from + target.length + 2 : changes.mapPos(rest.close);
+  view.dispatch({
+    changes,
+    // Past the link's `]]`, or before its custom text.
+    selection: { anchor: rest.bar ? from + target.length : end },
+    annotations,
+    userEvent: 'input.complete',
+  });
+}
+
+const NEW_NOTE_LABEL = 'New note';
+
 function wikilinkSource(options: CompletionOptions) {
+  const create = options.newNote;
+  const newNote = (query: string): Completion | null =>
+    create
+      ? {
+          // Labelled with the query itself so the filter always keeps it.
+          label: query,
+          displayLabel: 'New note',
+          type: 'newNote',
+          // Below every match.
+          boost: -1e6,
+          apply: (view, completion, from, to) =>
+            void linkToNewNote(view, create, completion, from, to),
+        }
+      : null;
+  const update = (
+    current: CompletionResult,
+    from: number,
+    _to: number,
+    ctx: CompletionContext,
+  ): CompletionResult | null => {
+    const open = ctx.matchBefore(OPEN_LINK);
+    if (!open || open.from + 2 !== from) return null;
+    const option = newNote(open.text.slice(2));
+    if (!option) return { ...current, from };
+    return {
+      ...current,
+      from,
+      options: [...current.options.slice(0, -1), option],
+    };
+  };
   return (ctx: CompletionContext): CompletionResult | null => {
     const open = ctx.matchBefore(OPEN_LINK);
     if (!open || inRaw(ctx.state, open.from)) return null;
-    const closed = ctx.state.sliceDoc(ctx.pos, ctx.pos + 2) === ']]';
-    return {
-      from: open.from + 2,
-      options: options.notes().map(note => ({
-        label: note.label,
-        type: 'wikilink',
-        apply: closed ? note.target : `${note.target}]]`,
-      })),
-      validFor: /^[^[\]|\n]*$/,
-    };
+    const notes: Completion[] = options.notes().map(note => ({
+      label: note.label,
+      type: 'wikilink',
+      apply: (view, completion, from, to) =>
+        completeLink(
+          view,
+          note.target,
+          from,
+          to,
+          pickedCompletion.of(completion),
+        ),
+    }));
+    const option = newNote(open.text.slice(2));
+    if (option) notes.push(option);
+    // No `validFor`, since the create option's label must follow the query,
+    // but `update` keeps the result while typing: a source asking again
+    // disables the menu meanwhile, and Enter would type a newline.
+    return { from: open.from + 2, options: notes, update };
   };
+}
+
+/**
+ * Inside a link's target, the other sources hold an empty result while it's
+ * typed instead of asking again on every key (see `wikilinkSource`).
+ */
+function quietInLink(ctx: CompletionContext): CompletionResult | null {
+  const open = ctx.matchBefore(OPEN_LINK);
+  return open
+    ? { from: open.from + 2, options: [], validFor: /^[^[\]|\n]*$/ }
+    : null;
 }
 
 /** An unfinished `@key` before the cursor (not after a word: `a@b` is text). */
@@ -78,6 +259,8 @@ const MIN_QUERY = 2;
 
 function zoteroSource(options: CompletionOptions) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
+    const quiet = quietInLink(ctx);
+    if (quiet) return quiet;
     const match = ctx.matchBefore(OPEN_CITATION);
     if (!match || !options.zotero) return null;
     const at = match.from + match.text.indexOf('@');
@@ -101,7 +284,7 @@ function zoteroSource(options: CompletionOptions) {
   };
 }
 
-type Kind = CompletionItem['kind'] | 'wikilink' | 'citation';
+type Kind = CompletionItem['kind'] | 'wikilink' | 'newNote' | 'citation';
 
 const ICONS: Record<Kind, Component<{ size?: number }>> = {
   syntax: Code,
@@ -115,6 +298,7 @@ const ICONS: Record<Kind, Component<{ size?: number }>> = {
   font: ALargeSmall,
   symbol: Omega,
   wikilink: Link,
+  newNote: Plus,
   citation: Quote,
 };
 
@@ -155,7 +339,8 @@ const toSnippet = (apply: string) =>
 
 function typstSource(options: CompletionOptions) {
   return async (ctx: CompletionContext): Promise<CompletionResult | null> => {
-    if (ctx.matchBefore(OPEN_LINK)) return null;
+    const quiet = quietInLink(ctx);
+    if (quiet) return quiet;
     const line = ctx.state.doc.lineAt(ctx.pos);
     const found = await options.typst(
       ctx.state.doc.toString(),
@@ -182,18 +367,120 @@ function typstSource(options: CompletionOptions) {
   };
 }
 
+const isNewNote = (completion: Completion | undefined) =>
+  completion?.type === 'newNote';
+
+/** The `[[` menu: its last option is the one to create a note. */
+const linkMenu = (state: EditorState) => {
+  const options = currentCompletions(state);
+  return isNewNote(options[options.length - 1]);
+};
+
+function newNoteFooter(): HTMLLIElement {
+  const li = document.createElement('li');
+  li.className = 'cm-new-note-footer';
+  li.setAttribute('role', 'option');
+  const icon = iconColumn.render({ label: '', type: 'newNote' });
+  if (icon) li.appendChild(icon);
+  const label = li.appendChild(document.createElement('span'));
+  label.className = 'cm-completionLabel';
+  label.textContent = NEW_NOTE_LABEL;
+  return li;
+}
+
+/**
+ * Gives the open menu's list an overlay scrollbar, and pins the `[[` menu's
+ * create option below it, outside the scrolling list: CodeMirror renders
+ * only a window of the options, so its own row for that option (hidden) is
+ * often not in the DOM. The footer takes that option's id, which is how
+ * CodeMirror's own mousedown handler finds what was clicked.
+ */
+const menuChrome = ViewPlugin.fromClass(
+  class {
+    list: HTMLElement | null = null;
+    detachScrollbar = () => {};
+    footer: HTMLLIElement | null = null;
+
+    constructor(readonly view: EditorView) {}
+
+    update(update: ViewUpdate) {
+      if (
+        completionStatus(update.state) === null &&
+        completionStatus(update.startState) === null
+      ) {
+        return;
+      }
+      // After the tooltip has replaced its list for this update.
+      this.view.requestMeasure({
+        key: this,
+        read: () => null,
+        write: () => this.sync(),
+      });
+    }
+
+    sync() {
+      const id = this.view.contentDOM.getAttribute('aria-controls');
+      const list = id ? document.getElementById(id) : null;
+      if (list !== this.list) {
+        this.detachScrollbar();
+        this.detachScrollbar = list ? overlayScrollbar(list) : () => {};
+        this.list = list;
+      }
+      const state = this.view.state;
+      const index = currentCompletions(state).length - 1;
+      if (!list || !linkMenu(state)) {
+        this.footer?.remove();
+        return;
+      }
+      // Without an id CodeMirror skips the hidden row, so never scrolls to it.
+      list.querySelector('.cm-new-note-option')?.removeAttribute('id');
+      this.footer ??= newNoteFooter();
+      this.footer.id = `${id}-${index}`;
+      this.footer.toggleAttribute(
+        'aria-selected',
+        selectedCompletionIndex(state) === index,
+      );
+      if (list.nextElementSibling !== this.footer) list.after(this.footer);
+    }
+
+    destroy() {
+      this.detachScrollbar();
+      this.footer?.remove();
+    }
+  },
+);
+
+/**
+ * Every accepted completion (Typst's, snippets, wikilinks) is an undo step
+ * of its own, in Vim mode too: history would otherwise join text typed
+ * right after it, so one undo took both.
+ */
+const ownUndoStep = EditorState.transactionExtender.of(tr =>
+  tr.isUserEvent('input.complete')
+    ? { annotations: isolateHistory.of('full') }
+    : null,
+);
+
 /**
  * Autocomplete for wikilink targets after `[[`, for Typst itself, and for
  * citation keys from the Zotero library after `@`.
  */
 export function completion(options: CompletionOptions): Extension {
-  return autocompletion({
-    override: [
-      wikilinkSource(options),
-      typstSource(options),
-      zoteroSource(options),
-    ],
-    icons: false,
-    addToOptions: [iconColumn],
-  });
+  return [
+    pendingLinks,
+    ownUndoStep,
+    menuChrome,
+    autocompletion({
+      override: [
+        wikilinkSource(options),
+        typstSource(options),
+        zoteroSource(options),
+      ],
+      icons: false,
+      addToOptions: [iconColumn],
+      tooltipClass: state => (linkMenu(state) ? 'cm-link-menu' : ''),
+      optionClass: completion =>
+        isNewNote(completion) ? 'cm-new-note-option' : '',
+    }),
+  ];
 }

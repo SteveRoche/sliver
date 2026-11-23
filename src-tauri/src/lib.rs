@@ -1,7 +1,9 @@
 mod commands;
+mod compiler;
 #[cfg(target_os = "macos")]
 mod menu;
 mod state;
+mod sync;
 mod watch;
 mod window;
 mod zotero;
@@ -20,9 +22,31 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(commands::OpenVault(Mutex::new(None)))
+        .manage(compiler::Compiler::default())
         .manage(watch::VaultWatcher::default())
-        .setup(|app| Ok(window::create(app)?))
+        .setup(|app| {
+            compiler::warm_up(app.handle());
+            sync::init(app.handle());
+            Ok(window::create(app)?)
+        })
         .invoke_handler(tauri::generate_handler![
+            compiler::typst_set_source,
+            compiler::typst_set_prefix,
+            compiler::typst_remove_source,
+            compiler::typst_affected_mains,
+            compiler::typst_forget_file,
+            compiler::typst_add_package,
+            compiler::typst_has_package,
+            compiler::typst_compile,
+            compiler::typst_complete,
+            compiler::typst_tooltip,
+            compiler::typst_signature,
+            compiler::typst_jump_from_click,
+            compiler::typst_jump_from_cursor,
+            compiler::typst_metadata_text,
+            compiler::typst_standalone,
+            compiler::typst_citation_marks,
+            compiler::typst_citation_styles,
             commands::create_vault,
             commands::open_vault,
             commands::last_vault,
@@ -32,15 +56,22 @@ pub fn run() {
             commands::write_note,
             commands::rename_note,
             commands::delete_note,
+            commands::delete_notes,
             commands::create_folder,
             commands::rename_folder,
+            commands::move_folder,
             commands::delete_folder,
             commands::set_zettelkasten,
             commands::move_to_folder,
             commands::plan_move,
+            commands::place_for_address,
+            commands::mark_section,
+            commands::rename_section,
+            commands::unmark_section,
             commands::apply_move,
             commands::backlinks,
             commands::link_library,
+            commands::link_table,
             commands::preview_main,
             commands::default_text,
             commands::list_templates,
@@ -79,6 +110,14 @@ pub fn run() {
             commands::open_asset,
             commands::open_url,
             commands::restore_note,
+            sync::sync_available,
+            sync::sync_status,
+            sync::sync_now,
+            sync::sync_pair_start,
+            sync::sync_pair_cancel,
+            sync::sync_join,
+            sync::sync_remove_device,
+            sync::sync_set_device_name,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

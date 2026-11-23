@@ -9,11 +9,10 @@
     "build": "vite build",
     "serve": "vite preview",
     "tauri": "tauri",
-    "build:wasm": "cargo build -p sliver-typst --target wasm32-unknown-unknown --profile wasm && wasm-bindgen --target web --weak-refs --out-dir src/typst/pkg target/wasm32-unknown-unknown/wasm/sliver_typst.wasm",
     "format": "biome format --write && cargo fmt --all",
-    "lint": "pnpm build:wasm && biome lint && tsc --noEmit && cargo clippy --workspace --all-targets -- -D warnings",
+    "lint": "biome lint && tsc --noEmit && cargo clippy --workspace --all-targets -- -D warnings",
     "test": "cargo test --workspace",
-    "check": "pnpm build:wasm && biome check && tsc --noEmit && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    "check": "biome check && tsc --noEmit && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "license": "MIT",
   "dependencies": {
